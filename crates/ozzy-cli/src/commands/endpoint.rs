@@ -1,20 +1,46 @@
 use anyhow::Result;
 use ozzy_core::project::{Endpoint, PipelineEdge, PipelineNode, SourceType};
 use ozzy_core::{commit, schema, Project};
+use std::collections::HashMap;
 use std::fs;
 
-pub async fn create(name: &str, input: &str, transforms: &[String]) -> Result<()> {
+/// Create an endpoint with multi-input support.
+/// inputs is a list of (input_name, data_source_name) pairs.
+pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[String]) -> Result<()> {
     let mut project = Project::find_current()?;
 
-    // Verify input data source exists
+    if inputs.is_empty() {
+        anyhow::bail!("At least one input is required");
+    }
+
+    // Verify all input data sources exist
     let data_sources = commit::collect_data_sources(&project)?;
-    let data_source = data_sources.get(input).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Data source '{}' not found. Available: {}",
-            input,
-            data_sources.keys().cloned().collect::<Vec<_>>().join(", ")
-        )
-    })?;
+    let mut input_schemas: HashMap<String, schema::SchemaInfo> = HashMap::new();
+
+    println!("Validating pipeline schema...");
+    println!();
+
+    for (input_name, source_name) in inputs {
+        let data_source = data_sources.get(source_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Data source '{}' not found. Available: {}",
+                source_name,
+                data_sources.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?;
+
+        let data_path = project.root.join(&data_source.path);
+        let input_schema = schema::extract_parquet_schema(&data_path)?;
+
+        println!("Input '{}' from '{}' schema:", input_name, source_name);
+        for field in &input_schema.fields {
+            let nullable = if field.nullable { "?" } else { "" };
+            println!("  {}: {}{}", field.name, field.dtype, nullable);
+        }
+        println!();
+
+        input_schemas.insert(input_name.clone(), input_schema);
+    }
 
     // Verify transforms exist
     let available_transforms = commit::collect_transforms(&project)?;
@@ -28,33 +54,23 @@ pub async fn create(name: &str, input: &str, transforms: &[String]) -> Result<()
         }
     }
 
-    // Validate schema compatibility
-    let data_path = project.root.join(&data_source.path);
-    let input_schema = schema::extract_parquet_schema(&data_path)?;
+    // Validate schema compatibility (using "main" input for validation)
+    // In a full implementation, we'd validate all inputs against transform requirements
+    let main_schema = input_schemas.get("main").or_else(|| input_schemas.values().next());
+    if let Some(schema) = main_schema {
+        let validation_result = validate_pipeline_schema(schema, transforms, &available_transforms);
 
-    println!("Validating pipeline schema...");
-    println!();
-    println!("Input schema ({}):", input);
-    for field in &input_schema.fields {
-        let nullable = if field.nullable { "?" } else { "" };
-        println!("  {}: {}{}", field.name, field.dtype, nullable);
-    }
-    println!();
-
-    // For now, we do basic validation - transforms must have access to all input columns
-    // In a full implementation, we'd track schema transformations through each step
-    let validation_result = validate_pipeline_schema(&input_schema, transforms, &available_transforms);
-
-    if !validation_result.valid {
-        println!("Schema validation failed:");
-        for err in &validation_result.errors {
-            println!("  ✗ {}", err);
+        if !validation_result.valid {
+            println!("Schema validation failed:");
+            for err in &validation_result.errors {
+                println!("  ✗ {}", err);
+            }
+            anyhow::bail!("Pipeline validation failed. Fix schema issues before creating endpoint.");
         }
-        anyhow::bail!("Pipeline validation failed. Fix schema issues before creating endpoint.");
-    }
 
-    for warning in &validation_result.warnings {
-        println!("  ⚠ {}", warning);
+        for warning in &validation_result.warnings {
+            println!("  ⚠ {}", warning);
+        }
     }
 
     println!("  ✓ Schema validation passed");
@@ -64,8 +80,13 @@ pub async fn create(name: &str, input: &str, transforms: &[String]) -> Result<()
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
 
-    let mut prev_source = input.to_string();
-    let mut prev_source_type = SourceType::DataSource;
+    // Track previous outputs for chaining
+    let mut prev_outputs: HashMap<String, (String, SourceType)> = HashMap::new();
+
+    // Initially, all inputs come from data sources
+    for (input_name, source_name) in inputs {
+        prev_outputs.insert(input_name.clone(), (source_name.clone(), SourceType::DataSource));
+    }
 
     for (i, transform_name) in transforms.iter().enumerate() {
         let node_name = if transforms.len() == 1 {
@@ -80,19 +101,35 @@ pub async fn create(name: &str, input: &str, transforms: &[String]) -> Result<()
             params: serde_json::json!({}),
         });
 
-        edges.push(PipelineEdge {
-            target_node: node_name.clone(),
-            input_name: "main".to_string(),
-            source_type: prev_source_type.clone(),
-            source_ref: prev_source.clone(),
-            external_owner: None,
-            external_project: None,
-            external_endpoint: None,
-            external_commit_hash: None,
-        });
-
-        prev_source = node_name;
-        prev_source_type = SourceType::Node;
+        // For the first node, create edges from all data sources
+        // For subsequent nodes, chain from previous node's output
+        if i == 0 {
+            for (input_name, source_name) in inputs {
+                edges.push(PipelineEdge {
+                    target_node: node_name.clone(),
+                    input_name: input_name.clone(),
+                    source_type: SourceType::DataSource,
+                    source_ref: source_name.clone(),
+                    external_owner: None,
+                    external_project: None,
+                    external_endpoint: None,
+                    external_commit_hash: None,
+                });
+            }
+        } else {
+            // Chain from previous node - pass output as "main" input
+            let prev_node = &nodes[i - 1].node_name;
+            edges.push(PipelineEdge {
+                target_node: node_name.clone(),
+                input_name: "main".to_string(),
+                source_type: SourceType::Node,
+                source_ref: prev_node.clone(),
+                external_owner: None,
+                external_project: None,
+                external_endpoint: None,
+                external_commit_hash: None,
+            });
+        }
     }
 
     let endpoint = Endpoint {
@@ -119,7 +156,9 @@ pub async fn create(name: &str, input: &str, transforms: &[String]) -> Result<()
     println!("Created endpoint: {}", name);
     println!();
     println!("Pipeline:");
-    println!("  {} (data source)", input);
+    for (input_name, source_name) in inputs {
+        println!("  {} -> [{}] (data source)", source_name, input_name);
+    }
     for t in transforms {
         println!("    ↓");
         println!("  {} (transform)", t);

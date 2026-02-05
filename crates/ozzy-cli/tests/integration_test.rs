@@ -449,3 +449,260 @@ fn test_caching_works() {
         .success()
         .stdout(predicate::str::contains("SKIP"));
 }
+
+/// Create a second test parquet file with metadata for multi-input tests.
+fn create_metadata_parquet(path: &Path) {
+    let script = format!(
+        r#"
+import polars as pl
+
+df = pl.DataFrame({{
+    "id": [1, 2, 3, 4, 5],
+    "description": ["desc_a", "desc_b", "desc_c", "desc_d", "desc_e"],
+    "weight": [1.0, 2.0, 1.5, 0.5, 3.0],
+}})
+
+df.write_parquet("{}")
+"#,
+        path.display()
+    );
+
+    std::process::Command::new("uv")
+        .args(["run", "--with", "polars", "--with", "pyarrow", "python", "-c", &script])
+        .output()
+        .expect("Failed to create metadata parquet file");
+}
+
+/// Create a multi-input transform.
+fn create_multi_input_transform(path: &Path) {
+    let content = r#"
+import polars as pl
+
+class ozzy:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
+@ozzy.transform(
+    inputs=["main", "meta"],
+    params={"multiplier": float},
+    input_schema={"requires": ["id", "value"]},
+    output_schema={"adds": ["weighted_value"]},
+)
+def merge_with_weights(inputs, params):
+    """Merge main data with metadata weights."""
+    main = inputs["main"]
+    meta = inputs["meta"]
+    multiplier = getattr(params, "multiplier", 1.0)
+
+    # Join on id and compute weighted value
+    merged = main.join(meta, on="id")
+    return merged.with_columns(
+        (pl.col("value") * pl.col("weight") * multiplier).alias("weighted_value")
+    )
+"#;
+    fs::write(path, content).expect("Failed to write multi-input transform");
+}
+
+#[test]
+fn test_multi_input_endpoint() {
+    let dir = tempdir().unwrap();
+
+    // Initialize project
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "test-project", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    // Create and add main data
+    let main_path = dir.path().join("main_data.parquet");
+    create_test_parquet(&main_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["data", "add", main_path.to_str().unwrap(), "--name", "main_data"])
+        .assert()
+        .success();
+
+    // Create and add metadata
+    let meta_path = dir.path().join("meta_data.parquet");
+    create_metadata_parquet(&meta_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["data", "add", meta_path.to_str().unwrap(), "--name", "metadata"])
+        .assert()
+        .success();
+
+    // Create multi-input transform
+    let transform_path = dir.path().join("transforms/merge.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    create_multi_input_transform(&transform_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/merge.py"])
+        .assert()
+        .success();
+
+    // Create endpoint with multiple inputs
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "endpoint", "create", "merged",
+            "--input", "main:main_data",
+            "--input", "meta:metadata",
+            "--transforms", "merge_with_weights"
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created endpoint: merged"));
+
+    // Show endpoint should show both inputs
+    ozzy()
+        .current_dir(dir.path())
+        .args(["endpoint", "show", "merged"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("main"))
+        .stdout(predicate::str::contains("meta"));
+
+    // Run the multi-input pipeline
+    let output_path = dir.path().join("merged_output.parquet");
+    ozzy()
+        .current_dir(dir.path())
+        .args(["run", "merged", "--output", output_path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Inputs: 2"));
+
+    // Verify output was created
+    assert!(output_path.exists(), "Output parquet file should exist");
+}
+
+#[test]
+fn test_cli_params() {
+    let dir = tempdir().unwrap();
+
+    // Initialize project
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "test-project", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    // Create and add test data
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .assert()
+        .success();
+
+    // Create and add transform
+    let transform_path = dir.path().join("transforms/qc.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    create_test_transform(&transform_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/qc.py"])
+        .assert()
+        .success();
+
+    // Create endpoint
+    ozzy()
+        .current_dir(dir.path())
+        .args(["endpoint", "create", "filtered", "--input", "raw", "--transforms", "filter_by_value"])
+        .assert()
+        .success();
+
+    // Run with custom threshold parameter
+    ozzy()
+        .current_dir(dir.path())
+        .args(["run", "filtered", "--param", "threshold=15.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Parameters"))
+        .stdout(predicate::str::contains("threshold = 15.0"));
+
+    // Different param should cause cache miss (different materialized hash)
+    ozzy()
+        .current_dir(dir.path())
+        .args(["run", "filtered", "--param", "threshold=5.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MISS"));
+}
+
+#[test]
+fn test_transform_with_schema_hints() {
+    let dir = tempdir().unwrap();
+
+    // Initialize project
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "test-project", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    // Create and add test data
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .assert()
+        .success();
+
+    // Create transform with schema hints
+    let transform_path = dir.path().join("transforms/schema_transform.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    let content = r#"
+import polars as pl
+
+class ozzy:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
+@ozzy.transform(
+    params={"factor": float},
+    input_schema={"requires": ["id", "value"]},
+    output_schema={"adds": ["scaled_value"]},
+)
+def scale_values(inputs, params):
+    """Scale the value column by a factor."""
+    df = inputs["main"]
+    factor = getattr(params, "factor", 1.0)
+    return df.with_columns(
+        (pl.col("value") * factor).alias("scaled_value")
+    )
+"#;
+    fs::write(&transform_path, content).expect("Failed to write transform");
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/schema_transform.py"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("scale_values"));
+
+    // List transforms should show the new transform
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("scale_values"));
+
+    // Create endpoint - schema validation should pass since required columns exist
+    ozzy()
+        .current_dir(dir.path())
+        .args(["endpoint", "create", "scaled", "--input", "raw", "--transforms", "scale_values"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created endpoint: scaled"));
+}

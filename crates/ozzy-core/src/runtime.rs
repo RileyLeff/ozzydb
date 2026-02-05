@@ -485,6 +485,96 @@ result.write_parquet("{output_path}")
     Ok(())
 }
 
+/// Execute a transform with multiple named inputs using uv run.
+/// This is the primary execution method for multi-input transforms.
+pub fn execute_transform_multi(
+    transform_source: &Path,
+    function_name: &str,
+    inputs: &HashMap<String, PathBuf>,
+    output_path: &Path,
+    params: &serde_json::Value,
+) -> Result<()> {
+    let uv_path = which::which("uv").map_err(|_| {
+        Error::RuntimeError(
+            "uv not found in PATH. Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
+                .to_string(),
+        )
+    })?;
+
+    // Build input loading code for all inputs
+    let input_code: String = inputs
+        .iter()
+        .map(|(name, path)| {
+            format!(
+                "inputs[\"{}\"] = pl.read_parquet(\"{}\")",
+                name,
+                path.display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let script = format!(
+        r#"
+import sys
+import json
+import polars as pl
+
+sys.path.insert(0, "{transform_dir}")
+import {module_name}
+
+inputs = {{}}
+{input_code}
+
+params_dict = json.loads('{params_json}')
+
+class Params:
+    def __init__(self, d):
+        for k, v in d.items():
+            setattr(self, k, v)
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+params = Params(params_dict)
+result = {module_name}.{function_name}(inputs, params)
+
+if hasattr(result, 'collect'):
+    result = result.collect()
+
+result.write_parquet("{output_path}")
+"#,
+        transform_dir = transform_source.parent().unwrap().display(),
+        module_name = transform_source.file_stem().unwrap().to_string_lossy(),
+        input_code = input_code,
+        params_json = serde_json::to_string(params)?.replace('\'', "\\'").replace('\n', "\\n"),
+        function_name = function_name,
+        output_path = output_path.display(),
+    );
+
+    // Set up deterministic environment
+    let mut env_vars: HashMap<String, String> = std::env::vars().collect();
+    for (key, value) in DETERMINISTIC_ENV {
+        env_vars.insert(key.to_string(), value.to_string());
+    }
+
+    let output = Command::new(&uv_path)
+        .args(["run", "--with", "polars", "--with", "pyarrow", "python", "-c", &script])
+        .envs(env_vars)
+        .output()
+        .map_err(|e| Error::PythonError(format!("Failed to execute uv run: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(Error::PythonError(format!(
+            "Transform execution failed:\nstdout: {}\nstderr: {}",
+            stdout, stderr
+        )));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

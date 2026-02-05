@@ -1,16 +1,36 @@
 use anyhow::Result;
 use ozzy_core::project::{Endpoint, SourceType};
 use ozzy_core::{cache, commit, hash, platform, runtime, Project};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-pub async fn execute(endpoint_name: &str, output: Option<&str>, force: bool) -> Result<()> {
+pub async fn execute(
+    endpoint_name: &str,
+    output: Option<&str>,
+    force: bool,
+    cli_params: &[(String, String)],
+) -> Result<()> {
     let project = Project::find_current()?;
 
     // Find the endpoint
     let endpoint = find_endpoint(&project, endpoint_name)?;
     let data_sources = commit::collect_data_sources(&project)?;
     let transforms = commit::collect_transforms(&project)?;
+
+    // Build params from CLI
+    let params_override: serde_json::Value = if cli_params.is_empty() {
+        serde_json::json!({})
+    } else {
+        let mut map = serde_json::Map::new();
+        for (key, value) in cli_params {
+            // Try to parse as JSON value, fall back to string
+            let json_value = serde_json::from_str(value)
+                .unwrap_or_else(|_| serde_json::Value::String(value.clone()));
+            map.insert(key.clone(), json_value);
+        }
+        serde_json::Value::Object(map)
+    };
 
     // Get platform fingerprint
     let platform = platform::PlatformFingerprint::detect();
@@ -28,49 +48,89 @@ pub async fn execute(endpoint_name: &str, output: Option<&str>, force: bool) -> 
         let node = endpoint.nodes.iter().find(|n| n.node_name == *node_name).unwrap();
         println!("  {} (transform: {})", node_name, node.transform_name);
     }
+    if !cli_params.is_empty() {
+        println!();
+        println!("Parameters:");
+        for (key, value) in cli_params {
+            println!("  {} = {}", key, value);
+        }
+    }
     println!();
 
     // Execute each node
-    let mut node_outputs: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    let mut node_outputs: HashMap<String, PathBuf> = HashMap::new();
 
     for node_name in &execution_order {
         let node = endpoint.nodes.iter().find(|n| n.node_name == *node_name).unwrap();
         let transform = transforms.get(&node.transform_name)
             .ok_or_else(|| anyhow::anyhow!("Transform '{}' not found", node.transform_name))?;
 
-        // Find input edge
-        let input_edge = endpoint.edges.iter().find(|e| e.target_node == *node_name)
-            .ok_or_else(|| anyhow::anyhow!("No input edge for node '{}'", node_name))?;
+        // Find ALL input edges for this node (multi-input support)
+        let input_edges: Vec<_> = endpoint.edges.iter()
+            .filter(|e| e.target_node == *node_name)
+            .collect();
 
-        // Get input path
-        let input_path = match input_edge.source_type {
-            SourceType::DataSource => {
-                let ds = data_sources.get(&input_edge.source_ref)
-                    .ok_or_else(|| anyhow::anyhow!("Data source '{}' not found", input_edge.source_ref))?;
-                project.root.join(&ds.path)
+        if input_edges.is_empty() {
+            anyhow::bail!("No input edges for node '{}'", node_name);
+        }
+
+        // Build input paths HashMap
+        let mut input_paths: HashMap<String, PathBuf> = HashMap::new();
+        for edge in &input_edges {
+            let input_path = match edge.source_type {
+                SourceType::DataSource => {
+                    let ds = data_sources.get(&edge.source_ref)
+                        .ok_or_else(|| anyhow::anyhow!("Data source '{}' not found", edge.source_ref))?;
+                    project.root.join(&ds.path)
+                }
+                SourceType::Node => {
+                    node_outputs.get(&edge.source_ref)
+                        .ok_or_else(|| anyhow::anyhow!("Node output '{}' not found", edge.source_ref))?
+                        .clone()
+                }
+                SourceType::External => {
+                    anyhow::bail!("External dependencies not yet supported in local execution");
+                }
+            };
+            input_paths.insert(edge.input_name.clone(), input_path);
+        }
+
+        // Compute materialized hash from all inputs
+        let mut input_hashes: Vec<String> = Vec::new();
+        for (input_name, input_path) in &input_paths {
+            let h = hash::blake3_hash_file(input_path)?;
+            input_hashes.push(format!("{}:{}", input_name, h));
+        }
+        input_hashes.sort(); // Ensure deterministic order
+        let combined_input_hash = hash::blake3_hash(input_hashes.join(",").as_bytes());
+
+        // Merge node params with CLI params (CLI takes precedence)
+        let effective_params = if params_override.is_object() && !params_override.as_object().unwrap().is_empty() {
+            let mut merged = node.params.clone();
+            if let (Some(base), Some(overrides)) = (merged.as_object_mut(), params_override.as_object()) {
+                for (k, v) in overrides {
+                    base.insert(k.clone(), v.clone());
+                }
             }
-            SourceType::Node => {
-                node_outputs.get(&input_edge.source_ref)
-                    .ok_or_else(|| anyhow::anyhow!("Node output '{}' not found", input_edge.source_ref))?
-                    .clone()
-            }
-            SourceType::External => {
-                anyhow::bail!("External dependencies not yet supported in local execution");
-            }
+            merged
+        } else {
+            node.params.clone()
         };
 
-        // Compute materialized hash
-        let input_hash = hash::blake3_hash_file(&input_path)?;
-        let params_hash = hash::blake3_hash(node.params.to_string().as_bytes());
+        let params_hash = hash::blake3_hash(effective_params.to_string().as_bytes());
         let materialized_hash = hash::materialized_hash(
-            &input_hash,
+            &combined_input_hash,
             &transform.hash,
             &params_hash,
             &platform.hash(),
         );
 
         println!("Executing: {}", node_name);
-        println!("  Input hash: {}...", &input_hash[..12]);
+        if input_paths.len() == 1 {
+            println!("  Input hash: {}...", &combined_input_hash[..12]);
+        } else {
+            println!("  Inputs: {} (combined hash: {}...)", input_paths.len(), &combined_input_hash[..12]);
+        }
         println!("  Materialized hash: {}...", &materialized_hash[..12]);
 
         // Check cache
@@ -80,14 +140,14 @@ pub async fn execute(endpoint_name: &str, output: Option<&str>, force: bool) -> 
                     println!("  Cache: HIT");
                     cached_path
                 } else {
-                    execute_node(&project, transform, &input_path, &node.params, &materialized_hash, &local_cache, &platform)?
+                    execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &local_cache, &platform)?
                 }
             } else {
-                execute_node(&project, transform, &input_path, &node.params, &materialized_hash, &local_cache, &platform)?
+                execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &local_cache, &platform)?
             }
         } else {
             println!("  Cache: SKIP (forced)");
-            execute_node(&project, transform, &input_path, &node.params, &materialized_hash, &local_cache, &platform)?
+            execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &local_cache, &platform)?
         };
 
         node_outputs.insert(node_name.clone(), output_path);
@@ -141,10 +201,11 @@ fn build_execution_order(endpoint: &Endpoint) -> Vec<String> {
     order
 }
 
-fn execute_node(
+/// Execute a node with multi-input support.
+fn execute_node_multi(
     project: &Project,
     transform: &ozzy_core::project::Transform,
-    input_path: &PathBuf,
+    input_paths: &HashMap<String, PathBuf>,
     params: &serde_json::Value,
     materialized_hash: &str,
     cache: &cache::LocalCache,
@@ -158,11 +219,11 @@ fn execute_node(
     let temp_dir = tempfile::tempdir()?;
     let temp_output = temp_dir.path().join("output.parquet");
 
-    // Execute the transform
-    runtime::execute_transform_simple(
+    // Execute the transform with multi-input support
+    runtime::execute_transform_multi(
         &transform_path,
         &transform.function_name,
-        input_path,
+        input_paths,
         &temp_output,
         params,
     )?;

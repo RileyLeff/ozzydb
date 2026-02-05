@@ -169,8 +169,7 @@ fn parse_python_transforms(content: &str, path: &std::path::Path) -> Result<Vec<
                         let function_name = l[4..name_end].trim().to_string();
 
                         // Parse decorator for metadata
-                        let (params_schema, reproducible) =
-                            parse_transform_decorator(&decorator_content);
+                        let meta = parse_transform_decorator(&decorator_content);
 
                         // Look for lockfile (uv.lock in same directory)
                         let lockfile_path = path.parent().unwrap().join("uv.lock");
@@ -181,6 +180,28 @@ fn parse_python_transforms(content: &str, path: &std::path::Path) -> Result<Vec<
                             blake3_hash(b"")
                         };
 
+                        // Build input_schema with inputs list and any requires
+                        let input_schema = if meta.inputs.len() > 1 || meta.input_schema.is_some() {
+                            let mut schema = serde_json::Map::new();
+                            if meta.inputs.len() > 1 || meta.inputs.first().map(|s| s != "main").unwrap_or(false) {
+                                schema.insert("inputs".to_string(), serde_json::json!(meta.inputs));
+                            }
+                            if let Some(input_sch) = &meta.input_schema {
+                                if let Some(obj) = input_sch.as_object() {
+                                    for (k, v) in obj {
+                                        schema.insert(k.clone(), v.clone());
+                                    }
+                                }
+                            }
+                            if schema.is_empty() {
+                                None
+                            } else {
+                                Some(serde_json::Value::Object(schema))
+                            }
+                        } else {
+                            meta.input_schema
+                        };
+
                         transforms.push(Transform {
                             name: function_name.clone(),
                             hash: source_hash.clone(),
@@ -188,10 +209,10 @@ fn parse_python_transforms(content: &str, path: &std::path::Path) -> Result<Vec<
                             source_path: format!("transforms/{}", relative_path),
                             function_name,
                             lockfile_hash,
-                            params_schema,
-                            reproducible,
-                            input_schema: None,
-                            output_schema: None,
+                            params_schema: meta.params_schema,
+                            reproducible: meta.reproducible,
+                            input_schema,
+                            output_schema: meta.output_schema,
                         });
                     }
                     break;
@@ -206,25 +227,231 @@ fn parse_python_transforms(content: &str, path: &std::path::Path) -> Result<Vec<
     Ok(transforms)
 }
 
-/// Parse transform decorator for params schema and reproducible flag.
-fn parse_transform_decorator(decorator: &str) -> (serde_json::Value, bool) {
-    // Simple extraction - in production, use a proper Python parser
-    let mut params_schema = serde_json::json!({});
-    let mut reproducible = true;
+/// Extracted metadata from a transform decorator.
+#[derive(Debug)]
+struct TransformDecoratorMeta {
+    params_schema: serde_json::Value,
+    reproducible: bool,
+    inputs: Vec<String>,
+    input_schema: Option<serde_json::Value>,
+    output_schema: Option<serde_json::Value>,
+}
+
+/// Parse transform decorator for params schema, reproducible flag, and schema hints.
+fn parse_transform_decorator(decorator: &str) -> TransformDecoratorMeta {
+    let mut meta = TransformDecoratorMeta {
+        params_schema: serde_json::json!({}),
+        reproducible: true,
+        inputs: vec!["main".to_string()],
+        input_schema: None,
+        output_schema: None,
+    };
 
     // Check for reproducible=False
     if decorator.contains("reproducible=False") || decorator.contains("reproducible = False") {
-        reproducible = false;
+        meta.reproducible = false;
     }
 
-    // Extract params if present
-    // This is a simplified parser - full implementation would use Python AST
-    if decorator.contains("params=") || decorator.contains("params =") {
-        // For now, just mark that params exist
-        params_schema = serde_json::json!({"_has_params": true});
+    // Extract inputs list: inputs=["main", "meta"] or inputs={"main": ..., "meta": ...}
+    if let Some(inputs_start) = decorator.find("inputs=") {
+        let rest = &decorator[inputs_start + 7..];
+        if let Some(inputs) = extract_python_list(rest) {
+            meta.inputs = inputs;
+        }
     }
 
-    (params_schema, reproducible)
+    // Extract params: params={"threshold": float, "prefix": str}
+    if let Some(params_start) = decorator.find("params=") {
+        let rest = &decorator[params_start + 7..];
+        if let Some(params_dict) = extract_python_dict_raw(rest) {
+            // Parse the param types
+            let mut params_map = serde_json::Map::new();
+            for (key, value) in parse_simple_dict(&params_dict) {
+                // Convert Python type names to JSON schema-ish format
+                let type_str = match value.as_str() {
+                    "float" | "float64" => "number",
+                    "int" | "int64" => "integer",
+                    "str" | "string" => "string",
+                    "bool" | "boolean" => "boolean",
+                    _ => "any",
+                };
+                params_map.insert(key, serde_json::json!({"type": type_str}));
+            }
+            meta.params_schema = serde_json::Value::Object(params_map);
+        }
+    }
+
+    // Extract input_schema: input_schema={"requires": ["col1", "col2"]}
+    if let Some(schema_start) = decorator.find("input_schema=") {
+        let rest = &decorator[schema_start + 13..];
+        if let Some(dict_str) = extract_python_dict_raw(rest) {
+            // Try to parse as JSON (Python dicts are close to JSON)
+            let json_str = dict_str
+                .replace('\'', "\"")
+                .replace("True", "true")
+                .replace("False", "false")
+                .replace("None", "null");
+            if let Ok(schema) = serde_json::from_str(&json_str) {
+                meta.input_schema = Some(schema);
+            } else {
+                // Manual parse for requires=[...]
+                if let Some(req_start) = dict_str.find("requires") {
+                    let req_rest = &dict_str[req_start..];
+                    if let Some(cols) = extract_python_list(req_rest) {
+                        meta.input_schema = Some(serde_json::json!({"requires": cols}));
+                    }
+                }
+            }
+        }
+    }
+
+    // Extract output_schema: output_schema={"adds": ["new_col"]}
+    if let Some(schema_start) = decorator.find("output_schema=") {
+        let rest = &decorator[schema_start + 14..];
+        if let Some(dict_str) = extract_python_dict_raw(rest) {
+            let json_str = dict_str
+                .replace('\'', "\"")
+                .replace("True", "true")
+                .replace("False", "false")
+                .replace("None", "null");
+            if let Ok(schema) = serde_json::from_str(&json_str) {
+                meta.output_schema = Some(schema);
+            } else {
+                // Manual parse for adds=[...]
+                if let Some(adds_start) = dict_str.find("adds") {
+                    let adds_rest = &dict_str[adds_start..];
+                    if let Some(cols) = extract_python_list(adds_rest) {
+                        meta.output_schema = Some(serde_json::json!({"adds": cols}));
+                    }
+                }
+            }
+        }
+    }
+
+    meta
+}
+
+/// Extract a Python list like ["a", "b", "c"] from a string starting with [ or =.
+fn extract_python_list(s: &str) -> Option<Vec<String>> {
+    let s = s.trim();
+    let start = s.find('[')?;
+    let s = &s[start..];
+
+    let mut depth = 0;
+    let mut end = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if end == 0 {
+        return None;
+    }
+
+    let list_content = &s[1..end];
+    let items: Vec<String> = list_content
+        .split(',')
+        .map(|item| {
+            item.trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string()
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+/// Extract a Python dict like {"a": 1, "b": 2} from a string starting with {.
+fn extract_python_dict_raw(s: &str) -> Option<String> {
+    let s = s.trim();
+    let start = s.find('{')?;
+    let s = &s[start..];
+
+    let mut depth = 0;
+    let mut end = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if end == 0 {
+        None
+    } else {
+        Some(s[..end].to_string())
+    }
+}
+
+/// Parse a simple Python dict string into key-value pairs.
+/// Handles: {"key": value, "key2": value2}
+fn parse_simple_dict(s: &str) -> Vec<(String, String)> {
+    let s = s.trim().trim_start_matches('{').trim_end_matches('}');
+    let mut result = Vec::new();
+
+    // Split by comma, but be careful about nested structures
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0;
+
+    for c in s.chars() {
+        match c {
+            '{' | '[' => {
+                depth += 1;
+                current.push(c);
+            }
+            '}' | ']' => {
+                depth -= 1;
+                current.push(c);
+            }
+            ',' if depth == 0 => {
+                if !current.trim().is_empty() {
+                    items.push(current.trim().to_string());
+                }
+                current = String::new();
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.trim().is_empty() {
+        items.push(current.trim().to_string());
+    }
+
+    for item in items {
+        if let Some(colon_pos) = item.find(':') {
+            let key = item[..colon_pos]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
+            let value = item[colon_pos + 1..].trim().to_string();
+            result.push((key, value));
+        }
+    }
+
+    result
 }
 
 /// Check if the workspace has changes compared to the last commit.

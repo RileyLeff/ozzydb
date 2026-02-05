@@ -3,6 +3,23 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 
+/// Parse key=value parameter
+fn parse_param(s: &str) -> Result<(String, String), String> {
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("invalid param format: '{}' (expected key=value)", s))?;
+    Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
+}
+
+/// Parse input mapping: name:source or just source (defaults to "main")
+fn parse_input_mapping(s: &str) -> Result<(String, String), String> {
+    if let Some(pos) = s.find(':') {
+        Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
+    } else {
+        Ok(("main".to_string(), s.to_string()))
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "ozzy")]
 #[command(author, version, about = "Version control for data transformations", long_about = None)]
@@ -64,6 +81,10 @@ enum Commands {
         /// Force re-execution (ignore cache)
         #[arg(long)]
         force: bool,
+
+        /// Transform parameters (key=value, can be repeated)
+        #[arg(short, long = "param", value_parser = parse_param)]
+        params: Vec<(String, String)>,
     },
 
     /// Create a new commit
@@ -157,9 +178,10 @@ enum EndpointCommands {
         /// Endpoint name
         name: String,
 
-        /// Input data source
-        #[arg(long)]
-        input: String,
+        /// Input data source(s) - format: [name:]source (can be repeated for multi-input)
+        /// Examples: --input raw, --input main:raw --input meta:metadata
+        #[arg(long, value_parser = parse_input_mapping)]
+        input: Vec<(String, String)>,
 
         /// Transforms to apply (in order)
         #[arg(long, value_delimiter = ',')]
@@ -251,8 +273,8 @@ async fn main() -> Result<()> {
         Commands::Dag { format, endpoint } => {
             commands::dag::show(&format, endpoint.as_deref()).await
         }
-        Commands::Run { endpoint, output, force } => {
-            commands::run::execute(&endpoint, output.as_deref(), force).await
+        Commands::Run { endpoint, output, force, params } => {
+            commands::run::execute(&endpoint, output.as_deref(), force, &params).await
         }
         Commands::Commit { message } => {
             commands::commit::create(message.as_deref()).await
