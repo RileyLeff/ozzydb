@@ -240,6 +240,169 @@ pub fn format_schema(schema: &SchemaInfo) -> String {
     output
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Pipeline Validation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Result of validating a pipeline step.
+#[derive(Debug)]
+pub struct ValidationResult {
+    pub valid: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+impl ValidationResult {
+    pub fn ok() -> Self {
+        Self {
+            valid: true,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn error(msg: impl Into<String>) -> Self {
+        Self {
+            valid: false,
+            errors: vec![msg.into()],
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn with_warning(mut self, msg: impl Into<String>) -> Self {
+        self.warnings.push(msg.into());
+        self
+    }
+
+    pub fn merge(mut self, other: ValidationResult) -> Self {
+        self.valid = self.valid && other.valid;
+        self.errors.extend(other.errors);
+        self.warnings.extend(other.warnings);
+        self
+    }
+}
+
+/// Validate that a data source schema is suitable for a transform.
+///
+/// This checks that all columns required by the transform exist in the input schema.
+pub fn validate_transform_input(
+    input_schema: &SchemaInfo,
+    required_columns: &[&str],
+    transform_name: &str,
+) -> ValidationResult {
+    let mut result = ValidationResult::ok();
+
+    for col in required_columns {
+        if !input_schema.fields.iter().any(|f| f.name == *col) {
+            result.valid = false;
+            result.errors.push(format!(
+                "Transform '{}' requires column '{}' which is not in the input schema. Available: {:?}",
+                transform_name,
+                col,
+                input_schema.column_names()
+            ));
+        }
+    }
+
+    result
+}
+
+/// Validate an entire pipeline from data source through transforms.
+pub fn validate_pipeline(
+    data_source_schema: &SchemaInfo,
+    transform_requirements: &[(&str, Vec<&str>)], // (transform_name, required_columns)
+) -> ValidationResult {
+    let mut result = ValidationResult::ok();
+    let current_schema = data_source_schema.clone();
+
+    for (i, (transform_name, required_cols)) in transform_requirements.iter().enumerate() {
+        let step_result = validate_transform_input(&current_schema, required_cols, transform_name);
+
+        if !step_result.valid {
+            result.valid = false;
+            for err in step_result.errors {
+                result.errors.push(format!("Step {}: {}", i + 1, err));
+            }
+        }
+        result.warnings.extend(step_result.warnings);
+
+        // For now, assume transforms pass through all columns
+        // In a full implementation, we'd track schema changes through transforms
+    }
+
+    result
+}
+
+/// Check if two schemas are compatible (one is a superset of the other).
+pub fn schemas_compatible(required: &SchemaInfo, provided: &SchemaInfo) -> bool {
+    required.fields.iter().all(|req_field| {
+        provided.fields.iter().any(|prov_field| {
+            prov_field.name == req_field.name && prov_field.dtype == req_field.dtype
+        })
+    })
+}
+
+/// Get the difference between two schemas.
+pub fn schema_diff(from: &SchemaInfo, to: &SchemaInfo) -> SchemaDiff {
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+
+    // Find added and changed columns
+    for to_field in &to.fields {
+        if let Some(from_field) = from.fields.iter().find(|f| f.name == to_field.name) {
+            if from_field.dtype != to_field.dtype || from_field.nullable != to_field.nullable {
+                changed.push(FieldChange {
+                    name: to_field.name.clone(),
+                    from_dtype: from_field.dtype.clone(),
+                    to_dtype: to_field.dtype.clone(),
+                    from_nullable: from_field.nullable,
+                    to_nullable: to_field.nullable,
+                });
+            }
+        } else {
+            added.push(to_field.clone());
+        }
+    }
+
+    // Find removed columns
+    for from_field in &from.fields {
+        if !to.fields.iter().any(|f| f.name == from_field.name) {
+            removed.push(from_field.clone());
+        }
+    }
+
+    SchemaDiff { added, removed, changed }
+}
+
+/// Represents the difference between two schemas.
+#[derive(Debug)]
+pub struct SchemaDiff {
+    pub added: Vec<FieldInfo>,
+    pub removed: Vec<FieldInfo>,
+    pub changed: Vec<FieldChange>,
+}
+
+impl SchemaDiff {
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty()
+    }
+
+    pub fn has_breaking_changes(&self) -> bool {
+        !self.removed.is_empty() || !self.changed.is_empty()
+    }
+}
+
+/// Represents a change to a single field.
+#[derive(Debug)]
+pub struct FieldChange {
+    pub name: String,
+    pub from_dtype: String,
+    pub to_dtype: String,
+    pub from_nullable: bool,
+    pub to_nullable: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

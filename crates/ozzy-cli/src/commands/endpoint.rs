@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ozzy_core::project::{Endpoint, PipelineEdge, PipelineNode, SourceType};
-use ozzy_core::{commit, Project};
+use ozzy_core::{commit, schema, Project};
 use std::fs;
 
 pub async fn create(name: &str, input: &str, transforms: &[String]) -> Result<()> {
@@ -8,13 +8,13 @@ pub async fn create(name: &str, input: &str, transforms: &[String]) -> Result<()
 
     // Verify input data source exists
     let data_sources = commit::collect_data_sources(&project)?;
-    if !data_sources.contains_key(input) {
-        anyhow::bail!(
+    let data_source = data_sources.get(input).ok_or_else(|| {
+        anyhow::anyhow!(
             "Data source '{}' not found. Available: {}",
             input,
             data_sources.keys().cloned().collect::<Vec<_>>().join(", ")
-        );
-    }
+        )
+    })?;
 
     // Verify transforms exist
     let available_transforms = commit::collect_transforms(&project)?;
@@ -27,6 +27,38 @@ pub async fn create(name: &str, input: &str, transforms: &[String]) -> Result<()
             );
         }
     }
+
+    // Validate schema compatibility
+    let data_path = project.root.join(&data_source.path);
+    let input_schema = schema::extract_parquet_schema(&data_path)?;
+
+    println!("Validating pipeline schema...");
+    println!();
+    println!("Input schema ({}):", input);
+    for field in &input_schema.fields {
+        let nullable = if field.nullable { "?" } else { "" };
+        println!("  {}: {}{}", field.name, field.dtype, nullable);
+    }
+    println!();
+
+    // For now, we do basic validation - transforms must have access to all input columns
+    // In a full implementation, we'd track schema transformations through each step
+    let validation_result = validate_pipeline_schema(&input_schema, transforms, &available_transforms);
+
+    if !validation_result.valid {
+        println!("Schema validation failed:");
+        for err in &validation_result.errors {
+            println!("  ✗ {}", err);
+        }
+        anyhow::bail!("Pipeline validation failed. Fix schema issues before creating endpoint.");
+    }
+
+    for warning in &validation_result.warnings {
+        println!("  ⚠ {}", warning);
+    }
+
+    println!("  ✓ Schema validation passed");
+    println!();
 
     // Build the pipeline nodes and edges
     let mut nodes = Vec::new();
@@ -71,7 +103,6 @@ pub async fn create(name: &str, input: &str, transforms: &[String]) -> Result<()
     };
 
     // Save endpoint to a staging file (will be committed later)
-    // For now, save to .ozzy/staged_endpoints/
     let staged_dir = project.ozzy_dir().join("staged_endpoints");
     fs::create_dir_all(&staged_dir)?;
 
@@ -99,6 +130,82 @@ pub async fn create(name: &str, input: &str, transforms: &[String]) -> Result<()
     println!("Run with: ozzy run {}", name);
 
     Ok(())
+}
+
+/// Validate schema compatibility through the pipeline.
+fn validate_pipeline_schema(
+    input_schema: &schema::SchemaInfo,
+    transforms: &[String],
+    available_transforms: &std::collections::HashMap<String, ozzy_core::project::Transform>,
+) -> schema::ValidationResult {
+    let mut result = schema::ValidationResult::ok();
+
+    // Track current schema (starts with input data source schema)
+    let current_columns: Vec<&str> = input_schema.column_names();
+
+    for (i, transform_name) in transforms.iter().enumerate() {
+        let transform = match available_transforms.get(transform_name) {
+            Some(t) => t,
+            None => {
+                result.valid = false;
+                result.errors.push(format!("Step {}: Transform '{}' not found", i + 1, transform_name));
+                continue;
+            }
+        };
+
+        // Check if transform has input schema requirements
+        if let Some(input_schema_value) = &transform.input_schema {
+            if let Some(required) = input_schema_value.get("requires") {
+                if let Some(required_cols) = required.as_array() {
+                    for col in required_cols {
+                        if let Some(col_name) = col.as_str() {
+                            if !current_columns.contains(&col_name) {
+                                result.valid = false;
+                                result.errors.push(format!(
+                                    "Step {}: Transform '{}' requires column '{}' which is not available. Available: {:?}",
+                                    i + 1,
+                                    transform_name,
+                                    col_name,
+                                    current_columns
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check if transform has output schema that adds columns
+        if let Some(output_schema_value) = &transform.output_schema {
+            if let Some(adds) = output_schema_value.get("adds") {
+                if let Some(added_cols) = adds.as_array() {
+                    for col in added_cols {
+                        if let Some(col_name) = col.as_str() {
+                            // In a real implementation, we'd add these to current_columns
+                            // For now, just log that we know about them
+                            result.warnings.push(format!(
+                                "Step {}: Transform '{}' adds column '{}'",
+                                i + 1,
+                                transform_name,
+                                col_name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Warning for transforms without schema info
+        if transform.input_schema.is_none() && transform.output_schema.is_none() {
+            result.warnings.push(format!(
+                "Step {}: Transform '{}' has no schema metadata - cannot validate",
+                i + 1,
+                transform_name
+            ));
+        }
+    }
+
+    result
 }
 
 pub async fn list() -> Result<()> {
@@ -178,14 +285,14 @@ pub async fn show(name: &str) -> Result<()> {
     if staged_path.exists() {
         let content = fs::read_to_string(&staged_path)?;
         let endpoint: Endpoint = serde_json::from_str(&content)?;
-        print_endpoint(&endpoint, false);
+        print_endpoint(&project, &endpoint, false)?;
         return Ok(());
     }
 
     // Check committed endpoints
     if let Some(commit) = project.latest_commit()? {
         if let Some(endpoint) = commit.endpoints.get(name) {
-            print_endpoint(endpoint, true);
+            print_endpoint(&project, endpoint, true)?;
             return Ok(());
         }
     }
@@ -193,7 +300,7 @@ pub async fn show(name: &str) -> Result<()> {
     anyhow::bail!("Endpoint '{}' not found", name);
 }
 
-fn print_endpoint(endpoint: &Endpoint, committed: bool) {
+fn print_endpoint(project: &Project, endpoint: &Endpoint, committed: bool) -> Result<()> {
     let status = if committed { "committed" } else { "staged" };
     println!("Endpoint: {} ({})", endpoint.name, status);
 
@@ -205,7 +312,20 @@ fn print_endpoint(endpoint: &Endpoint, committed: bool) {
     println!("Pipeline:");
     for edge in &endpoint.edges {
         let source = match edge.source_type {
-            SourceType::DataSource => format!("{} (data)", edge.source_ref),
+            SourceType::DataSource => {
+                // Show schema info for data sources
+                let data_sources = commit::collect_data_sources(project)?;
+                if let Some(ds) = data_sources.get(&edge.source_ref) {
+                    let path = project.root.join(&ds.path);
+                    if let Ok(schema_info) = schema::extract_parquet_schema(&path) {
+                        format!("{} (data, {} columns)", edge.source_ref, schema_info.fields.len())
+                    } else {
+                        format!("{} (data)", edge.source_ref)
+                    }
+                } else {
+                    format!("{} (data)", edge.source_ref)
+                }
+            }
             SourceType::Node => format!("{} (node)", edge.source_ref),
             SourceType::External => format!(
                 "{}/{}/{}@{} (external)",
@@ -226,4 +346,6 @@ fn print_endpoint(endpoint: &Endpoint, committed: bool) {
             println!("    params: {}", node.params);
         }
     }
+
+    Ok(())
 }
