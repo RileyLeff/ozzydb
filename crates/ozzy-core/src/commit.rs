@@ -6,6 +6,7 @@ use std::fs;
 
 use crate::canon::hash_source_file;
 use crate::error::Result;
+use crate::canon;
 use crate::hash::{blake3_hash, blake3_hash_file};
 use crate::project::{Commit, DataSource, Project, Transform};
 use crate::schema::{extract_parquet_schema, get_parquet_row_count};
@@ -32,7 +33,10 @@ pub fn create_commit(project: &Project, message: &str, author: &str) -> Result<C
         vec![]
     };
 
-    // Build the commit hash from all content
+    // Capture timestamp before hashing so it's included in the hash
+    let timestamp = Utc::now();
+
+    // Build the commit hash from all content (including timestamp)
     let commit_content = serde_json::json!({
         "parent_hashes": parent_hashes,
         "data_sources": data_sources,
@@ -40,15 +44,16 @@ pub fn create_commit(project: &Project, message: &str, author: &str) -> Result<C
         "endpoints": endpoints,
         "author": author,
         "message": message,
+        "timestamp": timestamp.to_rfc3339(),
     });
-    let hash = blake3_hash(commit_content.to_string().as_bytes());
+    let hash = canon::hash_json(&commit_content);
 
     Ok(Commit {
         hash,
         parent_hashes,
         author: author.to_string(),
         message: message.to_string(),
-        timestamp: Utc::now(),
+        timestamp,
         data_sources,
         transforms,
         endpoints,
@@ -77,7 +82,8 @@ pub fn collect_data_sources(project: &Project) -> Result<BTreeMap<String, DataSo
 
             let hash = blake3_hash_file(&path)?;
             let schema = extract_parquet_schema(&path)?;
-            let schema_hash = blake3_hash(serde_json::to_string(&schema)?.as_bytes());
+            let schema_value = serde_json::to_value(&schema)?;
+            let schema_hash = canon::hash_json(&schema_value);
 
             let metadata = fs::metadata(&path)?;
             let row_count = get_parquet_row_count(&path).ok();
@@ -216,10 +222,18 @@ fn parse_python_transforms(content: &str, path: &std::path::Path) -> Result<Vec<
                             meta.input_schema
                         };
 
+                        // Detect Python version for runtime field
+                        // e.g., "python-3.11.8" instead of just "python"
+                        let python_version = crate::platform::PlatformFingerprint::detect().python_version;
+                        let runtime = match python_version {
+                            Some(ver) => format!("python-{}", ver),
+                            None => "python".to_string(),
+                        };
+
                         transforms.push(Transform {
                             name: function_name.clone(),
                             hash: source_hash.clone(),
-                            runtime: "python".to_string(),
+                            runtime,
                             source_path: format!("transforms/{}", relative_path),
                             function_name,
                             lockfile_hash,
@@ -271,6 +285,8 @@ fn parse_transform_decorator(decorator: &str) -> TransformDecoratorMeta {
         let rest = &decorator[inputs_start + 7..];
         if let Some(inputs) = extract_python_list(rest) {
             meta.inputs = inputs;
+        } else {
+            eprintln!("Warning: could not parse 'inputs=' in @ozzy.transform decorator");
         }
     }
 
@@ -292,6 +308,8 @@ fn parse_transform_decorator(decorator: &str) -> TransformDecoratorMeta {
                 params_map.insert(key, serde_json::json!({"type": type_str}));
             }
             meta.params_schema = serde_json::Value::Object(params_map);
+        } else {
+            eprintln!("Warning: could not parse 'params=' in @ozzy.transform decorator");
         }
     }
 
@@ -313,9 +331,15 @@ fn parse_transform_decorator(decorator: &str) -> TransformDecoratorMeta {
                     let req_rest = &dict_str[req_start..];
                     if let Some(cols) = extract_python_list(req_rest) {
                         meta.input_schema = Some(serde_json::json!({"requires": cols}));
+                    } else {
+                        eprintln!("Warning: could not parse 'input_schema=' in @ozzy.transform decorator");
                     }
+                } else {
+                    eprintln!("Warning: could not parse 'input_schema=' in @ozzy.transform decorator");
                 }
             }
+        } else {
+            eprintln!("Warning: could not parse 'input_schema=' in @ozzy.transform decorator");
         }
     }
 
@@ -336,9 +360,15 @@ fn parse_transform_decorator(decorator: &str) -> TransformDecoratorMeta {
                     let adds_rest = &dict_str[adds_start..];
                     if let Some(cols) = extract_python_list(adds_rest) {
                         meta.output_schema = Some(serde_json::json!({"adds": cols}));
+                    } else {
+                        eprintln!("Warning: could not parse 'output_schema=' in @ozzy.transform decorator");
                     }
+                } else {
+                    eprintln!("Warning: could not parse 'output_schema=' in @ozzy.transform decorator");
                 }
             }
+        } else {
+            eprintln!("Warning: could not parse 'output_schema=' in @ozzy.transform decorator");
         }
     }
 

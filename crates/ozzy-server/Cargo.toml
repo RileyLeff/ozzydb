@@ -1,0 +1,87 @@
+[package]
+name = "ozzy-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OzzyDB registry server for project sharing"
+
+[lib]
+name = "ozzy_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ozzy-server"
+path = "src/main.rs"
+
+[dependencies]
+# Internal
+ozzy-core.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# Web framework
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+
+# Database
+sqlx.workspace = true
+
+# OAuth
+oauth2.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Hashing
+blake3.workspace = true
+
+# Object storage
+object_store.workspace = true
+bytes.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+
+# Time
+chrono.workspace = true
+
+# UUID
+uuid.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Tracing
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Streaming
+tokio-stream.workspace = true
+tokio-util.workspace = true
+
+# HTTP client
+reqwest.workspace = true
+
+# Data formats (schema extraction from uploaded parquet)
+arrow.workspace = true
+parquet.workspace = true
+
+# Tar archives
+tar.workspace = true
+
+# Random number generation
+rand.workspace = true
+
+# Base64 encoding
+base64.workspace = true
+
+[dev-dependencies]
+# Testing
+tempfile.workspace = true
+rand.workspace = true
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

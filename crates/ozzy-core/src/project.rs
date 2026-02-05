@@ -406,7 +406,44 @@ impl Project {
     }
 
     /// Resolve a ref to a commit hash.
+    ///
+    /// Supports multiple formats:
+    /// - `refs/heads/main` or `refs/tags/v1.0` — direct ref path lookup
+    /// - `@latest` — resolves to the default branch (refs/heads/main)
+    /// - `@v1.0.0` — resolves to a tag (refs/tags/v1.0.0)
+    /// - 64-char hex string — treated as a raw commit hash
     pub fn resolve_ref(&self, ref_name: &str) -> Result<Option<String>> {
+        // Handle @latest → default branch
+        if ref_name == "@latest" {
+            let default_branch = &self.config.refs.head;
+            let ref_path = self.refs_dir().join(default_branch.strip_prefix("refs/").unwrap_or(default_branch));
+            if ref_path.exists() {
+                let hash = fs::read_to_string(&ref_path)?.trim().to_string();
+                return Ok(Some(hash));
+            }
+            return Ok(None);
+        }
+
+        // Handle @tag_name → refs/tags/tag_name
+        if let Some(tag_name) = ref_name.strip_prefix('@') {
+            let tag_path = self.refs_dir().join("tags").join(tag_name);
+            if tag_path.exists() {
+                let hash = fs::read_to_string(&tag_path)?.trim().to_string();
+                return Ok(Some(hash));
+            }
+            return Ok(None);
+        }
+
+        // Handle raw commit hash (64-char hex string)
+        if ref_name.len() == 64 && ref_name.chars().all(|c| c.is_ascii_hexdigit()) {
+            let commit_path = self.commits_dir().join(format!("{}.json", ref_name));
+            if commit_path.exists() {
+                return Ok(Some(ref_name.to_string()));
+            }
+            return Ok(None);
+        }
+
+        // Standard ref path lookup
         let ref_path = self.refs_dir().join(ref_name.strip_prefix("refs/").unwrap_or(ref_name));
         if ref_path.exists() {
             let hash = fs::read_to_string(&ref_path)?.trim().to_string();

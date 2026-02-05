@@ -1,0 +1,9 @@
+# Environment files with secrets
+.env
+.env.prod
+.env.local
+
+# Keep examples
+!.env.example
+!.env.test
+!.env.prod.example

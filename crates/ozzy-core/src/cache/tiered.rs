@@ -24,6 +24,7 @@ pub struct TieredCache {
     remote: Option<RemoteCache>,
     auto_pull: bool,
     auto_push: bool,
+    fail_on_remote_error: bool,
     platform: String,
 }
 
@@ -33,16 +34,17 @@ impl TieredCache {
         let local = LocalCache::open()?;
         let platform = PlatformFingerprint::detect().short_string();
 
-        let (remote, auto_pull, auto_push) = match &config.remote {
+        let (remote, auto_pull, auto_push, fail_on_remote_error) = match &config.remote {
             Some(remote_config) if remote_config.is_configured() => {
                 let remote = RemoteCache::new(remote_config).await?;
                 (
                     Some(remote),
                     remote_config.policy.auto_pull,
                     remote_config.policy.auto_push,
+                    remote_config.policy.fail_on_remote_error,
                 )
             }
-            _ => (None, false, false),
+            _ => (None, false, false, false),
         };
 
         Ok(Self {
@@ -50,6 +52,7 @@ impl TieredCache {
             remote,
             auto_pull,
             auto_push,
+            fail_on_remote_error,
             platform,
         })
     }
@@ -64,6 +67,7 @@ impl TieredCache {
             remote: None,
             auto_pull: false,
             auto_push: false,
+            fail_on_remote_error: false,
             platform,
         })
     }
@@ -107,13 +111,25 @@ impl TieredCache {
         // L1 miss - check L2 if auto_pull enabled
         if self.auto_pull {
             if let Some(remote) = &self.remote {
-                if remote.contains(hash).await? {
-                    // Download from L2 to L1
-                    let dest = self.local.cache_path_for(hash);
-                    if remote.download(hash, &dest).await? {
-                        // Register in local cache index
-                        self.local.register_downloaded(hash, &self.platform)?;
-                        return Ok(Some(dest));
+                match remote.contains(hash).await {
+                    Ok(true) => {
+                        let dest = self.local.cache_path_for(hash);
+                        match remote.download(hash, &dest).await {
+                            Ok(true) => {
+                                self.local.register_downloaded(hash, &self.platform)?;
+                                return Ok(Some(dest));
+                            }
+                            Ok(false) => {} // Download returned false, treat as miss
+                            Err(e) if self.fail_on_remote_error => return Err(e),
+                            Err(e) => {
+                                eprintln!("Warning: Remote cache download failed: {}", e);
+                            }
+                        }
+                    }
+                    Ok(false) => {} // Not in remote
+                    Err(e) if self.fail_on_remote_error => return Err(e),
+                    Err(e) => {
+                        eprintln!("Warning: Remote cache check failed: {}", e);
                     }
                 }
             }
@@ -139,7 +155,13 @@ impl TieredCache {
         // Write to L2 if auto_push enabled
         if self.auto_push {
             if let Some(remote) = &self.remote {
-                remote.upload(hash, platform, source_path, row_count).await?;
+                match remote.upload(hash, platform, source_path, row_count).await {
+                    Ok(()) => {}
+                    Err(e) if self.fail_on_remote_error => return Err(e),
+                    Err(e) => {
+                        eprintln!("Warning: Remote cache push failed: {}", e);
+                    }
+                }
             }
         }
 

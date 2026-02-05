@@ -1,0 +1,488 @@
+//! Fetch command for downloading and executing remote endpoints.
+
+use anyhow::{Context, Result};
+use ozzy_core::cache::TieredCache;
+use ozzy_core::project::{Endpoint, SourceType};
+use ozzy_core::registry::{CredentialsFile, RegistryClient};
+use ozzy_core::{canon, commit, hash, platform, runtime};
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::PathBuf;
+
+/// Load credentials from config.
+fn load_credentials() -> Result<CredentialsFile> {
+    let path = dirs::config_dir()
+        .context("Could not determine config directory")?
+        .join("ozzy")
+        .join("credentials.json");
+
+    if path.exists() {
+        let content = std::fs::read_to_string(&path)?;
+        Ok(serde_json::from_str(&content)?)
+    } else {
+        Ok(CredentialsFile::default())
+    }
+}
+
+/// Parse a remote endpoint reference.
+/// Format: [registry://]owner/project/endpoint[@ref]
+fn parse_endpoint_ref(
+    endpoint_ref: &str,
+) -> Result<(Option<String>, String, String, String, String)> {
+    // Check for explicit registry prefix
+    let (registry, rest) = if let Some(idx) = endpoint_ref.find("://") {
+        let registry_end = endpoint_ref[idx + 3..].find('/').map(|i| i + idx + 3);
+        if let Some(end) = registry_end {
+            (
+                Some(endpoint_ref[..end].to_string()),
+                &endpoint_ref[end + 1..],
+            )
+        } else {
+            (None, endpoint_ref)
+        }
+    } else {
+        (None, endpoint_ref)
+    };
+
+    // Parse owner/project/endpoint[@ref]
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() < 3 {
+        anyhow::bail!(
+            "Invalid endpoint reference. Expected format: owner/project/endpoint[@ref] or registry://host/owner/project/endpoint[@ref]"
+        );
+    }
+
+    let owner = parts[0].to_string();
+    let project = parts[1].to_string();
+
+    // Parse endpoint[@ref]
+    let endpoint_part = parts[2..].join("/");
+    let (endpoint, ref_name) = if let Some(at_idx) = endpoint_part.find('@') {
+        (
+            endpoint_part[..at_idx].to_string(),
+            endpoint_part[at_idx + 1..].to_string(),
+        )
+    } else {
+        (endpoint_part, "main".to_string())
+    };
+
+    Ok((registry, owner, project, endpoint, ref_name))
+}
+
+/// Get the default registry URL.
+fn default_registry() -> String {
+    std::env::var("OZZY_REGISTRY").unwrap_or_else(|_| "https://registry.ozzydb.dev".to_string())
+}
+
+/// Set up a temp directory as a minimal ozzy project for execution.
+fn setup_temp_project(
+    temp_path: &std::path::Path,
+    project_name: &str,
+    owner: &str,
+) -> Result<()> {
+    let ozzy_dir = temp_path.join(".ozzy");
+    std::fs::create_dir_all(ozzy_dir.join("commits"))?;
+    std::fs::create_dir_all(ozzy_dir.join("refs").join("heads"))?;
+    std::fs::create_dir_all(ozzy_dir.join("refs").join("tags"))?;
+    std::fs::create_dir_all(ozzy_dir.join("objects").join("data"))?;
+    std::fs::create_dir_all(ozzy_dir.join("objects").join("transforms"))?;
+    std::fs::create_dir_all(temp_path.join("data"))?;
+    std::fs::create_dir_all(temp_path.join("transforms"))?;
+
+    let config = format!(
+        "[project]\nname = \"{}\"\nowner = \"{}\"\n",
+        project_name, owner
+    );
+    std::fs::write(temp_path.join("ozzy.toml"), config)?;
+
+    Ok(())
+}
+
+/// Build execution order using Kahn's topological sort.
+fn build_execution_order(endpoint: &Endpoint) -> Vec<String> {
+    use std::collections::{HashSet, VecDeque};
+
+    let node_names: HashSet<String> =
+        endpoint.nodes.iter().map(|n| n.node_name.clone()).collect();
+    let mut dependencies: HashMap<String, HashSet<String>> = HashMap::new();
+    for node in &endpoint.nodes {
+        dependencies.insert(node.node_name.clone(), HashSet::new());
+    }
+    for edge in &endpoint.edges {
+        if edge.source_type == SourceType::Node && node_names.contains(&edge.source_ref) {
+            if let Some(deps) = dependencies.get_mut(&edge.target_node) {
+                deps.insert(edge.source_ref.clone());
+            }
+        }
+    }
+
+    let mut in_degree: HashMap<String, usize> = HashMap::new();
+    for (node, deps) in &dependencies {
+        in_degree.insert(node.clone(), deps.len());
+    }
+
+    let mut queue: VecDeque<String> = VecDeque::new();
+    for (node, &degree) in &in_degree {
+        if degree == 0 {
+            queue.push_back(node.clone());
+        }
+    }
+
+    let mut order = Vec::new();
+    while let Some(node) = queue.pop_front() {
+        order.push(node.clone());
+        for (other_node, deps) in &dependencies {
+            if deps.contains(&node) {
+                if let Some(degree) = in_degree.get_mut(other_node) {
+                    *degree -= 1;
+                    if *degree == 0 {
+                        queue.push_back(other_node.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if order.len() != endpoint.nodes.len() {
+        eprintln!("Warning: Cycle detected in pipeline DAG, falling back to insertion order");
+        return endpoint.nodes.iter().map(|n| n.node_name.clone()).collect();
+    }
+
+    order
+}
+
+/// Fetch and execute a remote endpoint.
+pub async fn run(
+    endpoint_ref: &str,
+    output: Option<&str>,
+    params: &[(String, String)],
+) -> Result<()> {
+    // Parse the endpoint reference
+    let (registry_opt, owner, project, endpoint, ref_name) = parse_endpoint_ref(endpoint_ref)?;
+    let registry = registry_opt.unwrap_or_else(default_registry);
+
+    println!(
+        "Fetching {}/{}/{}@{} from {}...",
+        owner, project, endpoint, ref_name, registry
+    );
+
+    // Get credentials (optional for public projects)
+    let creds = load_credentials().ok();
+    let token = creds
+        .as_ref()
+        .and_then(|c| c.get(&registry))
+        .map(|c| c.access_token.as_str());
+
+    let client = if let Some(t) = token {
+        RegistryClient::with_token(&registry, t)
+    } else {
+        RegistryClient::new(&registry)
+    };
+
+    // Get endpoint manifest to show what will be downloaded
+    let manifest = client
+        .fetch_manifest(&owner, &project, &endpoint, &ref_name)
+        .await?;
+
+    println!(
+        "  Commit: {}",
+        &manifest.commit_hash[..8.min(manifest.commit_hash.len())]
+    );
+    println!("  Data sources: {}", manifest.data_hashes.len());
+    println!("  Transforms: {}", manifest.transform_hashes.len());
+
+    // Download the endpoint content
+    let tar_data = client
+        .fetch(&owner, &project, &endpoint, &ref_name)
+        .await?;
+
+    // Create a temporary directory and set up as minimal ozzy project
+    let temp_dir = tempfile::tempdir()?;
+    let temp_path = temp_dir.path();
+    setup_temp_project(temp_path, &project, &owner)?;
+
+    // Extract tar to temp directory
+    let cursor = std::io::Cursor::new(tar_data);
+    let mut archive = tar::Archive::new(cursor);
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_path_buf();
+        let dest_path = temp_path.join(&path);
+
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut content = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut content)?;
+
+        let mut file = std::fs::File::create(&dest_path)?;
+        file.write_all(&content)?;
+    }
+
+    // Read and deserialize endpoint definition
+    let endpoint_content = std::fs::read_to_string(temp_path.join("endpoint.json"))
+        .context("Endpoint definition not found in archive")?;
+    let endpoint_def: Endpoint =
+        serde_json::from_str(&endpoint_content).context("Failed to parse endpoint definition")?;
+
+    // Open the temp project and discover data sources / transforms
+    let temp_project = ozzy_core::Project::open(temp_path)?;
+    let data_sources = commit::collect_data_sources(&temp_project)?;
+    let transforms = commit::collect_transforms(&temp_project)?;
+
+    println!();
+    println!("Executing endpoint locally...");
+
+    // Build params from CLI
+    let params_override: serde_json::Value = if params.is_empty() {
+        serde_json::json!({})
+    } else {
+        let mut map = serde_json::Map::new();
+        for (key, value) in params {
+            let json_value = serde_json::from_str(value)
+                .unwrap_or_else(|_| serde_json::Value::String(value.clone()));
+            map.insert(key.clone(), json_value);
+        }
+        serde_json::Value::Object(map)
+    };
+
+    // Platform fingerprint and cache
+    let plat = platform::PlatformFingerprint::detect();
+    println!("Platform: {}", plat.short_string());
+
+    let tiered_config = temp_project.config.cache.to_tiered_config();
+    let tiered_cache = TieredCache::new(&tiered_config).await?;
+
+    // Build and display execution plan
+    let execution_order = build_execution_order(&endpoint_def);
+    println!("Execution plan:");
+    for node_name in &execution_order {
+        let node = endpoint_def
+            .nodes
+            .iter()
+            .find(|n| n.node_name == *node_name)
+            .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in endpoint", node_name))?;
+        println!("  {} (transform: {})", node_name, node.transform_name);
+    }
+    println!();
+
+    // Execute each node
+    let mut node_outputs: HashMap<String, PathBuf> = HashMap::new();
+    let mut non_reproducible_nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for node_name in &execution_order {
+        let node = endpoint_def
+            .nodes
+            .iter()
+            .find(|n| n.node_name == *node_name)
+            .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in endpoint", node_name))?;
+        let transform = transforms.get(&node.transform_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Transform '{}' not found in downloaded archive",
+                node.transform_name
+            )
+        })?;
+
+        // Find input edges
+        let input_edges: Vec<_> = endpoint_def
+            .edges
+            .iter()
+            .filter(|e| e.target_node == *node_name)
+            .collect();
+
+        if input_edges.is_empty() {
+            anyhow::bail!("No input edges for node '{}'", node_name);
+        }
+
+        // Build input paths
+        let mut input_paths: HashMap<String, PathBuf> = HashMap::new();
+        for edge in &input_edges {
+            let input_path = match edge.source_type {
+                SourceType::DataSource => {
+                    let ds = data_sources.get(&edge.source_ref).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Data source '{}' not found in downloaded archive",
+                            edge.source_ref
+                        )
+                    })?;
+                    temp_project.root.join(&ds.path)
+                }
+                SourceType::Node => node_outputs
+                    .get(&edge.source_ref)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Node output '{}' not available yet", edge.source_ref)
+                    })?
+                    .clone(),
+                SourceType::External => {
+                    anyhow::bail!("External dependencies not yet supported in remote fetch");
+                }
+            };
+            input_paths.insert(edge.input_name.clone(), input_path);
+        }
+
+        // Compute input hashes for all inputs
+        let mut input_hash_pairs: Vec<(String, String)> = Vec::new();
+        for (input_name, input_path) in &input_paths {
+            let h = hash::blake3_hash_file(input_path)?;
+            input_hash_pairs.push((input_name.clone(), h));
+        }
+
+        let effective_params =
+            if params_override.as_object().map(|m| !m.is_empty()).unwrap_or(false) {
+                let mut merged = node.params.clone();
+                if let (Some(base), Some(overrides)) =
+                    (merged.as_object_mut(), params_override.as_object())
+                {
+                    for (k, v) in overrides {
+                        base.insert(k.clone(), v.clone());
+                    }
+                }
+                merged
+            } else {
+                node.params.clone()
+            };
+
+        let params_hash = canon::hash_json(&effective_params);
+        let params_schema_hash = canon::hash_json(&transform.params_schema);
+        let full_transform_hash = hash::transform_hash(
+            &transform.hash,
+            &transform.lockfile_hash,
+            &transform.runtime,
+            &params_schema_hash,
+        );
+
+        // Use the proper multi-input hash function with \0-separated format
+        let input_refs: Vec<(&str, &str)> = input_hash_pairs.iter()
+            .map(|(n, h)| (n.as_str(), h.as_str()))
+            .collect();
+        let materialized_hash = hash::materialized_hash_multi_input(
+            &input_refs,
+            &full_transform_hash,
+            &params_hash,
+            &plat.hash(),
+        );
+
+        println!("Executing: {}", node_name);
+        println!("  Materialized hash: {}...", &materialized_hash[..12]);
+
+        // Check if this node inherits non-reproducibility from an upstream node
+        let has_non_reproducible_upstream = endpoint_def.edges.iter()
+            .filter(|e| e.target_node == *node_name && e.source_type == SourceType::Node)
+            .any(|e| non_reproducible_nodes.contains(&e.source_ref));
+
+        // Non-reproducible transforms (direct or inherited) always re-execute and don't cache
+        let effectively_non_reproducible = !transform.reproducible || has_non_reproducible_upstream;
+        let output_path = if effectively_non_reproducible {
+            if !transform.reproducible {
+                println!("  Cache: SKIP (non-reproducible transform)");
+            } else {
+                println!("  Cache: SKIP (non-reproducible upstream)");
+            }
+            execute_node_no_cache(&temp_project, transform, &input_paths, &effective_params).await?
+        } else if let Some(cached_path) = tiered_cache.get_path(&materialized_hash).await? {
+            if cached_path.exists() {
+                println!("  Cache: HIT");
+                cached_path
+                } else {
+                    execute_node(
+                        &temp_project,
+                        transform,
+                        &input_paths,
+                        &effective_params,
+                        &materialized_hash,
+                        &tiered_cache,
+                        &plat,
+                    )
+                    .await?
+                }
+            } else {
+                execute_node(
+                    &temp_project,
+                    transform,
+                    &input_paths,
+                    &effective_params,
+                    &materialized_hash,
+                    &tiered_cache,
+                    &plat,
+                )
+                .await?
+            };
+
+        if effectively_non_reproducible {
+            non_reproducible_nodes.insert(node_name.clone());
+        }
+
+        node_outputs.insert(node_name.clone(), output_path);
+    }
+
+    // Get final output
+    let final_node = execution_order.last().context("Empty execution plan")?;
+    let final_output = node_outputs
+        .get(final_node)
+        .context("Final node output not found")?;
+
+    // Copy to output location
+    let output_path = if let Some(out) = output {
+        PathBuf::from(out)
+    } else {
+        PathBuf::from(format!("{}-{}-{}.parquet", project, endpoint, ref_name))
+    };
+
+    std::fs::copy(final_output, &output_path)?;
+    println!();
+    println!("Output written to: {}", output_path.display());
+
+    Ok(())
+}
+
+/// Execute a single transform node.
+async fn execute_node(
+    project: &ozzy_core::Project,
+    transform: &ozzy_core::project::Transform,
+    input_paths: &HashMap<String, PathBuf>,
+    params: &serde_json::Value,
+    materialized_hash: &str,
+    cache: &TieredCache,
+    platform: &platform::PlatformFingerprint,
+) -> Result<PathBuf> {
+    println!("  Cache: MISS - executing transform");
+
+    let transform_path = project.root.join(&transform.source_path);
+    let temp_dir = tempfile::tempdir()?;
+    let temp_output = temp_dir.path().join("output.parquet");
+
+    runtime::execute_transform_multi(&transform_path, &transform.function_name, input_paths, &temp_output, params)?;
+
+    let cached_path = cache
+        .put(materialized_hash, &platform.short_string(), &temp_output, None)
+        .await?;
+
+    println!("  Cached at: {}", cached_path.display());
+    Ok(cached_path)
+}
+
+/// Execute a single transform node without caching (for non-reproducible transforms).
+async fn execute_node_no_cache(
+    project: &ozzy_core::Project,
+    transform: &ozzy_core::project::Transform,
+    input_paths: &HashMap<String, PathBuf>,
+    params: &serde_json::Value,
+) -> Result<PathBuf> {
+    println!("  Executing transform (no cache)");
+
+    let transform_path = project.root.join(&transform.source_path);
+    let cache_dir = ozzy_core::cache::default_cache_dir();
+    std::fs::create_dir_all(&cache_dir)?;
+    let temp_output = cache_dir.join(format!("nocache_{}.parquet",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()));
+
+    runtime::execute_transform_multi(&transform_path, &transform.function_name, input_paths, &temp_output, params)?;
+
+    println!("  Output: {}", temp_output.display());
+    Ok(temp_output)
+}

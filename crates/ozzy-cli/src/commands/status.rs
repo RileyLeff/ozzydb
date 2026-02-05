@@ -77,8 +77,10 @@ pub async fn show() -> Result<()> {
         for entry in fs::read_dir(&staged_dir)? {
             let entry = entry?;
             if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
-                let name = entry.path().file_stem().unwrap().to_string_lossy().to_string();
-                staged_endpoints.push(format!("  new:      endpoint/{}", name));
+                if let Some(stem) = entry.path().file_stem() {
+                    let name = stem.to_string_lossy().to_string();
+                    staged_endpoints.push(format!("  new:      endpoint/{}", name));
+                }
             }
         }
     }

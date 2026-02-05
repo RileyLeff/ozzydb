@@ -33,5 +33,8 @@ async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true
 
+# HTTP client for registry
+reqwest.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

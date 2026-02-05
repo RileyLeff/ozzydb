@@ -131,25 +131,87 @@ pub async fn remove(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn test(name: &str, sample: usize) -> Result<()> {
+pub async fn test(name: &str, _sample: usize) -> Result<()> {
     let project = Project::find_current()?;
 
     // Validate name to prevent path traversal
     validate_safe_name(name)?;
 
     let transforms = commit::collect_transforms(&project)?;
+    let transform = transforms
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("Transform '{}' not found", name))?;
 
-    if !transforms.contains_key(name) {
-        anyhow::bail!("Transform '{}' not found", name);
-    }
+    let data_sources = commit::collect_data_sources(&project)?;
 
     println!("Testing transform: {}", name);
-    println!("Sample size: {} rows", sample);
+    println!("  Source: {}", transform.source_path);
+    println!("  Function: {}", transform.function_name);
+    if !transform.reproducible {
+        println!("  Warning: marked as non-reproducible (reproducible=False)");
+    }
     println!();
-    println!("TODO: Implement transform testing");
-    println!("  - Would sample input data");
-    println!("  - Execute transform on sample");
-    println!("  - Report execution time and output schema");
+
+    // Find a suitable data source to test with
+    let test_input = match data_sources.values().next() {
+        Some(ds) => ds,
+        None => {
+            println!("No data sources found. Add data with 'ozzy data add' to test transforms.");
+            return Ok(());
+        }
+    };
+    let input_path = project.root.join(&test_input.path);
+
+    if !input_path.exists() {
+        anyhow::bail!("Data source file not found: {}", input_path.display());
+    }
+
+    println!("Input: {} ({} rows)", test_input.name, test_input.row_count.unwrap_or(0));
+    println!();
+
+    // Execute the transform
+    let temp_dir = tempfile::tempdir()?;
+    let temp_output = temp_dir.path().join("test_output.parquet");
+
+    let mut input_paths = std::collections::HashMap::new();
+    input_paths.insert("main".to_string(), input_path);
+
+    let params = serde_json::json!({});
+    let start = std::time::Instant::now();
+
+    match ozzy_core::runtime::execute_transform_multi(
+        &project.root.join(&transform.source_path),
+        &transform.function_name,
+        &input_paths,
+        &temp_output,
+        &params,
+    ) {
+        Ok(()) => {
+            let elapsed = start.elapsed();
+            println!("Execution: OK ({:.2}s)", elapsed.as_secs_f64());
+
+            if temp_output.exists() {
+                let metadata = fs::metadata(&temp_output)?;
+                let row_count = ozzy_core::schema::get_parquet_row_count(&temp_output).unwrap_or(0);
+                println!("Output: {} rows, {}", row_count, ozzy_core::cache::format_size(metadata.len()));
+
+                if let Ok(schema) = ozzy_core::schema::extract_parquet_schema(&temp_output) {
+                    println!();
+                    println!("Output schema:");
+                    for field in &schema.fields {
+                        let nullable = if field.nullable { " (nullable)" } else { "" };
+                        println!("  {}: {}{}", field.name, field.dtype, nullable);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let elapsed = start.elapsed();
+            println!("Execution: FAILED ({:.2}s)", elapsed.as_secs_f64());
+            println!();
+            println!("Error: {}", e);
+        }
+    }
 
     Ok(())
 }

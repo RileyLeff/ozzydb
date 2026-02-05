@@ -117,7 +117,7 @@ class TestParseRef:
 
     def test_parse_relative_ref(self, tmp_path):
         """Test parsing relative reference."""
-        from ozzydb.client import _parse_ref
+        from ozzydb.client import _parse_local_ref
 
         project_dir = create_test_project(tmp_path)
 
@@ -125,7 +125,7 @@ class TestParseRef:
         old_cwd = os.getcwd()
         try:
             os.chdir(tmp_path)
-            project_path, endpoint = _parse_ref("test-project/endpoint1")
+            project_path, endpoint = _parse_local_ref("test-project/endpoint1")
             assert project_path == project_dir
             assert endpoint == "endpoint1"
         finally:
@@ -133,11 +133,11 @@ class TestParseRef:
 
     def test_parse_absolute_ref(self, tmp_path):
         """Test parsing absolute reference."""
-        from ozzydb.client import _parse_ref
+        from ozzydb.client import _parse_local_ref
 
         project_dir = create_test_project(tmp_path)
 
-        project_path, endpoint = _parse_ref(f"{project_dir}/myendpoint")
+        project_path, endpoint = _parse_local_ref(f"{project_dir}/myendpoint")
         assert project_path == project_dir
         assert endpoint == "myendpoint"
 

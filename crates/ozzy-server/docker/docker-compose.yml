@@ -1,0 +1,62 @@
+# Development/Testing Docker Compose
+# Includes PostgreSQL 18 + MinIO (S3-compatible storage)
+#
+# Usage:
+#   docker compose up -d
+#   just dev-server  # Run server against these services
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: ozzy-postgres-dev
+    environment:
+      POSTGRES_USER: ozzy
+      POSTGRES_PASSWORD: ozzy_dev_password
+      POSTGRES_DB: ozzy
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ozzy -d ozzy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: ozzy-minio-dev
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # One-time bucket creation
+  minio-init:
+    image: minio/mc:latest
+    container_name: ozzy-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb local/ozzy-content --ignore-existing;
+      mc anonymous set download local/ozzy-content;
+      echo 'Bucket ozzy-content created';
+      "
+
+volumes:
+  postgres_data:
+  minio_data:

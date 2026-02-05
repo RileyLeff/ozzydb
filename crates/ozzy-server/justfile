@@ -1,0 +1,115 @@
+# Justfile for ozzy-server development and deployment
+# Install just: cargo install just
+
+set dotenv-load := true
+
+# Default recipe
+default:
+    @just --list
+
+# ============ Development ============
+
+# Start dev services (postgres + minio)
+dev-up:
+    docker compose -f docker/docker-compose.yml up -d
+    @echo "Waiting for services to be healthy..."
+    @sleep 3
+    @echo "PostgreSQL: localhost:5432"
+    @echo "MinIO API:  localhost:9000"
+    @echo "MinIO Console: localhost:9001 (minioadmin/minioadmin)"
+
+# Stop dev services
+dev-down:
+    docker compose -f docker/docker-compose.yml down
+
+# Stop and remove dev volumes
+dev-clean:
+    docker compose -f docker/docker-compose.yml down -v
+
+# View dev logs
+dev-logs:
+    docker compose -f docker/docker-compose.yml logs -f
+
+# Run server locally against dev services
+dev-server:
+    @test -f docker/.env || cp docker/.env.example docker/.env
+    @echo "Loading docker/.env..."
+    @set -a && source docker/.env && set +a && cargo run --package ozzy-server
+
+# Run server with auto-reload (requires cargo-watch)
+dev-watch:
+    @test -f docker/.env || cp docker/.env.example docker/.env
+    cargo watch -x 'run --package ozzy-server'
+
+# ============ Testing ============
+
+# Run tests with dev services
+test: dev-up
+    @sleep 2
+    source docker/.env.test && cargo test --package ozzy-server
+    @just dev-down
+
+# Run specific test
+test-one NAME:
+    source docker/.env.test && cargo test --package ozzy-server {{NAME}}
+
+# ============ Database ============
+
+# Connect to dev postgres
+db-shell:
+    docker exec -it ozzy-postgres-dev psql -U ozzy -d ozzy
+
+# Run migrations manually (they auto-run on container start)
+db-migrate:
+    docker exec -it ozzy-postgres-dev psql -U ozzy -d ozzy -f /docker-entrypoint-initdb.d/001_initial.sql
+
+# Reset database (drops and recreates)
+db-reset:
+    docker exec -it ozzy-postgres-dev psql -U ozzy -d postgres -c "DROP DATABASE IF EXISTS ozzy"
+    docker exec -it ozzy-postgres-dev psql -U ozzy -d postgres -c "CREATE DATABASE ozzy"
+    @just db-migrate
+
+# ============ Production ============
+
+# Build production Docker image
+prod-build:
+    docker build -t ozzy-server:latest -f docker/Dockerfile ..
+
+# Start production stack
+prod-up:
+    @test -f docker/.env.prod || (echo "Error: docker/.env.prod not found. Copy from .env.prod.example" && exit 1)
+    docker compose -f docker/docker-compose.prod.yml --env-file docker/.env.prod up -d
+
+# Stop production stack
+prod-down:
+    docker compose -f docker/docker-compose.prod.yml --env-file docker/.env.prod down
+
+# View production logs
+prod-logs:
+    docker compose -f docker/docker-compose.prod.yml --env-file docker/.env.prod logs -f
+
+# Production postgres shell
+prod-db-shell:
+    docker exec -it ozzy-postgres psql -U $${POSTGRES_USER:-ozzy} -d $${POSTGRES_DB:-ozzy}
+
+# ============ Utilities ============
+
+# Check if services are running
+status:
+    @echo "=== Development ==="
+    @docker ps --filter "name=ozzy-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "No containers running"
+
+# Clean all ozzy containers and volumes
+clean-all:
+    docker compose -f docker/docker-compose.yml down -v 2>/dev/null || true
+    docker compose -f docker/docker-compose.prod.yml down -v 2>/dev/null || true
+    docker rmi ozzy-server:latest 2>/dev/null || true
+
+# Format and lint
+fmt:
+    cargo fmt --package ozzy-server
+    cargo clippy --package ozzy-server -- -D warnings
+
+# Build release binary locally
+build-release:
+    cargo build --release --package ozzy-server

@@ -378,12 +378,6 @@ print("SUCCESS")
     }
 }
 
-impl Default for PythonRuntime {
-    fn default() -> Self {
-        Self::new().expect("Failed to initialize Python runtime")
-    }
-}
-
 /// Execute a transform using uv run with polars (default simple execution).
 /// This is the recommended way to run transforms - no manual env management needed.
 pub fn execute_transform_uv(

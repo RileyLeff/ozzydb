@@ -109,6 +109,64 @@ enum Commands {
         #[command(subcommand)]
         command: CacheCommands,
     },
+
+    /// Authentication commands
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommands,
+    },
+
+    /// Manage remote registries
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommands,
+    },
+
+    /// Push project to remote registry
+    Push {
+        /// Commit message
+        #[arg(short, long)]
+        message: Option<String>,
+
+        /// Remote name (defaults to 'origin')
+        #[arg(long, default_value = "origin")]
+        remote: String,
+    },
+
+    /// Pull project from remote registry
+    Pull {
+        /// Remote name (defaults to 'origin')
+        #[arg(long, default_value = "origin")]
+        remote: String,
+
+        /// Ref to pull (branch or tag, defaults to 'main')
+        #[arg(long, default_value = "main")]
+        r#ref: String,
+    },
+
+    /// Fetch and execute a remote endpoint
+    Fetch {
+        /// Remote endpoint (format: owner/project/endpoint[@ref])
+        endpoint: String,
+
+        /// Output file path (parquet)
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Transform parameters (key=value, can be repeated)
+        #[arg(short, long = "param", value_parser = parse_param)]
+        params: Vec<(String, String)>,
+
+        /// Registry URL (defaults to configured origin)
+        #[arg(long)]
+        registry: Option<String>,
+    },
+
+    /// Manage tags
+    Tag {
+        #[command(subcommand)]
+        command: TagCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -212,12 +270,8 @@ enum CacheCommands {
     /// Show cache size
     Size,
 
-    /// Clear cache
-    Clear {
-        /// Only clear entries for a specific project
-        #[arg(long)]
-        project: Option<String>,
-    },
+    /// Clear all cached entries
+    Clear,
 
     /// Push local cache entries to remote
     Push {
@@ -262,6 +316,116 @@ enum CacheCommands {
 
     /// Show cache status (local and remote)
     Status,
+}
+
+#[derive(Subcommand)]
+enum AuthCommands {
+    /// Login to registry via GitHub
+    Login {
+        /// Registry URL (defaults to https://registry.ozzydb.dev)
+        #[arg(long)]
+        registry: Option<String>,
+    },
+
+    /// Logout from registry
+    Logout {
+        /// Registry URL (defaults to https://registry.ozzydb.dev)
+        #[arg(long)]
+        registry: Option<String>,
+    },
+
+    /// Manage API tokens
+    Token {
+        #[command(subcommand)]
+        command: TokenCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum TokenCommands {
+    /// Create a new API token
+    Create {
+        /// Token name
+        name: String,
+
+        /// Scopes for the token (comma-separated)
+        #[arg(long, default_value = "read,write")]
+        scopes: String,
+
+        /// Expiration in days
+        #[arg(long)]
+        expires: Option<u32>,
+
+        /// Registry URL
+        #[arg(long)]
+        registry: Option<String>,
+    },
+
+    /// List API tokens
+    Ls {
+        /// Registry URL
+        #[arg(long)]
+        registry: Option<String>,
+    },
+
+    /// Revoke an API token
+    Revoke {
+        /// Token name
+        name: String,
+
+        /// Registry URL
+        #[arg(long)]
+        registry: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RemoteCommands {
+    /// Add a remote registry
+    Add {
+        /// Remote name
+        name: String,
+
+        /// Registry URL
+        url: String,
+    },
+
+    /// Remove a remote
+    Rm {
+        /// Remote name
+        name: String,
+    },
+
+    /// List remotes
+    Ls,
+}
+
+#[derive(Subcommand)]
+enum TagCommands {
+    /// Create a tag
+    Create {
+        /// Tag name
+        name: String,
+
+        /// Tag message
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+
+    /// List tags
+    Ls,
+
+    /// Delete a tag
+    Rm {
+        /// Tag name
+        name: String,
+    },
+
+    /// Show tag details
+    Show {
+        /// Tag name
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -336,8 +500,8 @@ async fn main() -> Result<()> {
             CacheCommands::Size => {
                 commands::cache::size().await
             }
-            CacheCommands::Clear { project } => {
-                commands::cache::clear(project.as_deref()).await
+            CacheCommands::Clear => {
+                commands::cache::clear().await
             }
             CacheCommands::Push { all, hash, dry_run } => {
                 commands::cache::push(all, hash.as_deref(), dry_run).await
@@ -350,6 +514,61 @@ async fn main() -> Result<()> {
             }
             CacheCommands::Status => {
                 commands::cache::status().await
+            }
+        },
+        Commands::Auth { command } => match command {
+            AuthCommands::Login { registry } => {
+                commands::auth::login(registry.as_deref()).await
+            }
+            AuthCommands::Logout { registry } => {
+                commands::auth::logout(registry.as_deref()).await
+            }
+            AuthCommands::Token { command } => match command {
+                TokenCommands::Create { name, scopes, expires, registry } => {
+                    let scope_list: Vec<String> = scopes.split(',').map(|s| s.trim().to_string()).collect();
+                    commands::auth::token_create(&name, &scope_list, expires, registry.as_deref()).await
+                }
+                TokenCommands::Ls { registry } => {
+                    commands::auth::token_list(registry.as_deref()).await
+                }
+                TokenCommands::Revoke { name, registry } => {
+                    commands::auth::token_revoke(&name, registry.as_deref()).await
+                }
+            },
+        },
+        Commands::Remote { command } => match command {
+            RemoteCommands::Add { name, url } => {
+                commands::remote::add(&name, &url).await
+            }
+            RemoteCommands::Rm { name } => {
+                commands::remote::remove(&name).await
+            }
+            RemoteCommands::Ls => {
+                commands::remote::list().await
+            }
+        },
+        Commands::Push { message, remote } => {
+            commands::push::run(message.as_deref(), Some(&remote)).await
+        }
+        Commands::Pull { remote, r#ref } => {
+            commands::pull::run(Some(&remote), Some(&r#ref)).await
+        }
+        Commands::Fetch { endpoint, output, params, registry: _ } => {
+            // Registry is parsed from the endpoint reference itself
+            commands::fetch::run(&endpoint, output.as_deref(), &params).await
+        }
+        Commands::Tag { command } => match command {
+            TagCommands::Create { name, message } => {
+                commands::tag::create(&name, message.as_deref()).await
+            }
+            TagCommands::Ls => {
+                commands::tag::list().await
+            }
+            TagCommands::Rm { name } => {
+                commands::tag::delete(&name).await
+            }
+            TagCommands::Show { name } => {
+                commands::tag::show(&name).await
             }
         },
     }

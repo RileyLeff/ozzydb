@@ -348,7 +348,12 @@ impl CacheBackend for LocalCache {
 }
 
 /// Get the default cache directory.
+///
+/// Respects `OZZY_CACHE_DIR` env var if set, otherwise uses `~/.ozzy/cache/`.
 pub fn default_cache_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("OZZY_CACHE_DIR") {
+        return PathBuf::from(dir);
+    }
     dirs::home_dir()
         .map(|h| h.join(".ozzy/cache"))
         .unwrap_or_else(|| PathBuf::from(".ozzy/cache"))

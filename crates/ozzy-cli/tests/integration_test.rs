@@ -389,6 +389,7 @@ fn test_endpoint_missing_transform() {
 #[test]
 fn test_caching_works() {
     let dir = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
 
     // Initialize project
     ozzy()
@@ -425,9 +426,10 @@ fn test_caching_works() {
         .assert()
         .success();
 
-    // First run - should be a cache MISS
+    // First run - should be a cache MISS (isolated cache dir)
     ozzy()
         .current_dir(dir.path())
+        .env("OZZY_CACHE_DIR", cache_dir.path())
         .args(["run", "filtered"])
         .assert()
         .success()
@@ -436,6 +438,7 @@ fn test_caching_works() {
     // Second run - should be a cache HIT
     ozzy()
         .current_dir(dir.path())
+        .env("OZZY_CACHE_DIR", cache_dir.path())
         .args(["run", "filtered"])
         .assert()
         .success()
@@ -444,6 +447,7 @@ fn test_caching_works() {
     // Run with --force should skip cache
     ozzy()
         .current_dir(dir.path())
+        .env("OZZY_CACHE_DIR", cache_dir.path())
         .args(["run", "filtered", "--force"])
         .assert()
         .success()
@@ -583,6 +587,7 @@ fn test_multi_input_endpoint() {
 #[test]
 fn test_cli_params() {
     let dir = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
 
     // Initialize project
     ozzy()
@@ -620,6 +625,7 @@ fn test_cli_params() {
     // Run with custom threshold parameter
     ozzy()
         .current_dir(dir.path())
+        .env("OZZY_CACHE_DIR", cache_dir.path())
         .args(["run", "filtered", "--param", "threshold=15.0"])
         .assert()
         .success()
@@ -629,6 +635,7 @@ fn test_cli_params() {
     // Different param should cause cache miss (different materialized hash)
     ozzy()
         .current_dir(dir.path())
+        .env("OZZY_CACHE_DIR", cache_dir.path())
         .args(["run", "filtered", "--param", "threshold=5.0"])
         .assert()
         .success()

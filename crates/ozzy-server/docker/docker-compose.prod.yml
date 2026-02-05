@@ -1,0 +1,81 @@
+# Production Docker Compose
+# PostgreSQL 18 + Caddy reverse proxy + ozzy-server
+# Uses external R2 for storage (configured via environment)
+#
+# Usage:
+#   cp .env.prod.example .env.prod
+#   # Edit .env.prod with real values
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: ozzy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ozzy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      POSTGRES_DB: ${POSTGRES_DB:-ozzy}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ozzy} -d ${POSTGRES_DB:-ozzy}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Not exposed externally - only accessible to server
+
+  server:
+    build:
+      context: ../..
+      dockerfile: ozzy-server/docker/Dockerfile
+    container_name: ozzy-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BIND_ADDRESS: "0.0.0.0:3000"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-ozzy}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ozzy}"
+      DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-20}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?GITHUB_CLIENT_ID required}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?GITHUB_CLIENT_SECRET required}
+      BASE_URL: ${BASE_URL:?BASE_URL required}
+      R2_ENDPOINT: ${R2_ENDPOINT:?R2_ENDPOINT required}
+      R2_BUCKET: ${R2_BUCKET:?R2_BUCKET required}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID required}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY required}
+      R2_REGION: ${R2_REGION:-auto}
+      MAX_TAR_SIZE_BYTES: ${MAX_TAR_SIZE_BYTES:-1073741824}
+      MAX_UPLOAD_SIZE_BYTES: ${MAX_UPLOAD_SIZE_BYTES:-104857600}
+      RUST_LOG: ${RUST_LOG:-info,ozzy_server=debug}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    # Not exposed externally - only accessible to Caddy
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: ozzy-caddy
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN required}
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

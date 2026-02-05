@@ -59,6 +59,9 @@ pub enum Error {
     #[error("Python execution failed: {0}")]
     PythonError(String),
 
+    #[error("Registry error: {0}")]
+    Registry(String),
+
     #[error("No changes to commit")]
     NothingToCommit,
 

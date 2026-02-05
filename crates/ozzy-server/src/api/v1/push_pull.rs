@@ -1,0 +1,732 @@
+//! Push/pull API endpoints for syncing projects.
+
+use axum::{
+    body::Body,
+    extract::{Multipart, Path, Query, State},
+    http::header,
+    response::Response,
+    routing::{get, post},
+    Json, Router,
+};
+use ozzy_core::registry::protocol::{
+    ContentCheckRequest, ContentCheckResponse, EndpointManifest, PullManifest, PushResponse,
+};
+use parquet::file::reader::{FileReader, SerializedFileReader};
+use serde::Deserialize;
+use std::collections::HashMap;
+
+use super::auth::ApiError;
+use crate::{auth::middleware::{AuthUser, MaybeAuthUser, WriteAuthUser}, db::Project, AppState};
+
+/// Extract Arrow schema from parquet bytes as a JSON value.
+fn extract_parquet_schema(data: &[u8]) -> Result<serde_json::Value, anyhow::Error> {
+    let reader = SerializedFileReader::new(bytes::Bytes::from(data.to_vec()))
+        .map_err(|e| anyhow::anyhow!("Failed to read parquet file: {}", e))?;
+    let schema = reader.metadata().file_metadata().schema_descr();
+    let mut fields = Vec::new();
+    for col in schema.columns() {
+        fields.push(serde_json::json!({
+            "name": col.name(),
+            "type": format!("{:?}", col.physical_type()),
+            "nullable": col.self_type().is_optional(),
+        }));
+    }
+    Ok(serde_json::json!({ "fields": fields }))
+}
+
+/// Normalize ref name by stripping refs/heads/ or refs/tags/ prefix.
+fn normalize_ref_name(ref_name: &str) -> &str {
+    ref_name
+        .strip_prefix("refs/heads/")
+        .or_else(|| ref_name.strip_prefix("refs/tags/"))
+        .unwrap_or(ref_name)
+}
+
+/// Check if a user can access a project based on visibility.
+fn check_project_access(project: &Project, user: &Option<crate::db::User>) -> Result<(), ApiError> {
+    match project.visibility.as_str() {
+        "public" => Ok(()),
+        "org" => {
+            // Org visibility - any authenticated user can access
+            match user {
+                Some(_) => Ok(()),
+                None => Err(ApiError::unauthorized("Authentication required for org-visible projects")),
+            }
+        }
+        _ => {
+            // Private project - require authentication and ownership
+            match user {
+                Some(u) if u.id == project.owner_user_id => Ok(()),
+                Some(_) => Err(ApiError::forbidden("You don't have access to this project")),
+                None => Err(ApiError::unauthorized("Authentication required for private projects")),
+            }
+        }
+    }
+}
+
+/// Validate a filename to prevent path traversal attacks.
+/// Returns the sanitized filename if valid, or an error if invalid.
+fn validate_filename(name: &str) -> Result<&str, anyhow::Error> {
+    // Check for path traversal attempts
+    if name.contains("..") {
+        anyhow::bail!("Invalid filename: path traversal detected");
+    }
+
+    // Check for absolute paths
+    if name.starts_with('/') || name.starts_with('\\') {
+        anyhow::bail!("Invalid filename: absolute paths not allowed");
+    }
+
+    // Check for Windows-style drive letters
+    if name.len() >= 2 && name.chars().nth(1) == Some(':') {
+        anyhow::bail!("Invalid filename: drive letters not allowed");
+    }
+
+    // Check for null bytes (could cause truncation issues)
+    if name.contains('\0') {
+        anyhow::bail!("Invalid filename: null bytes not allowed");
+    }
+
+    Ok(name)
+}
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        // Push/pull endpoints
+        .route("/{owner}/{project}/push", post(push))
+        .route("/{owner}/{project}/pull", get(pull))
+        .route("/{owner}/{project}/pull/manifest", get(pull_manifest))
+        // Content check for deduplication
+        .route("/{owner}/{project}/content/check", post(check_content))
+        // Endpoint fetch
+        .route("/{owner}/{project}/{endpoint}@{ref}", get(fetch_endpoint))
+        .route(
+            "/{owner}/{project}/{endpoint}@{ref}/manifest",
+            get(fetch_endpoint_manifest),
+        )
+}
+
+#[derive(Deserialize)]
+struct RefQuery {
+    #[serde(rename = "ref")]
+    ref_name: Option<String>,
+}
+
+/// Push a commit with data and transforms.
+async fn push(
+    WriteAuthUser(user): WriteAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug)): Path<(String, String)>,
+    mut multipart: Multipart,
+) -> Result<Json<PushResponse>, ApiError> {
+    // Verify ownership
+    if owner != user.username {
+        return Err(anyhow::anyhow!("Cannot push to another user's project").into());
+    }
+
+    // Get or create project (upsert to avoid race on first push)
+    let project = state
+        .db
+        .get_or_create_project(user.id, &project_slug, "private")
+        .await?;
+
+    let mut commit_json: Option<serde_json::Value> = None;
+    let mut data_files: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut transform_files: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut lockfiles: HashMap<String, Vec<u8>> = HashMap::new();
+
+    // Enforce upload size limit
+    let max_upload = state.config.max_upload_size_bytes;
+    let mut total_upload_size: u64 = 0;
+
+    // Process multipart fields
+    while let Some(field) = multipart.next_field().await? {
+        let name = field.name().unwrap_or("").to_string();
+        let data = field.bytes().await?;
+
+        total_upload_size += data.len() as u64;
+        if total_upload_size > max_upload {
+            return Err(ApiError::bad_request(format!(
+                "Upload size exceeds limit of {} bytes", max_upload
+            )));
+        }
+
+        if name == "commit" {
+            commit_json = Some(serde_json::from_slice(&data)?);
+        } else if name.starts_with("data/") {
+            let filename = name.strip_prefix("data/").unwrap();
+            validate_filename(filename)?;
+            data_files.insert(filename.to_string(), data.to_vec());
+        } else if name.starts_with("transforms/") {
+            let filename = name.strip_prefix("transforms/").unwrap();
+            validate_filename(filename)?;
+            transform_files.insert(filename.to_string(), data.to_vec());
+        } else if name.starts_with("lockfiles/") {
+            let filename = name.strip_prefix("lockfiles/").unwrap();
+            validate_filename(filename)?;
+            lockfiles.insert(filename.to_string(), data.to_vec());
+        }
+    }
+
+    let commit_data = commit_json.ok_or_else(|| anyhow::anyhow!("Missing commit data"))?;
+
+    // Track newly stored hashes for cleanup on failure
+    let mut stored_hashes: Vec<(String, String)> = Vec::new(); // (hash, ext)
+
+    // Store data files, extract schemas, and register content for deduplication tracking
+    let mut new_data_count = 0;
+    let mut data_schemas: HashMap<String, serde_json::Value> = HashMap::new();
+    let store_result: Result<(), ApiError> = async {
+        for (filename, content) in &data_files {
+            let ext = std::path::Path::new(filename)
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("bin");
+            let content_hash = ozzy_core::hash::blake3_hash(content);
+
+            // Extract schema from parquet files
+            if ext == "parquet" {
+                let schema = extract_parquet_schema(content)
+                    .map_err(|e| ApiError::bad_request(format!(
+                        "Invalid parquet file '{}': {}", filename, e
+                    )))?;
+                data_schemas.insert(content_hash.clone(), schema);
+            }
+
+            let is_new = !state.storage.exists(&content_hash, ext).await?;
+            if is_new {
+                state.storage.store(content, ext).await?;
+                stored_hashes.push((content_hash.clone(), ext.to_string()));
+                new_data_count += 1;
+            }
+            let storage_key = format!("content/{}/{}/{}.{}",
+                &content_hash[0..2], &content_hash[2..4], &content_hash, ext);
+            state.db.register_content(&content_hash, &storage_key, ext, content.len() as i64).await?;
+        }
+
+        // Store transform files and register content for deduplication tracking
+        for (filename, content) in &transform_files {
+            let ext = std::path::Path::new(filename)
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("py");
+            let content_hash = ozzy_core::hash::blake3_hash(content);
+            let is_new = !state.storage.exists(&content_hash, ext).await?;
+            if is_new {
+                state.storage.store(content, ext).await?;
+                stored_hashes.push((content_hash.clone(), ext.to_string()));
+            }
+            let storage_key = format!("content/{}/{}/{}.{}",
+                &content_hash[0..2], &content_hash[2..4], &content_hash, ext);
+            state.db.register_content(&content_hash, &storage_key, ext, content.len() as i64).await?;
+        }
+        let new_transform_count = transform_files.len();
+        let _ = new_transform_count;
+
+        // Store lockfiles
+        for (filename, content) in &lockfiles {
+            let content_hash = ozzy_core::hash::blake3_hash(content);
+            let is_new = !state.storage.exists(&content_hash, "lock").await?;
+            if is_new {
+                state.storage.store(content, "lock").await?;
+                stored_hashes.push((content_hash.clone(), "lock".to_string()));
+            }
+            let storage_key = format!("content/{}/{}/{}.lock",
+                &content_hash[0..2], &content_hash[2..4], &content_hash);
+            state.db.register_content(&content_hash, &storage_key, "lock", content.len() as i64).await?;
+            let _ = filename;
+        }
+
+        Ok(())
+    }.await;
+
+    // If storage failed, attempt to clean up newly stored files
+    if let Err(e) = store_result {
+        for (hash, ext) in &stored_hashes {
+            let _ = state.storage.delete(hash, ext).await;
+        }
+        return Err(e);
+    }
+
+    let new_transform_count = transform_files.len();
+
+    // Parse commit from JSON
+    let commit: ozzy_core::project::Commit =
+        serde_json::from_value(commit_data.clone()).map_err(|e| anyhow::anyhow!("Invalid commit format: {}", e))?;
+
+    // Create commit in database (with extracted schemas)
+    let commit_id = state
+        .db
+        .create_commit(project.id, &commit, Some(user.id), &data_schemas)
+        .await?;
+
+    // Get the ref name from commit data or default to main, then normalize it
+    let raw_ref_name = commit_data["ref"]
+        .as_str()
+        .unwrap_or("refs/heads/main");
+    let ref_name = normalize_ref_name(raw_ref_name);
+
+    // Update the refs table to point to this commit
+    state
+        .db
+        .upsert_ref(project.id, ref_name, "branch", commit_id)
+        .await?;
+
+    Ok(Json(PushResponse {
+        commit_hash: commit.hash.clone(),
+        ref_name: ref_name.to_string(),
+        new_data_count,
+        new_transform_count,
+    }))
+}
+
+/// Check which content hashes already exist (for deduplication).
+/// Requires ownership of the project to prevent probing for other users' content.
+async fn check_content(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug)): Path<(String, String)>,
+    Json(req): Json<ContentCheckRequest>,
+) -> Result<Json<ContentCheckResponse>, ApiError> {
+    // Verify ownership - only project owner can check content
+    if owner != user.username {
+        return Err(ApiError::forbidden("Can only check content for your own projects"));
+    }
+
+    // Verify project exists and user owns it
+    let project = state.db.get_project(&owner, &project_slug).await?;
+    match project {
+        Some(p) if p.owner_user_id == user.id => { /* OK */ }
+        Some(_) => return Err(ApiError::forbidden("You don't own this project")),
+        None => return Err(ApiError::not_found("Project not found")),
+    }
+
+    let mut missing_data = Vec::new();
+    let mut missing_transforms = Vec::new();
+
+    // Check data hashes
+    for (name, hash) in &req.data_hashes {
+        if !state.storage.exists(hash, "parquet").await? {
+            missing_data.push(name.clone());
+        }
+    }
+
+    // Check transform hashes
+    for (name, hash) in &req.transform_hashes {
+        if !state.storage.exists(hash, "py").await? {
+            missing_transforms.push(name.clone());
+        }
+    }
+
+    Ok(Json(ContentCheckResponse {
+        missing_data,
+        missing_transforms,
+    }))
+}
+
+/// Pull manifest (metadata only, for selective pulls).
+async fn pull_manifest(
+    MaybeAuthUser(user): MaybeAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug)): Path<(String, String)>,
+    Query(query): Query<RefQuery>,
+) -> Result<Json<PullManifest>, ApiError> {
+    let project = state
+        .db
+        .get_project(&owner, &project_slug)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+
+    check_project_access(&project, &user)?;
+
+    let ref_name = query.ref_name.as_deref().unwrap_or("main");
+    let db_ref = state
+        .db
+        .get_ref_by_name(project.id, ref_name)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Ref not found: {}", ref_name))?;
+
+    let commit = state
+        .db
+        .get_commit_by_id(db_ref.commit_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Commit not found"))?;
+
+    // Get data sources and transforms for this commit
+    let data_sources = state.db.get_data_sources(commit.id).await?;
+    let transforms = state.db.get_transforms(commit.id).await?;
+
+    let data_hashes: HashMap<String, String> = data_sources
+        .into_iter()
+        .map(|ds| (ds.name, ds.content_hash))
+        .collect();
+
+    let transform_hashes: HashMap<String, String> = transforms
+        .into_iter()
+        .map(|t| (t.name, t.content_hash))
+        .collect();
+
+    // Calculate total size from content refs
+    let all_hashes: Vec<String> = data_hashes.values()
+        .chain(transform_hashes.values())
+        .cloned()
+        .collect();
+    let total_size_bytes = state.db.get_content_total_size(&all_hashes).await? as u64;
+
+    Ok(Json(PullManifest {
+        commit_hash: commit.hash,
+        commit_message: commit.message,
+        data_hashes,
+        transform_hashes,
+        total_size_bytes,
+    }))
+}
+
+/// Pull full project content as streaming tar.
+async fn pull(
+    MaybeAuthUser(user): MaybeAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug)): Path<(String, String)>,
+    Query(query): Query<RefQuery>,
+) -> Result<Response, ApiError> {
+    let project = state
+        .db
+        .get_project(&owner, &project_slug)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+
+    check_project_access(&project, &user)?;
+
+    let ref_name = query.ref_name.as_deref().unwrap_or("main");
+    let db_ref = state
+        .db
+        .get_ref_by_name(project.id, ref_name)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Ref not found: {}", ref_name))?;
+
+    let commit = state
+        .db
+        .get_commit_by_id(db_ref.commit_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Commit not found"))?;
+
+    // Pre-check estimated content size before loading into memory
+    let max_size = state.config.max_tar_size_bytes;
+    let data_sources = state.db.get_data_sources(commit.id).await?;
+    let transforms = state.db.get_transforms(commit.id).await?;
+
+    let all_content_hashes: Vec<String> = data_sources.iter()
+        .map(|ds| ds.content_hash.clone())
+        .chain(transforms.iter().map(|t| t.content_hash.clone()))
+        .collect();
+    let estimated_size = state.db.get_content_total_size(&all_content_hashes).await? as u64;
+    if estimated_size > max_size {
+        return Err(ApiError::bad_request(format!(
+            "Project content ({} bytes) exceeds size limit ({} bytes)",
+            estimated_size, max_size
+        )));
+    }
+
+    // Build tar archive in memory
+    let mut total_size: u64 = 0;
+    let mut tar_data = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_data);
+
+        // Add commit.json with full commit data (data_sources, transforms, endpoints)
+        let mut commit_data = serde_json::json!({
+            "hash": commit.hash,
+            "message": commit.message,
+            "parent_hashes": commit.parent_hashes,
+            "author": commit.author_name,
+            "timestamp": commit.created_at,
+        });
+
+        // Include data_sources
+        let ds_map: serde_json::Value = data_sources.iter().map(|ds| {
+            (ds.name.clone(), serde_json::json!({
+                "name": ds.name,
+                "hash": ds.content_hash,
+                "schema_hash": ds.schema_hash,
+                "path": format!("data/{}.parquet", ds.name),
+                "row_count": ds.row_count,
+                "byte_size": ds.byte_size,
+            }))
+        }).collect::<serde_json::Map<String, serde_json::Value>>().into();
+        commit_data["data_sources"] = ds_map;
+
+        // Include transforms
+        let t_map: serde_json::Value = transforms.iter().map(|t| {
+            (t.name.clone(), serde_json::json!({
+                "name": t.name,
+                "hash": t.content_hash,
+                "runtime": t.runtime,
+                "source_path": format!("transforms/{}.py", t.name),
+                "function_name": t.function_name,
+                "lockfile_hash": t.lockfile_hash,
+                "params_schema": t.params_schema,
+                "reproducible": t.reproducible,
+                "input_schema": t.input_schema,
+                "output_schema": t.output_schema,
+            }))
+        }).collect::<serde_json::Map<String, serde_json::Value>>().into();
+        commit_data["transforms"] = t_map;
+
+        // Include endpoints
+        let endpoints = state.db.get_endpoints(commit.id).await?;
+        let e_map: serde_json::Value = endpoints.iter().map(|e| {
+            (e.name.clone(), e.definition.clone())
+        }).collect::<serde_json::Map<String, serde_json::Value>>().into();
+        commit_data["endpoints"] = e_map;
+
+        let commit_json = serde_json::to_vec_pretty(&commit_data)?;
+        total_size += commit_json.len() as u64;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(commit_json.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, "commit.json", commit_json.as_slice())?;
+
+        // Add data files (already fetched above for size estimation)
+        for ds in &data_sources {
+            let content = state.storage.get(&ds.content_hash, "parquet").await?;
+            total_size += content.len() as u64;
+            if total_size > max_size {
+                return Err(ApiError::bad_request(format!(
+                    "Archive size exceeds limit of {} bytes",
+                    max_size
+                )));
+            }
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(
+                &mut header,
+                format!("data/{}.parquet", ds.name),
+                &content[..],
+            )?;
+        }
+
+        // Add transform files and their lockfiles (already fetched above)
+        let mut seen_lockfiles = std::collections::HashSet::new();
+        for t in &transforms {
+            let content = state.storage.get(&t.content_hash, "py").await?;
+            total_size += content.len() as u64;
+            if total_size > max_size {
+                return Err(ApiError::bad_request(format!(
+                    "Archive size exceeds limit of {} bytes",
+                    max_size
+                )));
+            }
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(
+                &mut header,
+                format!("transforms/{}.py", t.name),
+                &content[..],
+            )?;
+
+            // Include lockfile if it exists and hasn't been included yet
+            if !t.lockfile_hash.is_empty() && seen_lockfiles.insert(t.lockfile_hash.clone()) {
+                if let Ok(lockfile_content) = state.storage.get(&t.lockfile_hash, "lock").await {
+                    total_size += lockfile_content.len() as u64;
+                    let mut lf_header = tar::Header::new_gnu();
+                    lf_header.set_size(lockfile_content.len() as u64);
+                    lf_header.set_mode(0o644);
+                    lf_header.set_cksum();
+                    builder.append_data(
+                        &mut lf_header,
+                        format!("transforms/{}.lock", t.name),
+                        &lockfile_content[..],
+                    )?;
+                }
+            }
+        }
+
+        builder.finish()?;
+    }
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/x-tar")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}-{}.tar\"", project_slug, ref_name),
+        )
+        .body(Body::from(tar_data))
+        .map_err(|e| ApiError::from(anyhow::anyhow!("Failed to build response: {}", e)))
+}
+
+/// Fetch endpoint manifest.
+async fn fetch_endpoint_manifest(
+    MaybeAuthUser(user): MaybeAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug, endpoint_name, ref_name)): Path<(String, String, String, String)>,
+) -> Result<Json<EndpointManifest>, ApiError> {
+    let project = state
+        .db
+        .get_project(&owner, &project_slug)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+
+    check_project_access(&project, &user)?;
+
+    let db_ref = state
+        .db
+        .get_ref_by_name(project.id, &ref_name)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Ref not found: {}", ref_name))?;
+
+    let commit = state
+        .db
+        .get_commit_by_id(db_ref.commit_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Commit not found"))?;
+
+    let endpoint = state
+        .db
+        .get_endpoint(commit.id, &endpoint_name)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Endpoint not found: {}", endpoint_name))?;
+
+    // Get all data sources and transforms needed for this endpoint
+    let data_sources = state.db.get_data_sources(commit.id).await?;
+    let transforms = state.db.get_transforms(commit.id).await?;
+
+    let data_hashes: HashMap<String, String> = data_sources
+        .into_iter()
+        .map(|ds| (ds.name, ds.content_hash))
+        .collect();
+
+    let transform_hashes: HashMap<String, String> = transforms
+        .into_iter()
+        .map(|t| (t.name, t.content_hash))
+        .collect();
+
+    // Calculate total size from content refs
+    let all_hashes: Vec<String> = data_hashes.values()
+        .chain(transform_hashes.values())
+        .cloned()
+        .collect();
+    let total_size_bytes = state.db.get_content_total_size(&all_hashes).await? as u64;
+
+    Ok(Json(EndpointManifest {
+        commit_hash: commit.hash,
+        endpoint: endpoint.definition,
+        data_hashes,
+        transform_hashes,
+        total_size_bytes,
+    }))
+}
+
+/// Fetch endpoint content as streaming tar.
+async fn fetch_endpoint(
+    MaybeAuthUser(user): MaybeAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug, endpoint_name, ref_name)): Path<(String, String, String, String)>,
+) -> Result<Response, ApiError> {
+    let project = state
+        .db
+        .get_project(&owner, &project_slug)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+
+    check_project_access(&project, &user)?;
+
+    let db_ref = state
+        .db
+        .get_ref_by_name(project.id, &ref_name)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Ref not found: {}", ref_name))?;
+
+    let commit = state
+        .db
+        .get_commit_by_id(db_ref.commit_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Commit not found"))?;
+
+    let endpoint = state
+        .db
+        .get_endpoint(commit.id, &endpoint_name)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Endpoint not found: {}", endpoint_name))?;
+
+    // Track total size for memory protection
+    let max_size = state.config.max_tar_size_bytes;
+    let mut total_size: u64 = 0;
+
+    // Build tar archive
+    let mut tar_data = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_data);
+
+        // Add endpoint definition
+        let endpoint_json = serde_json::to_vec_pretty(&endpoint.definition)?;
+        total_size += endpoint_json.len() as u64;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(endpoint_json.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, "endpoint.json", endpoint_json.as_slice())?;
+
+        // Add data files
+        let data_sources = state.db.get_data_sources(commit.id).await?;
+        for ds in data_sources {
+            let content = state.storage.get(&ds.content_hash, "parquet").await?;
+            total_size += content.len() as u64;
+            if total_size > max_size {
+                return Err(ApiError::bad_request(format!(
+                    "Archive size exceeds limit of {} bytes",
+                    max_size
+                )));
+            }
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(
+                &mut header,
+                format!("data/{}.parquet", ds.name),
+                &content[..],
+            )?;
+        }
+
+        // Add transform files
+        let transforms = state.db.get_transforms(commit.id).await?;
+        for t in transforms {
+            let content = state.storage.get(&t.content_hash, "py").await?;
+            total_size += content.len() as u64;
+            if total_size > max_size {
+                return Err(ApiError::bad_request(format!(
+                    "Archive size exceeds limit of {} bytes",
+                    max_size
+                )));
+            }
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(
+                &mut header,
+                format!("transforms/{}.py", t.name),
+                &content[..],
+            )?;
+        }
+
+        builder.finish()?;
+    }
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/x-tar")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!(
+                "attachment; filename=\"{}-{}-{}.tar\"",
+                project_slug, endpoint_name, ref_name
+            ),
+        )
+        .body(Body::from(tar_data))
+        .map_err(|e| ApiError::from(anyhow::anyhow!("Failed to build response: {}", e)))
+}

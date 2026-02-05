@@ -57,7 +57,7 @@ pub async fn list() -> Result<()> {
 
         if path.extension().map(|e| e == "parquet").unwrap_or(false) {
             found = true;
-            let name = path.file_stem().unwrap().to_string_lossy();
+            let name = path.file_stem().unwrap_or_default().to_string_lossy();
             let metadata = fs::metadata(&path)?;
             let size = format_size(metadata.len());
 

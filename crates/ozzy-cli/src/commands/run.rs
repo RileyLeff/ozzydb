@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ozzy_core::cache::TieredCache;
 use ozzy_core::project::{Endpoint, SourceType};
-use ozzy_core::{commit, hash, platform, runtime, Project};
+use ozzy_core::{canon, commit, hash, platform, runtime, Project};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -51,7 +51,8 @@ pub async fn execute(
 
     println!("Execution plan:");
     for node_name in &execution_order {
-        let node = endpoint.nodes.iter().find(|n| n.node_name == *node_name).unwrap();
+        let node = endpoint.nodes.iter().find(|n| n.node_name == *node_name)
+            .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in endpoint", node_name))?;
         println!("  {} (transform: {})", node_name, node.transform_name);
     }
     if !cli_params.is_empty() {
@@ -65,9 +66,12 @@ pub async fn execute(
 
     // Execute each node
     let mut node_outputs: HashMap<String, PathBuf> = HashMap::new();
+    // Track nodes whose output is non-reproducible (directly or inherited from upstream)
+    let mut non_reproducible_nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for node_name in &execution_order {
-        let node = endpoint.nodes.iter().find(|n| n.node_name == *node_name).unwrap();
+        let node = endpoint.nodes.iter().find(|n| n.node_name == *node_name)
+            .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in endpoint", node_name))?;
         let transform = transforms.get(&node.transform_name)
             .ok_or_else(|| anyhow::anyhow!("Transform '{}' not found", node.transform_name))?;
 
@@ -101,17 +105,15 @@ pub async fn execute(
             input_paths.insert(edge.input_name.clone(), input_path);
         }
 
-        // Compute materialized hash from all inputs
-        let mut input_hashes: Vec<String> = Vec::new();
+        // Compute input hashes for all inputs
+        let mut input_hash_pairs: Vec<(String, String)> = Vec::new();
         for (input_name, input_path) in &input_paths {
             let h = hash::blake3_hash_file(input_path)?;
-            input_hashes.push(format!("{}:{}", input_name, h));
+            input_hash_pairs.push((input_name.clone(), h));
         }
-        input_hashes.sort(); // Ensure deterministic order
-        let combined_input_hash = hash::blake3_hash(input_hashes.join(",").as_bytes());
 
         // Merge node params with CLI params (CLI takes precedence)
-        let effective_params = if params_override.is_object() && !params_override.as_object().unwrap().is_empty() {
+        let effective_params = if params_override.as_object().map(|m| !m.is_empty()).unwrap_or(false) {
             let mut merged = node.params.clone();
             if let (Some(base), Some(overrides)) = (merged.as_object_mut(), params_override.as_object()) {
                 for (k, v) in overrides {
@@ -123,50 +125,80 @@ pub async fn execute(
             node.params.clone()
         };
 
-        let params_hash = hash::blake3_hash(effective_params.to_string().as_bytes());
-        let materialized_hash = hash::materialized_hash(
-            &combined_input_hash,
+        let params_hash = canon::hash_json(&effective_params);
+        let params_schema_hash = canon::hash_json(&transform.params_schema);
+        let full_transform_hash = hash::transform_hash(
             &transform.hash,
+            &transform.lockfile_hash,
+            &transform.runtime,
+            &params_schema_hash,
+        );
+
+        // Use the proper multi-input hash function with \0-separated format
+        let input_refs: Vec<(&str, &str)> = input_hash_pairs.iter()
+            .map(|(n, h)| (n.as_str(), h.as_str()))
+            .collect();
+        let materialized_hash = hash::materialized_hash_multi_input(
+            &input_refs,
+            &full_transform_hash,
             &params_hash,
             &platform.hash(),
         );
 
         println!("Executing: {}", node_name);
-        if input_paths.len() == 1 {
-            println!("  Input hash: {}...", &combined_input_hash[..12]);
+        if input_hash_pairs.len() == 1 {
+            println!("  Input hash: {}...", &input_hash_pairs[0].1[..12]);
         } else {
-            println!("  Inputs: {} (combined hash: {}...)", input_paths.len(), &combined_input_hash[..12]);
+            println!("  Inputs: {}", input_hash_pairs.len());
         }
         println!("  Materialized hash: {}...", &materialized_hash[..12]);
 
+        // Check if this node inherits non-reproducibility from an upstream node
+        let has_non_reproducible_upstream = endpoint.edges.iter()
+            .filter(|e| e.target_node == *node_name && e.source_type == SourceType::Node)
+            .any(|e| non_reproducible_nodes.contains(&e.source_ref));
+
         // Check cache (tiered: L1 local, L2 remote with auto_pull)
-        let output_path = if !force {
-            if let Some(cached_path) = tiered_cache.get_path(&materialized_hash).await? {
-                if cached_path.exists() {
-                    // Determine if this was a local or remote hit
-                    if tiered_cache.contains_local(&materialized_hash)? {
-                        println!("  Cache: HIT (local)");
-                    } else {
-                        println!("  Cache: HIT (remote)");
-                    }
-                    cached_path
+        // Non-reproducible transforms (direct or inherited) always re-execute and don't cache
+        let effectively_non_reproducible = !transform.reproducible || has_non_reproducible_upstream;
+        let output_path = if effectively_non_reproducible {
+            if !transform.reproducible {
+                println!("  Cache: SKIP (non-reproducible transform)");
+            } else {
+                println!("  Cache: SKIP (non-reproducible upstream)");
+            }
+            execute_node_no_cache(&project, transform, &input_paths, &effective_params).await?
+        } else if force {
+            println!("  Cache: SKIP (forced)");
+            execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &tiered_cache, &platform).await?
+        } else if let Some(cached_path) = tiered_cache.get_path(&materialized_hash).await? {
+            if cached_path.exists() {
+                if tiered_cache.contains_local(&materialized_hash)? {
+                    println!("  Cache: HIT (local)");
                 } else {
-                    execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &tiered_cache, &platform).await?
+                    println!("  Cache: HIT (remote)");
                 }
+                cached_path
             } else {
                 execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &tiered_cache, &platform).await?
             }
         } else {
-            println!("  Cache: SKIP (forced)");
             execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &tiered_cache, &platform).await?
         };
+
+        // Propagate non-reproducibility to downstream nodes
+        if effectively_non_reproducible {
+            non_reproducible_nodes.insert(node_name.clone());
+        }
 
         node_outputs.insert(node_name.clone(), output_path);
     }
 
     // Get final output
-    let final_node = execution_order.last().unwrap();
-    let final_output = node_outputs.get(final_node).unwrap();
+    let final_node = execution_order.last()
+        .ok_or_else(|| anyhow::anyhow!("Empty execution plan - endpoint has no nodes"))?;
+    let final_output = node_outputs.get(final_node)
+        .ok_or_else(|| anyhow::anyhow!("Final node '{}' output not found", final_node))?;
 
     // Copy to output location if specified
     if let Some(output_path) = output {
@@ -263,6 +295,51 @@ fn build_execution_order(endpoint: &Endpoint) -> Vec<String> {
     order
 }
 
+/// Validate output schema against transform's declared output_schema.
+fn validate_output_schema(
+    output_path: &std::path::Path,
+    transform: &ozzy_core::project::Transform,
+) -> Result<()> {
+    let output_schema = match &transform.output_schema {
+        Some(schema) => schema,
+        None => return Ok(()), // No declared schema to validate against
+    };
+
+    let actual_schema = ozzy_core::schema::extract_parquet_schema(output_path)?;
+    let actual_columns: std::collections::HashSet<String> =
+        actual_schema.fields.iter().map(|f| f.name.clone()).collect();
+
+    // Check "adds" - columns that should be present in output
+    if let Some(adds) = output_schema.get("adds").and_then(|v| v.as_array()) {
+        for col in adds {
+            if let Some(col_name) = col.as_str() {
+                if !actual_columns.contains(col_name) {
+                    anyhow::bail!(
+                        "Output schema violation: transform '{}' declares output column '{}' but it was not found in output",
+                        transform.name, col_name
+                    );
+                }
+            }
+        }
+    }
+
+    // Check "fields" - full field declarations
+    if let Some(fields) = output_schema.get("fields").and_then(|v| v.as_array()) {
+        for field in fields {
+            if let Some(name) = field.get("name").and_then(|v| v.as_str()) {
+                if !actual_columns.contains(name) {
+                    anyhow::bail!(
+                        "Output schema violation: transform '{}' declares output field '{}' but it was not found in output",
+                        transform.name, name
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Execute a node with multi-input support.
 async fn execute_node_multi(
     project: &Project,
@@ -290,6 +367,9 @@ async fn execute_node_multi(
         params,
     )?;
 
+    // Validate output against declared schema
+    validate_output_schema(&temp_output, transform)?;
+
     // Store in tiered cache (L1 local, L2 remote with auto_push)
     let cached_path = cache
         .put(
@@ -306,4 +386,39 @@ async fn execute_node_multi(
     }
 
     Ok(cached_path)
+}
+
+/// Execute a node without caching (for non-reproducible transforms).
+async fn execute_node_no_cache(
+    project: &Project,
+    transform: &ozzy_core::project::Transform,
+    input_paths: &HashMap<String, PathBuf>,
+    params: &serde_json::Value,
+) -> Result<PathBuf> {
+    println!("  Executing transform (no cache)");
+
+    let transform_path = project.root.join(&transform.source_path);
+
+    // Create temp output file that persists (not in tempdir that auto-deletes)
+    let cache_dir = ozzy_core::cache::default_cache_dir();
+    std::fs::create_dir_all(&cache_dir)?;
+    let temp_output = cache_dir.join(format!("nocache_{}.parquet",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()));
+
+    runtime::execute_transform_multi(
+        &transform_path,
+        &transform.function_name,
+        input_paths,
+        &temp_output,
+        params,
+    )?;
+
+    // Validate output against declared schema
+    validate_output_schema(&temp_output, transform)?;
+
+    println!("  Output: {}", temp_output.display());
+    Ok(temp_output)
 }

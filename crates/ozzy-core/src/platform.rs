@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
-use crate::hash::blake3_hash;
+use crate::canon;
 
 /// Platform fingerprint for content addressing.
 ///
@@ -47,10 +47,10 @@ impl PlatformFingerprint {
         }
     }
 
-    /// Compute the BLAKE3 hash of this fingerprint.
+    /// Compute the BLAKE3 hash of this fingerprint using canonical JSON.
     pub fn hash(&self) -> String {
-        let json = serde_json::to_string(self).expect("fingerprint should serialize");
-        blake3_hash(json.as_bytes())
+        let value = serde_json::to_value(self).expect("fingerprint should serialize");
+        canon::hash_json(&value)
     }
 
     /// Create a fingerprint for a specific Python version.

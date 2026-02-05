@@ -54,11 +54,33 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
         }
     }
 
-    // Validate schema compatibility (using "main" input for validation)
-    // In a full implementation, we'd validate all inputs against transform requirements
-    let main_schema = input_schemas.get("main").or_else(|| input_schemas.values().next());
-    if let Some(schema) = main_schema {
+    // Validate schema compatibility for all inputs
+    // The first transform gets all input schemas; subsequent transforms get chained output
+    // For the initial validation, use "main" or the first input for pipeline propagation
+    let primary_schema = input_schemas.get("main").or_else(|| input_schemas.values().next());
+    if let Some(schema) = primary_schema {
         let validation_result = validate_pipeline_schema(schema, transforms, &available_transforms);
+
+        // Also validate that all named inputs match transform requirements
+        if !transforms.is_empty() {
+            if let Some(first_transform) = available_transforms.get(&transforms[0]) {
+                if let Some(input_schema_value) = &first_transform.input_schema {
+                    if let Some(required_inputs) = input_schema_value.get("inputs") {
+                        if let Some(required_list) = required_inputs.as_array() {
+                            for req in required_list {
+                                if let Some(req_name) = req.as_str() {
+                                    if !input_schemas.contains_key(req_name) {
+                                        println!("  ✗ Transform '{}' expects input '{}' but it was not provided",
+                                            transforms[0], req_name);
+                                        anyhow::bail!("Pipeline validation failed. Fix schema issues before creating endpoint.");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         if !validation_result.valid {
             println!("Schema validation failed:");
@@ -180,7 +202,7 @@ fn validate_pipeline_schema(
     let mut result = schema::ValidationResult::ok();
 
     // Track current schema (starts with input data source schema)
-    let current_columns: Vec<&str> = input_schema.column_names();
+    let mut current_columns: Vec<String> = input_schema.column_names().iter().map(|s| s.to_string()).collect();
 
     for (i, transform_name) in transforms.iter().enumerate() {
         let transform = match available_transforms.get(transform_name) {
@@ -196,9 +218,10 @@ fn validate_pipeline_schema(
         if let Some(input_schema_value) = &transform.input_schema {
             if let Some(required) = input_schema_value.get("requires") {
                 if let Some(required_cols) = required.as_array() {
+                    // requires: ["col1", "col2"] - name-only check
                     for col in required_cols {
                         if let Some(col_name) = col.as_str() {
-                            if !current_columns.contains(&col_name) {
+                            if !current_columns.iter().any(|c| c == col_name) {
                                 result.valid = false;
                                 result.errors.push(format!(
                                     "Step {}: Transform '{}' requires column '{}' which is not available. Available: {:?}",
@@ -210,24 +233,63 @@ fn validate_pipeline_schema(
                             }
                         }
                     }
+                } else if let Some(required_map) = required.as_object() {
+                    // requires: {"col1": "float64", "col2": "utf8"} - name + type check
+                    for (col_name, expected_type) in required_map {
+                        if !current_columns.iter().any(|c| c == col_name) {
+                            result.valid = false;
+                            result.errors.push(format!(
+                                "Step {}: Transform '{}' requires column '{}' which is not available. Available: {:?}",
+                                i + 1,
+                                transform_name,
+                                col_name,
+                                current_columns
+                            ));
+                        } else if let Some(expected_type_str) = expected_type.as_str() {
+                            // Check type compatibility against input schema fields
+                            if let Some(field) = input_schema.fields.iter().find(|f| f.name == *col_name) {
+                                if !types_compatible(&field.dtype, expected_type_str) {
+                                    result.warnings.push(format!(
+                                        "Step {}: Transform '{}' expects column '{}' to be '{}' but found '{}'",
+                                        i + 1,
+                                        transform_name,
+                                        col_name,
+                                        expected_type_str,
+                                        field.dtype
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Check if transform has output schema that adds columns
+        // Track columns added by this transform's output schema
         if let Some(output_schema_value) = &transform.output_schema {
             if let Some(adds) = output_schema_value.get("adds") {
                 if let Some(added_cols) = adds.as_array() {
                     for col in added_cols {
                         if let Some(col_name) = col.as_str() {
-                            // In a real implementation, we'd add these to current_columns
-                            // For now, just log that we know about them
+                            if !current_columns.iter().any(|c| c == col_name) {
+                                current_columns.push(col_name.to_string());
+                            }
                             result.warnings.push(format!(
                                 "Step {}: Transform '{}' adds column '{}'",
                                 i + 1,
                                 transform_name,
                                 col_name
                             ));
+                        }
+                    }
+                }
+            }
+            // Handle "drops" if present
+            if let Some(drops) = output_schema_value.get("drops") {
+                if let Some(dropped_cols) = drops.as_array() {
+                    for col in dropped_cols {
+                        if let Some(col_name) = col.as_str() {
+                            current_columns.retain(|c| c != col_name);
                         }
                     }
                 }
@@ -387,4 +449,36 @@ fn print_endpoint(project: &Project, endpoint: &Endpoint, committed: bool) -> Re
     }
 
     Ok(())
+}
+
+/// Check if two type strings are compatible.
+/// Uses flexible matching: "float64" matches "number", "int64" matches "integer", etc.
+fn types_compatible(actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+    // Normalize Python/JSON-schema type names to Arrow type names
+    fn normalize(t: &str) -> &str {
+        match t {
+            "number" | "float" => "float64",
+            "integer" | "int" => "int64",
+            "string" | "str" => "utf8",
+            "boolean" | "bool" => "bool",
+            other => other,
+        }
+    }
+    let actual_norm = normalize(actual);
+    let expected_norm = normalize(expected);
+    if actual_norm == expected_norm {
+        return true;
+    }
+    // Numeric compatibility: int types are compatible with float expectations
+    fn is_numeric(t: &str) -> bool {
+        matches!(t, "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64"
+            | "float16" | "float32" | "float64")
+    }
+    if expected_norm == "float64" && is_numeric(actual_norm) {
+        return true;
+    }
+    false
 }

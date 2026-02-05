@@ -43,14 +43,8 @@ pub async fn size() -> Result<()> {
     Ok(())
 }
 
-pub async fn clear(project: Option<&str>) -> Result<()> {
+pub async fn clear() -> Result<()> {
     let cache = LocalCache::open()?;
-
-    if project.is_some() {
-        println!("Project-specific cache clearing not yet implemented.");
-        println!("Use 'ozzy cache clear' to clear all cached entries.");
-        return Ok(());
-    }
 
     let count = cache.count()?;
     let size = cache.total_size()?;

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ozzy-core",
     "crates/ozzy-cli",
+    "crates/ozzy-server",
 ]
 
 [workspace.package]
@@ -59,6 +60,37 @@ futures = "0.3"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
+
+# Web framework (server)
+axum = { version = "0.8", features = ["multipart"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# PostgreSQL database
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"] }
+
+# OAuth
+oauth2 = "5"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["stream", "json", "multipart"] }
+
+# Streaming utilities
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
+
+# Tar archives
+tar = "0.4"
+
+# Random number generation
+rand = "0.9"
+
+# Base64 encoding
+base64 = "0.22"
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Internal crates
 ozzy-core = { path = "crates/ozzy-core" }
