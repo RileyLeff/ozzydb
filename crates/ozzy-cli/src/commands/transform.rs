@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ozzy_core::{commit, Project};
+use ozzy_core::{commit, validate_safe_name, Project};
 use std::fs;
 use std::path::Path;
 
@@ -100,6 +100,10 @@ pub async fn list() -> Result<()> {
 
 pub async fn remove(name: &str) -> Result<()> {
     let project = Project::find_current()?;
+
+    // Validate name to prevent path traversal
+    validate_safe_name(name)?;
+
     let transforms = commit::collect_transforms(&project)?;
 
     if !transforms.contains_key(name) {
@@ -129,6 +133,10 @@ pub async fn remove(name: &str) -> Result<()> {
 
 pub async fn test(name: &str, sample: usize) -> Result<()> {
     let project = Project::find_current()?;
+
+    // Validate name to prevent path traversal
+    validate_safe_name(name)?;
+
     let transforms = commit::collect_transforms(&project)?;
 
     if !transforms.contains_key(name) {

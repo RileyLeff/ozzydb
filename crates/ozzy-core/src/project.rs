@@ -8,11 +8,85 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+
+/// Validate that a name is safe for use in paths (no path traversal).
+/// Names should be simple identifiers without slashes, dots at the start, or other special chars.
+pub fn validate_safe_name(name: &str) -> Result<()> {
+    // Check for empty name
+    if name.is_empty() {
+        return Err(Error::InvalidPath("Name cannot be empty".to_string()));
+    }
+
+    // Check for path separators
+    if name.contains('/') || name.contains('\\') {
+        return Err(Error::InvalidPath(format!(
+            "Name cannot contain path separators: {}",
+            name
+        )));
+    }
+
+    // Check for parent directory references
+    if name == ".." || name == "." || name.starts_with("..") {
+        return Err(Error::InvalidPath(format!(
+            "Name cannot reference parent directories: {}",
+            name
+        )));
+    }
+
+    // Check for hidden files (starting with .)
+    if name.starts_with('.') {
+        return Err(Error::InvalidPath(format!(
+            "Name cannot start with a dot: {}",
+            name
+        )));
+    }
+
+    // Check for null bytes
+    if name.contains('\0') {
+        return Err(Error::InvalidPath(
+            "Name cannot contain null bytes".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate that a path stays within a base directory after canonicalization.
+/// This prevents symlink attacks and path traversal via .. components.
+pub fn validate_path_within(path: &Path, base_dir: &Path) -> Result<()> {
+    // Canonicalize both paths to resolve symlinks and .. components
+    let canonical_base = base_dir.canonicalize().map_err(|e| {
+        Error::InvalidPath(format!(
+            "Cannot canonicalize base directory {}: {}",
+            base_dir.display(),
+            e
+        ))
+    })?;
+
+    let canonical_path = path.canonicalize().map_err(|e| {
+        Error::InvalidPath(format!(
+            "Cannot canonicalize path {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
+
+    // Check that the canonical path starts with the canonical base
+    if !canonical_path.starts_with(&canonical_base) {
+        return Err(Error::InvalidPath(format!(
+            "Path {} escapes base directory {}",
+            path.display(),
+            base_dir.display()
+        )));
+    }
+
+    Ok(())
+}
 
 /// Project configuration stored in ozzy.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +98,34 @@ pub struct ProjectConfig {
 
     #[serde(default)]
     pub workspace: WorkspaceConfig,
+
+    /// Cache configuration (local and remote)
+    #[serde(default)]
+    pub cache: CacheConfig,
+}
+
+/// Cache configuration in ozzy.toml
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CacheConfig {
+    /// Remote cache configuration
+    #[serde(default)]
+    pub remote: crate::cache::RemoteCacheConfig,
+}
+
+impl CacheConfig {
+    /// Convert to TieredCacheConfig for runtime use.
+    pub fn to_tiered_config(&self) -> crate::cache::TieredCacheConfig {
+        let remote_config = self.remote.clone().with_env_overrides();
+        crate::cache::TieredCacheConfig {
+            remote: if remote_config.is_configured() {
+                Some(remote_config)
+            } else {
+                None
+            },
+            max_local_size_bytes: None,
+            auto_evict: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,9 +260,12 @@ pub struct Commit {
     pub author: String,
     pub message: String,
     pub timestamp: DateTime<Utc>,
-    pub data_sources: HashMap<String, DataSource>,
-    pub transforms: HashMap<String, Transform>,
-    pub endpoints: HashMap<String, Endpoint>,
+    /// Data sources (BTreeMap for deterministic serialization order)
+    pub data_sources: BTreeMap<String, DataSource>,
+    /// Transforms (BTreeMap for deterministic serialization order)
+    pub transforms: BTreeMap<String, Transform>,
+    /// Endpoints (BTreeMap for deterministic serialization order)
+    pub endpoints: BTreeMap<String, Endpoint>,
 }
 
 /// Project handle for interacting with an OzzyDB project
@@ -239,6 +344,7 @@ impl Project {
                 remote: None,
             },
             workspace: WorkspaceConfig::default(),
+            cache: CacheConfig::default(),
         };
 
         let config_content = toml::to_string_pretty(&config)?;

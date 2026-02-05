@@ -11,6 +11,16 @@ use crate::error::{Error, Result};
 use crate::hash::blake3_hash_file;
 use crate::platform::PlatformFingerprint;
 
+/// Escape a string for safe use in a Python string literal.
+/// Handles backslashes, quotes, and newlines.
+fn escape_python_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
 /// Deterministic environment variables for transform execution.
 pub const DETERMINISTIC_ENV: &[(&str, &str)] = &[
     ("PYTHONHASHSEED", "0"),
@@ -19,6 +29,29 @@ pub const DETERMINISTIC_ENV: &[(&str, &str)] = &[
     ("OPENBLAS_NUM_THREADS", "1"),
     ("NUMEXPR_NUM_THREADS", "1"),
 ];
+
+/// Extract transform directory and module name from a transform source path.
+fn extract_transform_info(transform_source: &Path) -> Result<(String, String)> {
+    let transform_dir = transform_source
+        .parent()
+        .ok_or_else(|| Error::RuntimeError(format!(
+            "Transform path has no parent directory: {}",
+            transform_source.display()
+        )))?
+        .display()
+        .to_string();
+
+    let module_name = transform_source
+        .file_stem()
+        .ok_or_else(|| Error::RuntimeError(format!(
+            "Transform path has no file stem: {}",
+            transform_source.display()
+        )))?
+        .to_string_lossy()
+        .to_string();
+
+    Ok((transform_dir, module_name))
+}
 
 /// Python runtime for executing transforms using uv.
 pub struct PythonRuntime {
@@ -134,18 +167,27 @@ impl PythonRuntime {
             )));
         }
 
-        // Build input loading code
+        // Extract transform info
+        let (transform_dir, module_name) = extract_transform_info(transform_source)?;
+
+        // Build input loading code with proper escaping
         let input_code: String = inputs
             .iter()
             .map(|(name, path)| {
                 format!(
                     "inputs[\"{}\"] = pl.read_parquet(\"{}\")",
-                    name,
-                    path.display()
+                    escape_python_string(name),
+                    escape_python_string(&path.display().to_string())
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
+
+        // Escape paths and identifiers for safe script generation
+        let escaped_transform_dir = escape_python_string(&transform_dir);
+        let escaped_output_path = escape_python_string(&output_path.display().to_string());
+        let params_json = serde_json::to_string(params)?;
+        let escaped_params = escape_python_string(&params_json);
 
         // Build the execution script
         let script = format!(
@@ -155,7 +197,7 @@ import json
 import polars as pl
 
 # Load the transform module
-sys.path.insert(0, "{transform_dir}")
+sys.path.insert(0, "{escaped_transform_dir}")
 import {module_name}
 
 # Load inputs
@@ -163,7 +205,7 @@ inputs = {{}}
 {input_code}
 
 # Load params
-params_dict = json.loads('{params_json}')
+params_dict = json.loads("{escaped_params}")
 
 # Create params object with attribute access
 class Params:
@@ -183,16 +225,16 @@ if hasattr(result, 'collect'):
     result = result.collect()
 
 # Write output
-result.write_parquet("{output_path}")
+result.write_parquet("{escaped_output_path}")
 
 print("SUCCESS")
 "#,
-            transform_dir = transform_source.parent().unwrap().display(),
-            module_name = transform_source.file_stem().unwrap().to_string_lossy(),
+            escaped_transform_dir = escaped_transform_dir,
+            module_name = module_name,
             input_code = input_code,
-            params_json = serde_json::to_string(params)?.replace('\'', "\\'").replace('\n', "\\n"),
+            escaped_params = escaped_params,
             function_name = function_name,
-            output_path = output_path.display(),
+            escaped_output_path = escaped_output_path,
         );
 
         // Set up deterministic environment
@@ -230,18 +272,27 @@ print("SUCCESS")
         params: &serde_json::Value,
         dependencies: &[&str],
     ) -> Result<()> {
-        // Build input loading code
+        // Extract transform info
+        let (transform_dir, module_name) = extract_transform_info(transform_source)?;
+
+        // Build input loading code with proper escaping
         let input_code: String = inputs
             .iter()
             .map(|(name, path)| {
                 format!(
                     "inputs[\"{}\"] = pl.read_parquet(\"{}\")",
-                    name,
-                    path.display()
+                    escape_python_string(name),
+                    escape_python_string(&path.display().to_string())
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
+
+        // Escape paths and identifiers for safe script generation
+        let escaped_transform_dir = escape_python_string(&transform_dir);
+        let escaped_output_path = escape_python_string(&output_path.display().to_string());
+        let params_json = serde_json::to_string(params)?;
+        let escaped_params = escape_python_string(&params_json);
 
         // Build the execution script
         let script = format!(
@@ -250,13 +301,13 @@ import sys
 import json
 import polars as pl
 
-sys.path.insert(0, "{transform_dir}")
+sys.path.insert(0, "{escaped_transform_dir}")
 import {module_name}
 
 inputs = {{}}
 {input_code}
 
-params_dict = json.loads('{params_json}')
+params_dict = json.loads("{escaped_params}")
 
 class Params:
     def __init__(self, d):
@@ -271,15 +322,15 @@ result = {module_name}.{function_name}(inputs, params)
 if hasattr(result, 'collect'):
     result = result.collect()
 
-result.write_parquet("{output_path}")
+result.write_parquet("{escaped_output_path}")
 print("SUCCESS")
 "#,
-            transform_dir = transform_source.parent().unwrap().display(),
-            module_name = transform_source.file_stem().unwrap().to_string_lossy(),
+            escaped_transform_dir = escaped_transform_dir,
+            module_name = module_name,
             input_code = input_code,
-            params_json = serde_json::to_string(params)?.replace('\'', "\\'").replace('\n', "\\n"),
+            escaped_params = escaped_params,
             function_name = function_name,
-            output_path = output_path.display(),
+            escaped_output_path = escaped_output_path,
         );
 
         // Build uv run command with dependencies
@@ -349,18 +400,27 @@ pub fn execute_transform_uv(
         )
     })?;
 
+    let (transform_dir, module_name) = extract_transform_info(transform_source)?;
+
+    // Escape paths and identifiers for safe script generation
+    let escaped_transform_dir = escape_python_string(&transform_dir);
+    let escaped_input_path = escape_python_string(&input_path.display().to_string());
+    let escaped_output_path = escape_python_string(&output_path.display().to_string());
+    let params_json = serde_json::to_string(params)?;
+    let escaped_params = escape_python_string(&params_json);
+
     let script = format!(
         r#"
 import sys
 import json
 import polars as pl
 
-sys.path.insert(0, "{transform_dir}")
+sys.path.insert(0, "{escaped_transform_dir}")
 import {module_name}
 
-inputs = {{"main": pl.read_parquet("{input_path}")}}
+inputs = {{"main": pl.read_parquet("{escaped_input_path}")}}
 
-params_dict = json.loads('{params_json}')
+params_dict = json.loads("{escaped_params}")
 
 class Params:
     def __init__(self, d):
@@ -375,14 +435,14 @@ result = {module_name}.{function_name}(inputs, params)
 if hasattr(result, 'collect'):
     result = result.collect()
 
-result.write_parquet("{output_path}")
+result.write_parquet("{escaped_output_path}")
 "#,
-        transform_dir = transform_source.parent().unwrap().display(),
-        module_name = transform_source.file_stem().unwrap().to_string_lossy(),
-        input_path = input_path.display(),
-        params_json = serde_json::to_string(params)?.replace('\'', "\\'").replace('\n', "\\n"),
+        escaped_transform_dir = escaped_transform_dir,
+        module_name = module_name,
+        escaped_input_path = escaped_input_path,
+        escaped_params = escaped_params,
         function_name = function_name,
-        output_path = output_path.display(),
+        escaped_output_path = escaped_output_path,
     );
 
     // Set up deterministic environment
@@ -426,18 +486,27 @@ pub fn execute_transform_simple(
         .or_else(|_| which::which("python"))
         .map_err(|_| Error::RuntimeError("Neither uv nor python found in PATH".to_string()))?;
 
+    let (transform_dir, module_name) = extract_transform_info(transform_source)?;
+
+    // Escape paths and identifiers for safe script generation
+    let escaped_transform_dir = escape_python_string(&transform_dir);
+    let escaped_input_path = escape_python_string(&input_path.display().to_string());
+    let escaped_output_path = escape_python_string(&output_path.display().to_string());
+    let params_json = serde_json::to_string(params)?;
+    let escaped_params = escape_python_string(&params_json);
+
     let script = format!(
         r#"
 import sys
 import json
 import polars as pl
 
-sys.path.insert(0, "{transform_dir}")
+sys.path.insert(0, "{escaped_transform_dir}")
 import {module_name}
 
-inputs = {{"main": pl.read_parquet("{input_path}")}}
+inputs = {{"main": pl.read_parquet("{escaped_input_path}")}}
 
-params_dict = json.loads('{params_json}')
+params_dict = json.loads("{escaped_params}")
 
 class Params:
     def __init__(self, d):
@@ -452,14 +521,14 @@ result = {module_name}.{function_name}(inputs, params)
 if hasattr(result, 'collect'):
     result = result.collect()
 
-result.write_parquet("{output_path}")
+result.write_parquet("{escaped_output_path}")
 "#,
-        transform_dir = transform_source.parent().unwrap().display(),
-        module_name = transform_source.file_stem().unwrap().to_string_lossy(),
-        input_path = input_path.display(),
-        params_json = serde_json::to_string(params)?.replace('\'', "\\'").replace('\n', "\\n"),
+        escaped_transform_dir = escaped_transform_dir,
+        module_name = module_name,
+        escaped_input_path = escaped_input_path,
+        escaped_params = escaped_params,
         function_name = function_name,
-        output_path = output_path.display(),
+        escaped_output_path = escaped_output_path,
     );
 
     let mut env_vars: HashMap<String, String> = std::env::vars().collect();
@@ -501,18 +570,26 @@ pub fn execute_transform_multi(
         )
     })?;
 
-    // Build input loading code for all inputs
+    let (transform_dir, module_name) = extract_transform_info(transform_source)?;
+
+    // Build input loading code for all inputs with proper escaping
     let input_code: String = inputs
         .iter()
         .map(|(name, path)| {
             format!(
                 "inputs[\"{}\"] = pl.read_parquet(\"{}\")",
-                name,
-                path.display()
+                escape_python_string(name),
+                escape_python_string(&path.display().to_string())
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
+
+    // Escape paths and identifiers for safe script generation
+    let escaped_transform_dir = escape_python_string(&transform_dir);
+    let escaped_output_path = escape_python_string(&output_path.display().to_string());
+    let params_json = serde_json::to_string(params)?;
+    let escaped_params = escape_python_string(&params_json);
 
     let script = format!(
         r#"
@@ -520,13 +597,13 @@ import sys
 import json
 import polars as pl
 
-sys.path.insert(0, "{transform_dir}")
+sys.path.insert(0, "{escaped_transform_dir}")
 import {module_name}
 
 inputs = {{}}
 {input_code}
 
-params_dict = json.loads('{params_json}')
+params_dict = json.loads("{escaped_params}")
 
 class Params:
     def __init__(self, d):
@@ -541,14 +618,14 @@ result = {module_name}.{function_name}(inputs, params)
 if hasattr(result, 'collect'):
     result = result.collect()
 
-result.write_parquet("{output_path}")
+result.write_parquet("{escaped_output_path}")
 "#,
-        transform_dir = transform_source.parent().unwrap().display(),
-        module_name = transform_source.file_stem().unwrap().to_string_lossy(),
+        escaped_transform_dir = escaped_transform_dir,
+        module_name = module_name,
         input_code = input_code,
-        params_json = serde_json::to_string(params)?.replace('\'', "\\'").replace('\n', "\\n"),
+        escaped_params = escaped_params,
         function_name = function_name,
-        output_path = output_path.display(),
+        escaped_output_path = escaped_output_path,
     );
 
     // Set up deterministic environment

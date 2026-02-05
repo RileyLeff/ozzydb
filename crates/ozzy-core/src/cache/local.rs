@@ -3,26 +3,13 @@
 //! The cache is stored at ~/.ozzy/cache/ with a SQLite index.
 //! Cache entries are content-addressed by their materialized hash.
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::backend::{CacheBackend, CacheEntry, CacheLocation};
 use crate::error::Result;
-
-/// Cache entry metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CacheEntry {
-    pub materialized_hash: String,
-    pub platform: String,
-    pub file_path: PathBuf,
-    pub row_count: Option<u64>,
-    pub byte_size: Option<u64>,
-    pub created_at: DateTime<Utc>,
-    pub last_accessed: DateTime<Utc>,
-    pub access_count: u64,
-}
 
 /// Local cache manager.
 pub struct LocalCache {
@@ -50,6 +37,11 @@ impl LocalCache {
 
         cache.init_db()?;
         Ok(cache)
+    }
+
+    /// Get the cache directory path.
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
     }
 
     /// Initialize the SQLite database schema.
@@ -87,8 +79,135 @@ impl LocalCache {
         Ok(Connection::open(&self.db_path)?)
     }
 
+    /// Get the file path for a cached entry.
+    pub fn get_path(&self, hash: &str) -> Result<Option<PathBuf>> {
+        self.get(hash).map(|e| e.and_then(|e| e.file_path().cloned()))
+    }
+
+    /// List all cache entries.
+    pub fn list(&self) -> Result<Vec<CacheEntry>> {
+        let conn = self.connect()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT materialized_hash, platform, file_path, row_count, byte_size,
+                    created_at, last_accessed, access_count
+             FROM cache_entries
+             ORDER BY last_accessed DESC",
+        )?;
+
+        let entries = stmt
+            .query_map([], |row| {
+                Ok(CacheEntry {
+                    materialized_hash: row.get(0)?,
+                    platform: row.get(1)?,
+                    row_count: row.get(3)?,
+                    byte_size: row.get(4)?,
+                    created_at: row
+                        .get::<_, String>(5)?
+                        .parse()
+                        .unwrap_or_else(|_| Utc::now()),
+                    last_accessed: row
+                        .get::<_, String>(6)?
+                        .parse()
+                        .unwrap_or_else(|_| Utc::now()),
+                    access_count: row.get(7)?,
+                    location: CacheLocation::Local(PathBuf::from(row.get::<_, String>(2)?)),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(entries)
+    }
+
+    /// Clear all cache entries.
+    pub fn clear(&self) -> Result<()> {
+        // Remove all files
+        let data_dir = self.cache_dir.join("data");
+        if data_dir.exists() {
+            for entry in fs::read_dir(&data_dir)? {
+                let entry = entry?;
+                if entry.path().extension().map(|e| e == "parquet").unwrap_or(false) {
+                    fs::remove_file(entry.path())?;
+                }
+            }
+        }
+
+        // Clear database
+        let conn = self.connect()?;
+        conn.execute("DELETE FROM cache_entries", [])?;
+
+        Ok(())
+    }
+
+    /// Get the expected cache file path for a hash (doesn't check existence).
+    pub fn cache_path_for(&self, hash: &str) -> PathBuf {
+        self.cache_dir.join("data").join(format!("{}.parquet", hash))
+    }
+
+    /// Register a file that was downloaded from remote cache.
+    /// The file must already exist at cache_path_for(hash).
+    pub fn register_downloaded(&self, hash: &str, platform: &str) -> Result<()> {
+        let dest_path = self.cache_path_for(hash);
+
+        if !dest_path.exists() {
+            return Err(crate::error::Error::CacheError(format!(
+                "Downloaded file does not exist: {}",
+                dest_path.display()
+            )));
+        }
+
+        let byte_size = std::fs::metadata(&dest_path)?.len();
+        let now = Utc::now();
+
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO cache_entries
+             (materialized_hash, platform, file_path, row_count, byte_size, created_at, last_accessed, access_count)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, 1)",
+            params![
+                hash,
+                platform,
+                dest_path.to_string_lossy(),
+                byte_size as i64,
+                now.to_rfc3339(),
+                now.to_rfc3339(),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Evict oldest entries to reach target size.
+    pub fn evict_to_size(&self, target_bytes: u64) -> Result<usize> {
+        let mut evicted = 0;
+
+        while self.total_size()? > target_bytes {
+            let conn = self.connect()?;
+
+            // Get oldest entry
+            let oldest: Option<String> = conn
+                .query_row(
+                    "SELECT materialized_hash FROM cache_entries ORDER BY last_accessed ASC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            if let Some(hash) = oldest {
+                self.remove(&hash)?;
+                evicted += 1;
+            } else {
+                break;
+            }
+        }
+
+        Ok(evicted)
+    }
+}
+
+impl CacheBackend for LocalCache {
     /// Get a cache entry by materialized hash.
-    pub fn get(&self, hash: &str) -> Result<Option<CacheEntry>> {
+    fn get(&self, hash: &str) -> Result<Option<CacheEntry>> {
         let conn = self.connect()?;
 
         let entry: Option<CacheEntry> = conn
@@ -101,7 +220,6 @@ impl LocalCache {
                     Ok(CacheEntry {
                         materialized_hash: row.get(0)?,
                         platform: row.get(1)?,
-                        file_path: PathBuf::from(row.get::<_, String>(2)?),
                         row_count: row.get(3)?,
                         byte_size: row.get(4)?,
                         created_at: row
@@ -113,6 +231,7 @@ impl LocalCache {
                             .parse()
                             .unwrap_or_else(|_| Utc::now()),
                         access_count: row.get(7)?,
+                        location: CacheLocation::Local(PathBuf::from(row.get::<_, String>(2)?)),
                     })
                 },
             )
@@ -131,13 +250,8 @@ impl LocalCache {
         Ok(entry)
     }
 
-    /// Get the file path for a cached entry.
-    pub fn get_path(&self, hash: &str) -> Result<Option<PathBuf>> {
-        self.get(hash).map(|e| e.map(|e| e.file_path))
-    }
-
     /// Check if a hash is in the cache.
-    pub fn contains(&self, hash: &str) -> Result<bool> {
+    fn contains(&self, hash: &str) -> Result<bool> {
         let conn = self.connect()?;
 
         let count: i64 = conn.query_row(
@@ -150,7 +264,7 @@ impl LocalCache {
     }
 
     /// Store a cache entry.
-    pub fn put(
+    fn put(
         &self,
         hash: &str,
         platform: &str,
@@ -184,43 +298,30 @@ impl LocalCache {
         Ok(dest_path)
     }
 
-    /// List all cache entries.
-    pub fn list(&self) -> Result<Vec<CacheEntry>> {
-        let conn = self.connect()?;
+    /// Remove a cache entry.
+    fn remove(&self, hash: &str) -> Result<()> {
+        // Get the file path first
+        if let Some(entry) = self.get(hash)? {
+            // Remove the file
+            if let Some(path) = entry.file_path() {
+                if path.exists() {
+                    fs::remove_file(path)?;
+                }
+            }
+        }
 
-        let mut stmt = conn.prepare(
-            "SELECT materialized_hash, platform, file_path, row_count, byte_size,
-                    created_at, last_accessed, access_count
-             FROM cache_entries
-             ORDER BY last_accessed DESC",
+        // Remove from database
+        let conn = self.connect()?;
+        conn.execute(
+            "DELETE FROM cache_entries WHERE materialized_hash = ?",
+            [hash],
         )?;
 
-        let entries = stmt
-            .query_map([], |row| {
-                Ok(CacheEntry {
-                    materialized_hash: row.get(0)?,
-                    platform: row.get(1)?,
-                    file_path: PathBuf::from(row.get::<_, String>(2)?),
-                    row_count: row.get(3)?,
-                    byte_size: row.get(4)?,
-                    created_at: row
-                        .get::<_, String>(5)?
-                        .parse()
-                        .unwrap_or_else(|_| Utc::now()),
-                    last_accessed: row
-                        .get::<_, String>(6)?
-                        .parse()
-                        .unwrap_or_else(|_| Utc::now()),
-                    access_count: row.get(7)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(entries)
+        Ok(())
     }
 
     /// Get total cache size in bytes.
-    pub fn total_size(&self) -> Result<u64> {
+    fn total_size(&self) -> Result<u64> {
         let conn = self.connect()?;
 
         let size: i64 = conn
@@ -235,7 +336,7 @@ impl LocalCache {
     }
 
     /// Get number of cache entries.
-    pub fn count(&self) -> Result<usize> {
+    fn count(&self) -> Result<usize> {
         let conn = self.connect()?;
 
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM cache_entries", [], |row| {
@@ -243,73 +344,6 @@ impl LocalCache {
         })?;
 
         Ok(count as usize)
-    }
-
-    /// Remove a cache entry.
-    pub fn remove(&self, hash: &str) -> Result<()> {
-        // Get the file path first
-        if let Some(entry) = self.get(hash)? {
-            // Remove the file
-            if entry.file_path.exists() {
-                fs::remove_file(&entry.file_path)?;
-            }
-        }
-
-        // Remove from database
-        let conn = self.connect()?;
-        conn.execute(
-            "DELETE FROM cache_entries WHERE materialized_hash = ?",
-            [hash],
-        )?;
-
-        Ok(())
-    }
-
-    /// Clear all cache entries.
-    pub fn clear(&self) -> Result<()> {
-        // Remove all files
-        let data_dir = self.cache_dir.join("data");
-        if data_dir.exists() {
-            for entry in fs::read_dir(&data_dir)? {
-                let entry = entry?;
-                if entry.path().extension().map(|e| e == "parquet").unwrap_or(false) {
-                    fs::remove_file(entry.path())?;
-                }
-            }
-        }
-
-        // Clear database
-        let conn = self.connect()?;
-        conn.execute("DELETE FROM cache_entries", [])?;
-
-        Ok(())
-    }
-
-    /// Evict oldest entries to reach target size.
-    pub fn evict_to_size(&self, target_bytes: u64) -> Result<usize> {
-        let mut evicted = 0;
-
-        while self.total_size()? > target_bytes {
-            let conn = self.connect()?;
-
-            // Get oldest entry
-            let oldest: Option<String> = conn
-                .query_row(
-                    "SELECT materialized_hash FROM cache_entries ORDER BY last_accessed ASC LIMIT 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?;
-
-            if let Some(hash) = oldest {
-                self.remove(&hash)?;
-                evicted += 1;
-            } else {
-                break;
-            }
-        }
-
-        Ok(evicted)
     }
 }
 

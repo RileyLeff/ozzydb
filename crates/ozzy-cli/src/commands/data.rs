@@ -1,11 +1,14 @@
 use anyhow::Result;
-use ozzy_core::{Project, schema};
+use ozzy_core::{validate_safe_name, Project, schema};
 use std::fs;
 use std::path::Path;
 
 pub async fn add(file: &str, name: &str) -> Result<()> {
     let project = Project::find_current()?;
     let source_path = Path::new(file);
+
+    // Validate name to prevent path traversal
+    validate_safe_name(name)?;
 
     if !source_path.exists() {
         anyhow::bail!("File not found: {}", file);
@@ -73,6 +76,10 @@ pub async fn list() -> Result<()> {
 
 pub async fn remove(name: &str) -> Result<()> {
     let project = Project::find_current()?;
+
+    // Validate name to prevent path traversal
+    validate_safe_name(name)?;
+
     let path = project.data_dir().join(format!("{}.parquet", name));
 
     if !path.exists() {
@@ -87,6 +94,10 @@ pub async fn remove(name: &str) -> Result<()> {
 
 pub async fn schema(name: &str) -> Result<()> {
     let project = Project::find_current()?;
+
+    // Validate name to prevent path traversal
+    validate_safe_name(name)?;
+
     let path = project.data_dir().join(format!("{}.parquet", name));
 
     if !path.exists() {

@@ -1,14 +1,14 @@
 //! Commit operations - creating and managing commits.
 
 use chrono::Utc;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 
 use crate::canon::hash_source_file;
 use crate::error::Result;
 use crate::hash::{blake3_hash, blake3_hash_file};
 use crate::project::{Commit, DataSource, Project, Transform};
-use crate::schema::extract_parquet_schema;
+use crate::schema::{extract_parquet_schema, get_parquet_row_count};
 
 /// Build a commit from the current workspace state.
 pub fn create_commit(project: &Project, message: &str, author: &str) -> Result<Commit> {
@@ -22,7 +22,7 @@ pub fn create_commit(project: &Project, message: &str, author: &str) -> Result<C
     let endpoints = if let Some(last_commit) = project.latest_commit()? {
         last_commit.endpoints
     } else {
-        HashMap::new()
+        BTreeMap::new()
     };
 
     // Get parent hashes
@@ -56,8 +56,8 @@ pub fn create_commit(project: &Project, message: &str, author: &str) -> Result<C
 }
 
 /// Collect data sources from the data/ directory.
-pub fn collect_data_sources(project: &Project) -> Result<HashMap<String, DataSource>> {
-    let mut sources = HashMap::new();
+pub fn collect_data_sources(project: &Project) -> Result<BTreeMap<String, DataSource>> {
+    let mut sources = BTreeMap::new();
     let data_dir = project.data_dir();
 
     if !data_dir.exists() {
@@ -80,6 +80,12 @@ pub fn collect_data_sources(project: &Project) -> Result<HashMap<String, DataSou
             let schema_hash = blake3_hash(serde_json::to_string(&schema)?.as_bytes());
 
             let metadata = fs::metadata(&path)?;
+            let row_count = get_parquet_row_count(&path).ok();
+
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| crate::error::Error::InvalidPath(format!("No file name in path: {}", path.display())))?
+                .to_string_lossy();
 
             sources.insert(
                 name.clone(),
@@ -87,8 +93,8 @@ pub fn collect_data_sources(project: &Project) -> Result<HashMap<String, DataSou
                     name,
                     hash,
                     schema_hash,
-                    path: format!("data/{}", path.file_name().unwrap().to_string_lossy()),
-                    row_count: None, // TODO: read from parquet metadata
+                    path: format!("data/{}", file_name),
+                    row_count,
                     byte_size: Some(metadata.len()),
                 },
             );
@@ -99,8 +105,8 @@ pub fn collect_data_sources(project: &Project) -> Result<HashMap<String, DataSou
 }
 
 /// Collect transforms from the transforms/ directory.
-pub fn collect_transforms(project: &Project) -> Result<HashMap<String, Transform>> {
-    let mut transforms = HashMap::new();
+pub fn collect_transforms(project: &Project) -> Result<BTreeMap<String, Transform>> {
+    let mut transforms = BTreeMap::new();
     let transforms_dir = project.transforms_dir();
 
     if !transforms_dir.exists() {
@@ -129,7 +135,11 @@ pub fn collect_transforms(project: &Project) -> Result<HashMap<String, Transform
 fn parse_python_transforms(content: &str, path: &std::path::Path) -> Result<Vec<Transform>> {
     let mut transforms = Vec::new();
     let source_hash = hash_source_file(path)?;
-    let relative_path = path.file_name().unwrap().to_string_lossy().to_string();
+    let relative_path = path
+        .file_name()
+        .ok_or_else(|| crate::error::Error::InvalidPath(format!("No file name in path: {}", path.display())))?
+        .to_string_lossy()
+        .to_string();
 
     // Simple parser: look for @ozzy.transform and the following def
     let lines: Vec<&str> = content.lines().collect();
@@ -172,11 +182,15 @@ fn parse_python_transforms(content: &str, path: &std::path::Path) -> Result<Vec<
                         let meta = parse_transform_decorator(&decorator_content);
 
                         // Look for lockfile (uv.lock in same directory)
-                        let lockfile_path = path.parent().unwrap().join("uv.lock");
-                        let lockfile_hash = if lockfile_path.exists() {
-                            blake3_hash_file(&lockfile_path)?
+                        let lockfile_hash = if let Some(parent) = path.parent() {
+                            let lockfile_path = parent.join("uv.lock");
+                            if lockfile_path.exists() {
+                                blake3_hash_file(&lockfile_path)?
+                            } else {
+                                blake3_hash(b"")
+                            }
                         } else {
-                            // No lockfile - use empty hash
+                            // No parent directory - use empty hash
                             blake3_hash(b"")
                         };
 

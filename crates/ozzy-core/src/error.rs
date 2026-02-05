@@ -38,11 +38,20 @@ pub enum Error {
     #[error("File not found: {0}")]
     FileNotFound(String),
 
+    #[error("Invalid path: {0}")]
+    InvalidPath(String),
+
     #[error("Invalid parquet file: {0}")]
     InvalidParquet(String),
 
     #[error("Cache error: {0}")]
     CacheError(String),
+
+    #[error("Remote cache error: {0}")]
+    RemoteCache(String),
+
+    #[error("Remote cache not configured")]
+    RemoteCacheNotConfigured,
 
     #[error("Runtime error: {0}")]
     RuntimeError(String),

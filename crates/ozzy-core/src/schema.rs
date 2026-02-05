@@ -172,17 +172,78 @@ fn parse_data_type(s: &str) -> DataType {
             // Parse timestamp[unit, tz] or timestamp[unit]
             let inner = &s[10..s.len() - 1];
             let parts: Vec<&str> = inner.split(", ").collect();
-            let unit = match parts[0] {
-                "s" => TimeUnit::Second,
-                "ms" => TimeUnit::Millisecond,
-                "us" => TimeUnit::Microsecond,
-                "ns" => TimeUnit::Nanosecond,
-                _ => TimeUnit::Nanosecond,
-            };
+            let unit = parse_time_unit(parts[0]);
             let tz = parts.get(1).map(|s| Arc::from(*s));
             DataType::Timestamp(unit, tz)
         }
-        _ => DataType::Utf8, // Default fallback
+        s if s.starts_with("time32[") => {
+            let inner = &s[7..s.len() - 1];
+            DataType::Time32(parse_time_unit(inner))
+        }
+        s if s.starts_with("time64[") => {
+            let inner = &s[7..s.len() - 1];
+            DataType::Time64(parse_time_unit(inner))
+        }
+        s if s.starts_with("duration[") => {
+            let inner = &s[9..s.len() - 1];
+            DataType::Duration(parse_time_unit(inner))
+        }
+        s if s.starts_with("list<") => {
+            let inner = &s[5..s.len() - 1];
+            let inner_type = parse_data_type(inner);
+            DataType::List(Arc::new(Field::new("item", inner_type, true)))
+        }
+        s if s.starts_with("large_list<") => {
+            let inner = &s[11..s.len() - 1];
+            let inner_type = parse_data_type(inner);
+            DataType::LargeList(Arc::new(Field::new("item", inner_type, true)))
+        }
+        s if s.starts_with("fixed_list<") => {
+            // fixed_list<type, size>
+            let inner = &s[11..s.len() - 1];
+            if let Some(comma_pos) = inner.rfind(", ") {
+                let type_str = &inner[..comma_pos];
+                let size_str = &inner[comma_pos + 2..];
+                if let Ok(size) = size_str.parse::<i32>() {
+                    let inner_type = parse_data_type(type_str);
+                    return DataType::FixedSizeList(Arc::new(Field::new("item", inner_type, true)), size);
+                }
+            }
+            eprintln!("Warning: Could not parse fixed_list type '{}', falling back to Utf8", s);
+            DataType::Utf8
+        }
+        s if s.starts_with("dict<") => {
+            // dict<key_type, value_type>
+            let inner = &s[5..s.len() - 1];
+            if let Some(comma_pos) = inner.find(", ") {
+                let key_str = &inner[..comma_pos];
+                let value_str = &inner[comma_pos + 2..];
+                let key_type = parse_data_type(key_str);
+                let value_type = parse_data_type(value_str);
+                return DataType::Dictionary(Box::new(key_type), Box::new(value_type));
+            }
+            eprintln!("Warning: Could not parse dict type '{}', falling back to Utf8", s);
+            DataType::Utf8
+        }
+        _ => {
+            // Log unknown types so users can identify the source of schema mismatches
+            eprintln!("Warning: Unknown data type '{}', falling back to Utf8", s);
+            DataType::Utf8
+        }
+    }
+}
+
+/// Parse time unit from string.
+fn parse_time_unit(s: &str) -> TimeUnit {
+    match s {
+        "s" => TimeUnit::Second,
+        "ms" => TimeUnit::Millisecond,
+        "us" => TimeUnit::Microsecond,
+        "ns" => TimeUnit::Nanosecond,
+        _ => {
+            eprintln!("Warning: Unknown time unit '{}', defaulting to Nanosecond", s);
+            TimeUnit::Nanosecond
+        }
     }
 }
 

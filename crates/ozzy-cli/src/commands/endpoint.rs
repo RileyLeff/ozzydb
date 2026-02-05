@@ -175,7 +175,7 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
 fn validate_pipeline_schema(
     input_schema: &schema::SchemaInfo,
     transforms: &[String],
-    available_transforms: &std::collections::HashMap<String, ozzy_core::project::Transform>,
+    available_transforms: &std::collections::BTreeMap<String, ozzy_core::project::Transform>,
 ) -> schema::ValidationResult {
     let mut result = schema::ValidationResult::ok();
 

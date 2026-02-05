@@ -1,6 +1,7 @@
 use anyhow::Result;
+use ozzy_core::cache::TieredCache;
 use ozzy_core::project::{Endpoint, SourceType};
-use ozzy_core::{cache, commit, hash, platform, runtime, Project};
+use ozzy_core::{commit, hash, platform, runtime, Project};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -35,10 +36,15 @@ pub async fn execute(
     // Get platform fingerprint
     let platform = platform::PlatformFingerprint::detect();
     println!("Platform: {}", platform.short_string());
-    println!();
 
-    // Open the cache
-    let local_cache = cache::LocalCache::open()?;
+    // Open tiered cache (local + optional remote)
+    let tiered_config = project.config.cache.to_tiered_config();
+    let tiered_cache = TieredCache::new(&tiered_config).await?;
+
+    if tiered_cache.has_remote() {
+        println!("Remote cache: enabled (auto_pull)");
+    }
+    println!();
 
     // Build execution plan (topological order)
     let execution_order = build_execution_order(&endpoint);
@@ -133,21 +139,26 @@ pub async fn execute(
         }
         println!("  Materialized hash: {}...", &materialized_hash[..12]);
 
-        // Check cache
+        // Check cache (tiered: L1 local, L2 remote with auto_pull)
         let output_path = if !force {
-            if let Some(cached_path) = local_cache.get_path(&materialized_hash)? {
+            if let Some(cached_path) = tiered_cache.get_path(&materialized_hash).await? {
                 if cached_path.exists() {
-                    println!("  Cache: HIT");
+                    // Determine if this was a local or remote hit
+                    if tiered_cache.contains_local(&materialized_hash)? {
+                        println!("  Cache: HIT (local)");
+                    } else {
+                        println!("  Cache: HIT (remote)");
+                    }
                     cached_path
                 } else {
-                    execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &local_cache, &platform)?
+                    execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &tiered_cache, &platform).await?
                 }
             } else {
-                execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &local_cache, &platform)?
+                execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &tiered_cache, &platform).await?
             }
         } else {
             println!("  Cache: SKIP (forced)");
-            execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &local_cache, &platform)?
+            execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &tiered_cache, &platform).await?
         };
 
         node_outputs.insert(node_name.clone(), output_path);
@@ -190,25 +201,76 @@ fn find_endpoint(project: &Project, name: &str) -> Result<Endpoint> {
 }
 
 fn build_execution_order(endpoint: &Endpoint) -> Vec<String> {
-    // Simple topological sort for linear pipelines
-    // For more complex DAGs, would need proper topo sort
-    let mut order = Vec::new();
+    use std::collections::{HashSet, VecDeque};
 
+    // Build dependency graph from edges
+    // A node depends on another node if there's an edge with source_type=Node pointing to it
+    let node_names: HashSet<String> = endpoint.nodes.iter().map(|n| n.node_name.clone()).collect();
+
+    // Map: node -> set of nodes it depends on (must execute before)
+    let mut dependencies: HashMap<String, HashSet<String>> = HashMap::new();
     for node in &endpoint.nodes {
-        order.push(node.node_name.clone());
+        dependencies.insert(node.node_name.clone(), HashSet::new());
+    }
+
+    // Populate dependencies from edges
+    for edge in &endpoint.edges {
+        if edge.source_type == SourceType::Node && node_names.contains(&edge.source_ref) {
+            // target_node depends on source_ref
+            if let Some(deps) = dependencies.get_mut(&edge.target_node) {
+                deps.insert(edge.source_ref.clone());
+            }
+        }
+    }
+
+    // Kahn's algorithm for topological sort
+    let mut in_degree: HashMap<String, usize> = HashMap::new();
+    for (node, deps) in &dependencies {
+        in_degree.insert(node.clone(), deps.len());
+    }
+
+    // Start with nodes that have no node dependencies (only data source inputs)
+    let mut queue: VecDeque<String> = VecDeque::new();
+    for (node, &degree) in &in_degree {
+        if degree == 0 {
+            queue.push_back(node.clone());
+        }
+    }
+
+    let mut order = Vec::new();
+    while let Some(node) = queue.pop_front() {
+        order.push(node.clone());
+
+        // Decrease in-degree of nodes that depend on this node
+        for (other_node, deps) in &dependencies {
+            if deps.contains(&node) {
+                if let Some(degree) = in_degree.get_mut(other_node) {
+                    *degree -= 1;
+                    if *degree == 0 {
+                        queue.push_back(other_node.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // If we didn't process all nodes, there's a cycle
+    if order.len() != endpoint.nodes.len() {
+        eprintln!("Warning: Cycle detected in pipeline DAG, falling back to insertion order");
+        return endpoint.nodes.iter().map(|n| n.node_name.clone()).collect();
     }
 
     order
 }
 
 /// Execute a node with multi-input support.
-fn execute_node_multi(
+async fn execute_node_multi(
     project: &Project,
     transform: &ozzy_core::project::Transform,
     input_paths: &HashMap<String, PathBuf>,
     params: &serde_json::Value,
     materialized_hash: &str,
-    cache: &cache::LocalCache,
+    cache: &TieredCache,
     platform: &platform::PlatformFingerprint,
 ) -> Result<PathBuf> {
     println!("  Cache: MISS - executing transform");
@@ -228,15 +290,20 @@ fn execute_node_multi(
         params,
     )?;
 
-    // Store in cache
-    let cached_path = cache.put(
-        materialized_hash,
-        &platform.short_string(),
-        &temp_output,
-        None, // row count
-    )?;
+    // Store in tiered cache (L1 local, L2 remote with auto_push)
+    let cached_path = cache
+        .put(
+            materialized_hash,
+            &platform.short_string(),
+            &temp_output,
+            None, // row count
+        )
+        .await?;
 
     println!("  Cached at: {}", cached_path.display());
+    if cache.has_remote() {
+        println!("  Pushed to remote: {}", cache.has_remote());
+    }
 
     Ok(cached_path)
 }
