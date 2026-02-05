@@ -1,0 +1,19 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test artifacts
+/tmp/
+*.log
+
+# OzzyDB local cache (global, not project-specific)
+# Project .ozzy/ directories have their own .gitignore

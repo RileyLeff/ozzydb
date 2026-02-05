@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ozzy-core",
+    "crates/ozzy-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/rileyleff/ozzydb"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Hashing
+blake3 = "1"
+
+# Data formats
+arrow = { version = "54", features = ["ipc", "json"] }
+parquet = { version = "54", features = ["arrow", "zstd", "lz4"] }
+
+# Local database for cache index
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# File system
+walkdir = "2"
+tempfile = "3"
+dirs = "5"
+
+# Platform detection
+sysinfo = "0.32"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID generation
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Process execution
+which = "7"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Internal crates
+ozzy-core = { path = "crates/ozzy-core" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
