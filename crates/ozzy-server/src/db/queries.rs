@@ -30,34 +30,28 @@ impl Database {
 
     /// Find user by GitHub ID.
     pub async fn get_user_by_github_id(&self, github_id: i64) -> Result<Option<User>> {
-        let user = sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE github_id = $1"
-        )
-        .bind(github_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE github_id = $1")
+            .bind(github_id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(user)
     }
 
     /// Find user by username.
     pub async fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
-        let user = sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE username = $1"
-        )
-        .bind(username)
-        .fetch_optional(&self.pool)
-        .await?;
+        let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
+            .bind(username)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(user)
     }
 
     /// Find user by ID.
     pub async fn get_user_by_id(&self, id: Uuid) -> Result<Option<User>> {
-        let user = sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(user)
     }
 
@@ -79,7 +73,7 @@ impl Database {
                 avatar_url = EXCLUDED.avatar_url,
                 updated_at = NOW()
             RETURNING *
-            "#
+            "#,
         )
         .bind(Uuid::new_v4())
         .bind(github_login)
@@ -103,7 +97,7 @@ impl Database {
             SELECT p.* FROM projects p
             JOIN users u ON p.owner_user_id = u.id
             WHERE u.username = $1 AND p.slug = $2
-            "#
+            "#,
         )
         .bind(owner)
         .bind(slug)
@@ -125,7 +119,7 @@ impl Database {
             INSERT INTO projects (id, owner_user_id, slug, description, visibility)
             VALUES ($1, $2, $3, $4, $5)
             RETURNING *
-            "#
+            "#,
         )
         .bind(Uuid::new_v4())
         .bind(owner_id)
@@ -151,7 +145,7 @@ impl Database {
             ON CONFLICT (owner_user_id, slug) DO UPDATE SET
                 updated_at = NOW()
             RETURNING *
-            "#
+            "#,
         )
         .bind(Uuid::new_v4())
         .bind(owner_id)
@@ -168,7 +162,12 @@ impl Database {
     }
 
     /// List projects for a user with explicit pagination.
-    pub async fn list_user_projects_paginated(&self, user_id: Uuid, limit: i64, offset: i64) -> Result<Vec<Project>> {
+    pub async fn list_user_projects_paginated(
+        &self,
+        user_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Project>> {
         let projects = sqlx::query_as::<_, Project>(
             "SELECT * FROM projects WHERE owner_user_id = $1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3"
         )
@@ -247,7 +246,7 @@ impl Database {
             .bind(name)
             .bind(&t.hash)
             .bind(&t.runtime)
-            .bind(format!("transforms/{}.py", t.hash))
+            .bind(&t.source_path)
             .bind(&t.function_name)
             .bind(&t.lockfile_hash)
             .bind(&t.params_schema)
@@ -264,7 +263,7 @@ impl Database {
                 r#"
                 INSERT INTO endpoints (id, commit_id, name, description, definition)
                 VALUES ($1, $2, $3, $4, $5)
-                "#
+                "#,
             )
             .bind(Uuid::new_v4())
             .bind(commit_id)
@@ -280,9 +279,13 @@ impl Database {
     }
 
     /// Get commit by hash.
-    pub async fn get_commit_by_hash(&self, project_id: Uuid, hash: &str) -> Result<Option<DbCommit>> {
+    pub async fn get_commit_by_hash(
+        &self,
+        project_id: Uuid,
+        hash: &str,
+    ) -> Result<Option<DbCommit>> {
         let commit = sqlx::query_as::<_, DbCommit>(
-            "SELECT * FROM commits WHERE project_id = $1 AND hash = $2"
+            "SELECT * FROM commits WHERE project_id = $1 AND hash = $2",
         )
         .bind(project_id)
         .bind(hash)
@@ -293,19 +296,35 @@ impl Database {
 
     /// Get commit by ID.
     pub async fn get_commit_by_id(&self, commit_id: Uuid) -> Result<Option<DbCommit>> {
-        let commit = sqlx::query_as::<_, DbCommit>(
-            "SELECT * FROM commits WHERE id = $1"
-        )
-        .bind(commit_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let commit = sqlx::query_as::<_, DbCommit>("SELECT * FROM commits WHERE id = $1")
+            .bind(commit_id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(commit)
+    }
+
+    /// List commits for a project in reverse chronological order.
+    pub async fn list_commits_paginated(
+        &self,
+        project_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<DbCommit>> {
+        let commits = sqlx::query_as::<_, DbCommit>(
+            "SELECT * FROM commits WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+        )
+        .bind(project_id)
+        .bind(limit.min(100))
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(commits)
     }
 
     /// Get specific endpoint for a commit.
     pub async fn get_endpoint(&self, commit_id: Uuid, name: &str) -> Result<Option<DbEndpoint>> {
         let endpoint = sqlx::query_as::<_, DbEndpoint>(
-            "SELECT * FROM endpoints WHERE commit_id = $1 AND name = $2"
+            "SELECT * FROM endpoints WHERE commit_id = $1 AND name = $2",
         )
         .bind(commit_id)
         .bind(name)
@@ -316,34 +335,31 @@ impl Database {
 
     /// Get data sources for a commit.
     pub async fn get_data_sources(&self, commit_id: Uuid) -> Result<Vec<DbDataSource>> {
-        let sources = sqlx::query_as::<_, DbDataSource>(
-            "SELECT * FROM data_sources WHERE commit_id = $1"
-        )
-        .bind(commit_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let sources =
+            sqlx::query_as::<_, DbDataSource>("SELECT * FROM data_sources WHERE commit_id = $1")
+                .bind(commit_id)
+                .fetch_all(&self.pool)
+                .await?;
         Ok(sources)
     }
 
     /// Get transforms for a commit.
     pub async fn get_transforms(&self, commit_id: Uuid) -> Result<Vec<DbTransform>> {
-        let transforms = sqlx::query_as::<_, DbTransform>(
-            "SELECT * FROM transforms WHERE commit_id = $1"
-        )
-        .bind(commit_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let transforms =
+            sqlx::query_as::<_, DbTransform>("SELECT * FROM transforms WHERE commit_id = $1")
+                .bind(commit_id)
+                .fetch_all(&self.pool)
+                .await?;
         Ok(transforms)
     }
 
     /// Get endpoints for a commit.
     pub async fn get_endpoints(&self, commit_id: Uuid) -> Result<Vec<DbEndpoint>> {
-        let endpoints = sqlx::query_as::<_, DbEndpoint>(
-            "SELECT * FROM endpoints WHERE commit_id = $1"
-        )
-        .bind(commit_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let endpoints =
+            sqlx::query_as::<_, DbEndpoint>("SELECT * FROM endpoints WHERE commit_id = $1")
+                .bind(commit_id)
+                .fetch_all(&self.pool)
+                .await?;
         Ok(endpoints)
     }
 
@@ -352,9 +368,14 @@ impl Database {
     // ========================================================================
 
     /// Get ref by name and type.
-    pub async fn get_ref(&self, project_id: Uuid, name: &str, ref_type: &str) -> Result<Option<DbRef>> {
+    pub async fn get_ref(
+        &self,
+        project_id: Uuid,
+        name: &str,
+        ref_type: &str,
+    ) -> Result<Option<DbRef>> {
         let r = sqlx::query_as::<_, DbRef>(
-            "SELECT * FROM refs WHERE project_id = $1 AND name = $2 AND ref_type = $3"
+            "SELECT * FROM refs WHERE project_id = $1 AND name = $2 AND ref_type = $3",
         )
         .bind(project_id)
         .bind(name)
@@ -380,7 +401,7 @@ impl Database {
                 commit_id = EXCLUDED.commit_id,
                 updated_at = NOW()
             RETURNING *
-            "#
+            "#,
         )
         .bind(Uuid::new_v4())
         .bind(project_id)
@@ -395,7 +416,7 @@ impl Database {
     /// List all refs for a project.
     pub async fn list_refs(&self, project_id: Uuid) -> Result<Vec<DbRef>> {
         let refs = sqlx::query_as::<_, DbRef>(
-            "SELECT * FROM refs WHERE project_id = $1 ORDER BY ref_type, name"
+            "SELECT * FROM refs WHERE project_id = $1 ORDER BY ref_type, name",
         )
         .bind(project_id)
         .fetch_all(&self.pool)
@@ -408,12 +429,11 @@ impl Database {
     pub async fn get_ref_by_name(&self, project_id: Uuid, name: &str) -> Result<Option<DbRef>> {
         // Handle @latest - resolve to the project's default_branch (usually "main")
         if name == "@latest" || name == "latest" {
-            let default_branch: Option<String> = sqlx::query_scalar(
-                "SELECT default_branch FROM projects WHERE id = $1"
-            )
-            .bind(project_id)
-            .fetch_optional(&self.pool)
-            .await?;
+            let default_branch: Option<String> =
+                sqlx::query_scalar("SELECT default_branch FROM projects WHERE id = $1")
+                    .bind(project_id)
+                    .fetch_optional(&self.pool)
+                    .await?;
 
             let branch_name = default_branch.unwrap_or_else(|| "main".to_string());
             return self.get_ref(project_id, &branch_name, "branch").await;
@@ -433,12 +453,10 @@ impl Database {
 
     /// Get token by hash.
     pub async fn get_token_by_hash(&self, token_hash: &str) -> Result<Option<ApiToken>> {
-        let token = sqlx::query_as::<_, ApiToken>(
-            "SELECT * FROM api_tokens WHERE token_hash = $1"
-        )
-        .bind(token_hash)
-        .fetch_optional(&self.pool)
-        .await?;
+        let token = sqlx::query_as::<_, ApiToken>("SELECT * FROM api_tokens WHERE token_hash = $1")
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(token)
     }
 
@@ -457,7 +475,7 @@ impl Database {
             INSERT INTO api_tokens (id, user_id, name, token_hash, token_prefix, scopes, expires_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING *
-            "#
+            "#,
         )
         .bind(Uuid::new_v4())
         .bind(user_id)
@@ -474,7 +492,7 @@ impl Database {
     /// List tokens for a user.
     pub async fn list_user_tokens(&self, user_id: Uuid) -> Result<Vec<ApiToken>> {
         let tokens = sqlx::query_as::<_, ApiToken>(
-            "SELECT * FROM api_tokens WHERE user_id = $1 ORDER BY created_at DESC"
+            "SELECT * FROM api_tokens WHERE user_id = $1 ORDER BY created_at DESC",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
@@ -484,36 +502,30 @@ impl Database {
 
     /// Delete a token by ID.
     pub async fn delete_token(&self, user_id: Uuid, token_id: Uuid) -> Result<bool> {
-        let result = sqlx::query(
-            "DELETE FROM api_tokens WHERE id = $1 AND user_id = $2"
-        )
-        .bind(token_id)
-        .bind(user_id)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("DELETE FROM api_tokens WHERE id = $1 AND user_id = $2")
+            .bind(token_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
     /// Delete a token by name.
     pub async fn delete_token_by_name(&self, user_id: Uuid, name: &str) -> Result<bool> {
-        let result = sqlx::query(
-            "DELETE FROM api_tokens WHERE user_id = $1 AND name = $2"
-        )
-        .bind(user_id)
-        .bind(name)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("DELETE FROM api_tokens WHERE user_id = $1 AND name = $2")
+            .bind(user_id)
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
     /// Update last_used_at for a token.
     pub async fn touch_token(&self, token_id: Uuid) -> Result<()> {
-        sqlx::query(
-            "UPDATE api_tokens SET last_used_at = NOW() WHERE id = $1"
-        )
-        .bind(token_id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE api_tokens SET last_used_at = NOW() WHERE id = $1")
+            .bind(token_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -524,7 +536,7 @@ impl Database {
     /// Check if content exists.
     pub async fn content_exists(&self, content_hash: &str) -> Result<bool> {
         let exists = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM content_refs WHERE content_hash = $1)"
+            "SELECT EXISTS(SELECT 1 FROM content_refs WHERE content_hash = $1)",
         )
         .bind(content_hash)
         .fetch_one(&self.pool)
@@ -538,7 +550,7 @@ impl Database {
             return Ok(0);
         }
         let total: Option<i64> = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(byte_size), 0) FROM content_refs WHERE content_hash = ANY($1)"
+            "SELECT COALESCE(SUM(byte_size), 0) FROM content_refs WHERE content_hash = ANY($1)",
         )
         .bind(hashes)
         .fetch_one(&self.pool)
@@ -560,7 +572,7 @@ impl Database {
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (content_hash) DO UPDATE SET
                 ref_count = content_refs.ref_count + 1
-            "#
+            "#,
         )
         .bind(content_hash)
         .bind(storage_key)

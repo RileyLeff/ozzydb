@@ -1,22 +1,28 @@
 //! Push/pull API endpoints for syncing projects.
 
 use axum::{
+    Json, Router,
     body::Body,
     extract::{Multipart, Path, Query, State},
     http::header,
     response::Response,
     routing::{get, post},
-    Json, Router,
 };
 use ozzy_core::registry::protocol::{
     ContentCheckRequest, ContentCheckResponse, EndpointManifest, PullManifest, PushResponse,
+    ResolveEndpointResponse,
 };
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::{Component, Path as FsPath, PathBuf};
 
 use super::auth::ApiError;
-use crate::{auth::middleware::{AuthUser, MaybeAuthUser, WriteAuthUser}, db::Project, AppState};
+use crate::{
+    AppState,
+    auth::middleware::{AuthUser, MaybeAuthUser, WriteAuthUser},
+    db::Project,
+};
 
 /// Extract Arrow schema from parquet bytes as a JSON value.
 fn extract_parquet_schema(data: &[u8]) -> Result<serde_json::Value, anyhow::Error> {
@@ -47,10 +53,15 @@ fn check_project_access(project: &Project, user: &Option<crate::db::User>) -> Re
     match project.visibility.as_str() {
         "public" => Ok(()),
         "org" => {
-            // Org visibility - any authenticated user can access
+            // Org membership model is not implemented yet; only the owner can access org projects.
             match user {
-                Some(_) => Ok(()),
-                None => Err(ApiError::unauthorized("Authentication required for org-visible projects")),
+                Some(u) if u.id == project.owner_user_id => Ok(()),
+                Some(_) => Err(ApiError::forbidden(
+                    "Organization visibility is not yet supported for non-owners",
+                )),
+                None => Err(ApiError::unauthorized(
+                    "Authentication required for org-visible projects",
+                )),
             }
         }
         _ => {
@@ -58,36 +69,37 @@ fn check_project_access(project: &Project, user: &Option<crate::db::User>) -> Re
             match user {
                 Some(u) if u.id == project.owner_user_id => Ok(()),
                 Some(_) => Err(ApiError::forbidden("You don't have access to this project")),
-                None => Err(ApiError::unauthorized("Authentication required for private projects")),
+                None => Err(ApiError::unauthorized(
+                    "Authentication required for private projects",
+                )),
             }
         }
     }
 }
 
-/// Validate a filename to prevent path traversal attacks.
-/// Returns the sanitized filename if valid, or an error if invalid.
-fn validate_filename(name: &str) -> Result<&str, anyhow::Error> {
-    // Check for path traversal attempts
-    if name.contains("..") {
-        anyhow::bail!("Invalid filename: path traversal detected");
+/// Validate and sanitize a relative path to prevent traversal.
+fn sanitize_relative_path(path: &str) -> Result<String, anyhow::Error> {
+    if path.contains('\0') {
+        anyhow::bail!("Invalid path: null bytes not allowed");
     }
 
-    // Check for absolute paths
-    if name.starts_with('/') || name.starts_with('\\') {
-        anyhow::bail!("Invalid filename: absolute paths not allowed");
+    let fs_path = FsPath::new(path);
+    let mut sanitized = PathBuf::new();
+    for component in fs_path.components() {
+        match component {
+            Component::Normal(part) => sanitized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("Invalid path: traversal or absolute paths are not allowed");
+            }
+        }
     }
 
-    // Check for Windows-style drive letters
-    if name.len() >= 2 && name.chars().nth(1) == Some(':') {
-        anyhow::bail!("Invalid filename: drive letters not allowed");
+    if sanitized.as_os_str().is_empty() {
+        anyhow::bail!("Invalid path: empty path is not allowed");
     }
 
-    // Check for null bytes (could cause truncation issues)
-    if name.contains('\0') {
-        anyhow::bail!("Invalid filename: null bytes not allowed");
-    }
-
-    Ok(name)
+    Ok(sanitized.to_string_lossy().replace('\\', "/"))
 }
 
 pub fn router() -> Router<AppState> {
@@ -98,6 +110,11 @@ pub fn router() -> Router<AppState> {
         .route("/{owner}/{project}/pull/manifest", get(pull_manifest))
         // Content check for deduplication
         .route("/{owner}/{project}/content/check", post(check_content))
+        // Ref resolution
+        .route(
+            "/resolve/{owner}/{project}/{endpoint}@{ref}",
+            get(resolve_endpoint),
+        )
         // Endpoint fetch
         .route("/{owner}/{project}/{endpoint}@{ref}", get(fetch_endpoint))
         .route(
@@ -147,7 +164,8 @@ async fn push(
         total_upload_size += data.len() as u64;
         if total_upload_size > max_upload {
             return Err(ApiError::bad_request(format!(
-                "Upload size exceeds limit of {} bytes", max_upload
+                "Upload size exceeds limit of {} bytes",
+                max_upload
             )));
         }
 
@@ -155,25 +173,50 @@ async fn push(
             commit_json = Some(serde_json::from_slice(&data)?);
         } else if name.starts_with("data/") {
             let filename = name.strip_prefix("data/").unwrap();
-            validate_filename(filename)?;
-            data_files.insert(filename.to_string(), data.to_vec());
+            let safe_name = sanitize_relative_path(filename)?;
+            data_files.insert(safe_name, data.to_vec());
         } else if name.starts_with("transforms/") {
             let filename = name.strip_prefix("transforms/").unwrap();
-            validate_filename(filename)?;
-            transform_files.insert(filename.to_string(), data.to_vec());
+            let safe_name = sanitize_relative_path(filename)?;
+            transform_files.insert(safe_name, data.to_vec());
         } else if name.starts_with("lockfiles/") {
             let filename = name.strip_prefix("lockfiles/").unwrap();
-            validate_filename(filename)?;
-            lockfiles.insert(filename.to_string(), data.to_vec());
+            let safe_name = sanitize_relative_path(filename)?;
+            lockfiles.insert(safe_name, data.to_vec());
         }
     }
 
     let commit_data = commit_json.ok_or_else(|| anyhow::anyhow!("Missing commit data"))?;
+    let mut commit: ozzy_core::project::Commit = serde_json::from_value(commit_data.clone())
+        .map_err(|e| anyhow::anyhow!("Invalid commit format: {}", e))?;
+
+    // Validate and normalize committed file paths.
+    for ds in commit.data_sources.values_mut() {
+        let safe_path = sanitize_relative_path(&ds.path)?;
+        if !safe_path.starts_with("data/") {
+            return Err(ApiError::bad_request(format!(
+                "Data source '{}' has invalid path '{}': must be under data/",
+                ds.name, ds.path
+            )));
+        }
+        ds.path = safe_path;
+    }
+    for transform in commit.transforms.values_mut() {
+        let safe_path = sanitize_relative_path(&transform.source_path)?;
+        if !safe_path.starts_with("transforms/") || !safe_path.ends_with(".py") {
+            return Err(ApiError::bad_request(format!(
+                "Transform '{}' has invalid source_path '{}': must be a .py file under transforms/",
+                transform.name, transform.source_path
+            )));
+        }
+        transform.source_path = safe_path;
+    }
 
     // Track newly stored hashes for cleanup on failure
     let mut stored_hashes: Vec<(String, String)> = Vec::new(); // (hash, ext)
+    let mut content_registrations: Vec<(String, String, String, i64)> = Vec::new();
 
-    // Store data files, extract schemas, and register content for deduplication tracking
+    // Store data files and extract schemas
     let mut new_data_count = 0;
     let mut data_schemas: HashMap<String, serde_json::Value> = HashMap::new();
     let store_result: Result<(), ApiError> = async {
@@ -186,10 +229,9 @@ async fn push(
 
             // Extract schema from parquet files
             if ext == "parquet" {
-                let schema = extract_parquet_schema(content)
-                    .map_err(|e| ApiError::bad_request(format!(
-                        "Invalid parquet file '{}': {}", filename, e
-                    )))?;
+                let schema = extract_parquet_schema(content).map_err(|e| {
+                    ApiError::bad_request(format!("Invalid parquet file '{}': {}", filename, e))
+                })?;
                 data_schemas.insert(content_hash.clone(), schema);
             }
 
@@ -199,12 +241,22 @@ async fn push(
                 stored_hashes.push((content_hash.clone(), ext.to_string()));
                 new_data_count += 1;
             }
-            let storage_key = format!("content/{}/{}/{}.{}",
-                &content_hash[0..2], &content_hash[2..4], &content_hash, ext);
-            state.db.register_content(&content_hash, &storage_key, ext, content.len() as i64).await?;
+            let storage_key = format!(
+                "content/{}/{}/{}.{}",
+                &content_hash[0..2],
+                &content_hash[2..4],
+                &content_hash,
+                ext
+            );
+            content_registrations.push((
+                content_hash,
+                storage_key,
+                ext.to_string(),
+                content.len() as i64,
+            ));
         }
 
-        // Store transform files and register content for deduplication tracking
+        // Store transform files
         for (filename, content) in &transform_files {
             let ext = std::path::Path::new(filename)
                 .extension()
@@ -216,12 +268,20 @@ async fn push(
                 state.storage.store(content, ext).await?;
                 stored_hashes.push((content_hash.clone(), ext.to_string()));
             }
-            let storage_key = format!("content/{}/{}/{}.{}",
-                &content_hash[0..2], &content_hash[2..4], &content_hash, ext);
-            state.db.register_content(&content_hash, &storage_key, ext, content.len() as i64).await?;
+            let storage_key = format!(
+                "content/{}/{}/{}.{}",
+                &content_hash[0..2],
+                &content_hash[2..4],
+                &content_hash,
+                ext
+            );
+            content_registrations.push((
+                content_hash,
+                storage_key,
+                ext.to_string(),
+                content.len() as i64,
+            ));
         }
-        let new_transform_count = transform_files.len();
-        let _ = new_transform_count;
 
         // Store lockfiles
         for (filename, content) in &lockfiles {
@@ -231,14 +291,24 @@ async fn push(
                 state.storage.store(content, "lock").await?;
                 stored_hashes.push((content_hash.clone(), "lock".to_string()));
             }
-            let storage_key = format!("content/{}/{}/{}.lock",
-                &content_hash[0..2], &content_hash[2..4], &content_hash);
-            state.db.register_content(&content_hash, &storage_key, "lock", content.len() as i64).await?;
+            let storage_key = format!(
+                "content/{}/{}/{}.lock",
+                &content_hash[0..2],
+                &content_hash[2..4],
+                &content_hash
+            );
+            content_registrations.push((
+                content_hash,
+                storage_key,
+                "lock".to_string(),
+                content.len() as i64,
+            ));
             let _ = filename;
         }
 
         Ok(())
-    }.await;
+    }
+    .await;
 
     // If storage failed, attempt to clean up newly stored files
     if let Err(e) = store_result {
@@ -250,31 +320,83 @@ async fn push(
 
     let new_transform_count = transform_files.len();
 
-    // Parse commit from JSON
-    let commit: ozzy_core::project::Commit =
-        serde_json::from_value(commit_data.clone()).map_err(|e| anyhow::anyhow!("Invalid commit format: {}", e))?;
+    // Get the ref name from commit data or default to main, then normalize it
+    let raw_ref_name = commit_data["ref"].as_str().unwrap_or("refs/heads/main");
+    let ref_name = normalize_ref_name(raw_ref_name).to_string();
+    if ref_name.is_empty() {
+        return Err(ApiError::bad_request("Ref name cannot be empty"));
+    }
+    let ref_type = if raw_ref_name.starts_with("refs/tags/") {
+        "tag"
+    } else {
+        "branch"
+    };
 
-    // Create commit in database (with extracted schemas)
-    let commit_id = state
+    // Create commit in database.
+    let commit_id = match state
         .db
         .create_commit(project.id, &commit, Some(user.id), &data_schemas)
-        .await?;
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            // Commit failed to persist, so rollback newly uploaded blobs.
+            for (hash, ext) in &stored_hashes {
+                let _ = state.storage.delete(hash, ext).await;
+            }
+            return Err(e.into());
+        }
+    };
 
-    // Get the ref name from commit data or default to main, then normalize it
-    let raw_ref_name = commit_data["ref"]
-        .as_str()
-        .unwrap_or("refs/heads/main");
-    let ref_name = normalize_ref_name(raw_ref_name);
-
-    // Update the refs table to point to this commit
-    state
+    // Update the pushed ref.
+    if let Err(e) = state
         .db
-        .upsert_ref(project.id, ref_name, "branch", commit_id)
-        .await?;
+        .upsert_ref(project.id, &ref_name, ref_type, commit_id)
+        .await
+    {
+        return Err(e.into());
+    }
+
+    // Update tags sent by client (best-effort: skip tags whose commits are not present yet).
+    if let Some(tags) = commit_data.get("tags").and_then(|v| v.as_object()) {
+        for (tag_name, tag_hash_value) in tags {
+            ozzy_core::validate_safe_name(tag_name)
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+            let Some(tag_hash) = tag_hash_value.as_str() else {
+                continue;
+            };
+
+            let tag_commit_id = if tag_hash == commit.hash {
+                commit_id
+            } else if let Some(existing_commit) =
+                state.db.get_commit_by_hash(project.id, tag_hash).await?
+            {
+                existing_commit.id
+            } else {
+                continue;
+            };
+
+            state
+                .db
+                .upsert_ref(project.id, tag_name, "tag", tag_commit_id)
+                .await?;
+        }
+    }
+
+    // Register content references only after commit/ref persistence succeeded.
+    for (hash, storage_key, content_type, byte_size) in &content_registrations {
+        if let Err(e) = state
+            .db
+            .register_content(hash, storage_key, content_type, *byte_size)
+            .await
+        {
+            return Err(e.into());
+        }
+    }
 
     Ok(Json(PushResponse {
         commit_hash: commit.hash.clone(),
-        ref_name: ref_name.to_string(),
+        ref_name,
         new_data_count,
         new_transform_count,
     }))
@@ -290,7 +412,9 @@ async fn check_content(
 ) -> Result<Json<ContentCheckResponse>, ApiError> {
     // Verify ownership - only project owner can check content
     if owner != user.username {
-        return Err(ApiError::forbidden("Can only check content for your own projects"));
+        return Err(ApiError::forbidden(
+            "Can only check content for your own projects",
+        ));
     }
 
     // Verify project exists and user owns it
@@ -367,7 +491,8 @@ async fn pull_manifest(
         .collect();
 
     // Calculate total size from content refs
-    let all_hashes: Vec<String> = data_hashes.values()
+    let all_hashes: Vec<String> = data_hashes
+        .values()
         .chain(transform_hashes.values())
         .cloned()
         .collect();
@@ -415,7 +540,8 @@ async fn pull(
     let data_sources = state.db.get_data_sources(commit.id).await?;
     let transforms = state.db.get_transforms(commit.id).await?;
 
-    let all_content_hashes: Vec<String> = data_sources.iter()
+    let all_content_hashes: Vec<String> = data_sources
+        .iter()
         .map(|ds| ds.content_hash.clone())
         .chain(transforms.iter().map(|t| t.content_hash.clone()))
         .collect();
@@ -443,40 +569,58 @@ async fn pull(
         });
 
         // Include data_sources
-        let ds_map: serde_json::Value = data_sources.iter().map(|ds| {
-            (ds.name.clone(), serde_json::json!({
-                "name": ds.name,
-                "hash": ds.content_hash,
-                "schema_hash": ds.schema_hash,
-                "path": format!("data/{}.parquet", ds.name),
-                "row_count": ds.row_count,
-                "byte_size": ds.byte_size,
-            }))
-        }).collect::<serde_json::Map<String, serde_json::Value>>().into();
+        let ds_map: serde_json::Value = data_sources
+            .iter()
+            .map(|ds| {
+                (
+                    ds.name.clone(),
+                    serde_json::json!({
+                        "name": ds.name,
+                        "hash": ds.content_hash,
+                        "schema_hash": ds.schema_hash,
+                        "path": format!("data/{}.parquet", ds.name),
+                        "row_count": ds.row_count,
+                        "byte_size": ds.byte_size,
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>()
+            .into();
         commit_data["data_sources"] = ds_map;
 
         // Include transforms
-        let t_map: serde_json::Value = transforms.iter().map(|t| {
-            (t.name.clone(), serde_json::json!({
-                "name": t.name,
-                "hash": t.content_hash,
-                "runtime": t.runtime,
-                "source_path": format!("transforms/{}.py", t.name),
-                "function_name": t.function_name,
-                "lockfile_hash": t.lockfile_hash,
-                "params_schema": t.params_schema,
-                "reproducible": t.reproducible,
-                "input_schema": t.input_schema,
-                "output_schema": t.output_schema,
-            }))
-        }).collect::<serde_json::Map<String, serde_json::Value>>().into();
+        let t_map: serde_json::Value = transforms
+            .iter()
+            .map(|t| {
+                let source_path = sanitize_relative_path(&t.source_storage_key)
+                    .unwrap_or_else(|_| format!("transforms/{}.py", t.name));
+                (
+                    t.name.clone(),
+                    serde_json::json!({
+                        "name": t.name,
+                        "hash": t.content_hash,
+                        "runtime": t.runtime,
+                        "source_path": source_path,
+                        "function_name": t.function_name,
+                        "lockfile_hash": t.lockfile_hash,
+                        "params_schema": t.params_schema,
+                        "reproducible": t.reproducible,
+                        "input_schema": t.input_schema,
+                        "output_schema": t.output_schema,
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>()
+            .into();
         commit_data["transforms"] = t_map;
 
         // Include endpoints
         let endpoints = state.db.get_endpoints(commit.id).await?;
-        let e_map: serde_json::Value = endpoints.iter().map(|e| {
-            (e.name.clone(), e.definition.clone())
-        }).collect::<serde_json::Map<String, serde_json::Value>>().into();
+        let e_map: serde_json::Value = endpoints
+            .iter()
+            .map(|e| (e.name.clone(), e.definition.clone()))
+            .collect::<serde_json::Map<String, serde_json::Value>>()
+            .into();
         commit_data["endpoints"] = e_map;
 
         let commit_json = serde_json::to_vec_pretty(&commit_data)?;
@@ -509,8 +653,19 @@ async fn pull(
         }
 
         // Add transform files and their lockfiles (already fetched above)
-        let mut seen_lockfiles = std::collections::HashSet::new();
+        let mut seen_transform_paths = std::collections::HashSet::new();
+        let mut seen_lockfile_paths = std::collections::HashSet::new();
         for t in &transforms {
+            let source_path = sanitize_relative_path(&t.source_storage_key).map_err(|e| {
+                ApiError::bad_request(format!("Invalid transform path in commit: {}", e))
+            })?;
+            if !source_path.starts_with("transforms/") {
+                return Err(ApiError::bad_request(format!(
+                    "Invalid transform path '{}' (must be under transforms/)",
+                    source_path
+                )));
+            }
+
             let content = state.storage.get(&t.content_hash, "py").await?;
             total_size += content.len() as u64;
             if total_size > max_size {
@@ -523,25 +678,31 @@ async fn pull(
             header.set_size(content.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
-            builder.append_data(
-                &mut header,
-                format!("transforms/{}.py", t.name),
-                &content[..],
-            )?;
+            if seen_transform_paths.insert(source_path.clone()) {
+                builder.append_data(&mut header, &source_path, &content[..])?;
+            }
 
             // Include lockfile if it exists and hasn't been included yet
-            if !t.lockfile_hash.is_empty() && seen_lockfiles.insert(t.lockfile_hash.clone()) {
+            if !t.lockfile_hash.is_empty() {
                 if let Ok(lockfile_content) = state.storage.get(&t.lockfile_hash, "lock").await {
-                    total_size += lockfile_content.len() as u64;
-                    let mut lf_header = tar::Header::new_gnu();
-                    lf_header.set_size(lockfile_content.len() as u64);
-                    lf_header.set_mode(0o644);
-                    lf_header.set_cksum();
-                    builder.append_data(
-                        &mut lf_header,
-                        format!("transforms/{}.lock", t.name),
-                        &lockfile_content[..],
-                    )?;
+                    let lockfile_path = FsPath::new(&source_path)
+                        .parent()
+                        .map(|p| p.join("uv.lock"))
+                        .unwrap_or_else(|| PathBuf::from("uv.lock"))
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    if seen_lockfile_paths.insert(lockfile_path.clone()) {
+                        total_size += lockfile_content.len() as u64;
+                        let mut lf_header = tar::Header::new_gnu();
+                        lf_header.set_size(lockfile_content.len() as u64);
+                        lf_header.set_mode(0o644);
+                        lf_header.set_cksum();
+                        builder.append_data(
+                            &mut lf_header,
+                            lockfile_path,
+                            &lockfile_content[..],
+                        )?;
+                    }
                 }
             }
         }
@@ -606,7 +767,8 @@ async fn fetch_endpoint_manifest(
         .collect();
 
     // Calculate total size from content refs
-    let all_hashes: Vec<String> = data_hashes.values()
+    let all_hashes: Vec<String> = data_hashes
+        .values()
         .chain(transform_hashes.values())
         .cloned()
         .collect();
@@ -618,6 +780,48 @@ async fn fetch_endpoint_manifest(
         data_hashes,
         transform_hashes,
         total_size_bytes,
+    }))
+}
+
+/// Resolve endpoint metadata for an endpoint@ref without downloading content.
+async fn resolve_endpoint(
+    MaybeAuthUser(user): MaybeAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug, endpoint_name, ref_name)): Path<(String, String, String, String)>,
+) -> Result<Json<ResolveEndpointResponse>, ApiError> {
+    let project = state
+        .db
+        .get_project(&owner, &project_slug)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+
+    check_project_access(&project, &user)?;
+
+    let db_ref = state
+        .db
+        .get_ref_by_name(project.id, &ref_name)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Ref not found: {}", ref_name))?;
+
+    let commit = state
+        .db
+        .get_commit_by_id(db_ref.commit_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Commit not found"))?;
+
+    let endpoint = state
+        .db
+        .get_endpoint(commit.id, &endpoint_name)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Endpoint not found: {}", endpoint_name))?;
+
+    Ok(Json(ResolveEndpointResponse {
+        owner,
+        project: project_slug,
+        endpoint: endpoint_name,
+        ref_name,
+        commit_hash: commit.hash,
+        definition: endpoint.definition,
     }))
 }
 
@@ -694,8 +898,20 @@ async fn fetch_endpoint(
         }
 
         // Add transform files
+        let mut seen_transform_paths = std::collections::HashSet::new();
+        let mut seen_lockfile_paths = std::collections::HashSet::new();
         let transforms = state.db.get_transforms(commit.id).await?;
         for t in transforms {
+            let source_path = sanitize_relative_path(&t.source_storage_key).map_err(|e| {
+                ApiError::bad_request(format!("Invalid transform path in commit: {}", e))
+            })?;
+            if !source_path.starts_with("transforms/") {
+                return Err(ApiError::bad_request(format!(
+                    "Invalid transform path '{}' (must be under transforms/)",
+                    source_path
+                )));
+            }
+
             let content = state.storage.get(&t.content_hash, "py").await?;
             total_size += content.len() as u64;
             if total_size > max_size {
@@ -708,11 +924,39 @@ async fn fetch_endpoint(
             header.set_size(content.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
-            builder.append_data(
-                &mut header,
-                format!("transforms/{}.py", t.name),
-                &content[..],
-            )?;
+            if seen_transform_paths.insert(source_path.clone()) {
+                builder.append_data(&mut header, &source_path, &content[..])?;
+            }
+
+            // Include lockfile if available.
+            if !t.lockfile_hash.is_empty() {
+                if let Ok(lockfile_content) = state.storage.get(&t.lockfile_hash, "lock").await {
+                    let lockfile_path = FsPath::new(&source_path)
+                        .parent()
+                        .map(|p| p.join("uv.lock"))
+                        .unwrap_or_else(|| PathBuf::from("uv.lock"))
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    if seen_lockfile_paths.insert(lockfile_path.clone()) {
+                        total_size += lockfile_content.len() as u64;
+                        if total_size > max_size {
+                            return Err(ApiError::bad_request(format!(
+                                "Archive size exceeds limit of {} bytes",
+                                max_size
+                            )));
+                        }
+                        let mut lf_header = tar::Header::new_gnu();
+                        lf_header.set_size(lockfile_content.len() as u64);
+                        lf_header.set_mode(0o644);
+                        lf_header.set_cksum();
+                        builder.append_data(
+                            &mut lf_header,
+                            lockfile_path,
+                            &lockfile_content[..],
+                        )?;
+                    }
+                }
+            }
         }
 
         builder.finish()?;

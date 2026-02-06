@@ -71,7 +71,12 @@ async fn test_user_crud() -> Result<()> {
 
     // Update user
     let updated = db
-        .upsert_user_from_github(github_id, &username, Some("new@example.com"), Some("https://avatar.url"))
+        .upsert_user_from_github(
+            github_id,
+            &username,
+            Some("new@example.com"),
+            Some("https://avatar.url"),
+        )
         .await?;
     assert_eq!(updated.id, user.id);
     assert_eq!(updated.avatar_url, Some("https://avatar.url".to_string()));
@@ -134,9 +139,7 @@ async fn test_ref_operations() -> Result<()> {
         .await?;
 
     let slug = format!("ref-test-{}", Uuid::new_v4());
-    let project = db
-        .create_project(user.id, &slug, None, "public")
-        .await?;
+    let project = db.create_project(user.id, &slug, None, "public").await?;
 
     // Create a minimal commit
     let commit = ozzy_core::project::Commit {
@@ -150,7 +153,14 @@ async fn test_ref_operations() -> Result<()> {
         endpoints: Default::default(),
     };
 
-    let commit_id = db.create_commit(project.id, &commit, Some(user.id), &std::collections::HashMap::new()).await?;
+    let commit_id = db
+        .create_commit(
+            project.id,
+            &commit,
+            Some(user.id),
+            &std::collections::HashMap::new(),
+        )
+        .await?;
 
     // Create branch ref
     let branch = db
@@ -160,7 +170,9 @@ async fn test_ref_operations() -> Result<()> {
     assert_eq!(branch.ref_type, "branch");
 
     // Create tag ref
-    let tag = db.upsert_ref(project.id, "v1.0.0", "tag", commit_id).await?;
+    let tag = db
+        .upsert_ref(project.id, "v1.0.0", "tag", commit_id)
+        .await?;
     assert_eq!(tag.name, "v1.0.0");
     assert_eq!(tag.ref_type, "tag");
 
@@ -248,9 +260,7 @@ async fn test_commit_with_data() -> Result<()> {
         .await?;
 
     let slug = format!("commit-test-{}", Uuid::new_v4());
-    let project = db
-        .create_project(user.id, &slug, None, "public")
-        .await?;
+    let project = db.create_project(user.id, &slug, None, "public").await?;
 
     // Create commit with data source and transform
     let mut data_sources = std::collections::BTreeMap::new();
@@ -305,7 +315,14 @@ async fn test_commit_with_data() -> Result<()> {
         endpoints,
     };
 
-    let commit_id = db.create_commit(project.id, &commit, Some(user.id), &std::collections::HashMap::new()).await?;
+    let commit_id = db
+        .create_commit(
+            project.id,
+            &commit,
+            Some(user.id),
+            &std::collections::HashMap::new(),
+        )
+        .await?;
 
     // Verify data sources
     let sources = db.get_data_sources(commit_id).await?;
@@ -328,6 +345,68 @@ async fn test_commit_with_data() -> Result<()> {
     let found = db.get_commit_by_hash(project.id, &commit.hash).await?;
     assert!(found.is_some());
     assert_eq!(found.unwrap().message, "Add data processing pipeline");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_list_commits_paginated() -> Result<()> {
+    if should_skip_db_tests() {
+        eprintln!("Skipping DB tests - DATABASE_URL not set");
+        return Ok(());
+    }
+
+    let db = get_test_db().await.unwrap();
+
+    let github_id = rand::random::<i64>().abs();
+    let username = format!("historyowner_{}", github_id);
+    let user = db
+        .upsert_user_from_github(github_id, &username, None, None)
+        .await?;
+
+    let slug = format!("history-test-{}", Uuid::new_v4());
+    let project = db.create_project(user.id, &slug, None, "private").await?;
+
+    let commit1 = ozzy_core::project::Commit {
+        hash: format!("{:064x}", rand::random::<u64>()),
+        parent_hashes: vec![],
+        author: "test".to_string(),
+        message: "First commit".to_string(),
+        timestamp: chrono::Utc::now(),
+        data_sources: Default::default(),
+        transforms: Default::default(),
+        endpoints: Default::default(),
+    };
+    db.create_commit(
+        project.id,
+        &commit1,
+        Some(user.id),
+        &std::collections::HashMap::new(),
+    )
+    .await?;
+
+    let commit2 = ozzy_core::project::Commit {
+        hash: format!("{:064x}", rand::random::<u64>()),
+        parent_hashes: vec![commit1.hash.clone()],
+        author: "test".to_string(),
+        message: "Second commit".to_string(),
+        timestamp: chrono::Utc::now(),
+        data_sources: Default::default(),
+        transforms: Default::default(),
+        endpoints: Default::default(),
+    };
+    db.create_commit(
+        project.id,
+        &commit2,
+        Some(user.id),
+        &std::collections::HashMap::new(),
+    )
+    .await?;
+
+    let commits = db.list_commits_paginated(project.id, 10, 0).await?;
+    assert!(!commits.is_empty());
+    assert!(commits.iter().any(|c| c.hash == commit1.hash));
+    assert!(commits.iter().any(|c| c.hash == commit2.hash));
 
     Ok(())
 }

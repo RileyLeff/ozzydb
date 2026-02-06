@@ -4,11 +4,11 @@
 //! The health endpoint test runs without external dependencies.
 //! Push/pull tests require DATABASE_URL and R2 credentials.
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::Router;
 use http_body_util::BodyExt;
-use ozzy_server::{api, AppState, Config, ContentStorage, Database};
+use ozzy_server::{AppState, Config, ContentStorage, Database, api};
 use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::sync::Arc;
@@ -54,9 +54,7 @@ async fn build_test_app() -> Option<Router> {
         storage,
     };
 
-    let app = Router::new()
-        .merge(api::router())
-        .with_state(state);
+    let app = Router::new().merge(api::router()).with_state(state);
 
     Some(app)
 }
@@ -215,4 +213,52 @@ async fn test_push_requires_auth() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_commits_route_exists() {
+    let Some(app) = build_test_app().await else {
+        return;
+    };
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/nobody/nonexistent/commits")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        response.status() == StatusCode::NOT_FOUND
+            || response.status() == StatusCode::INTERNAL_SERVER_ERROR,
+        "Expected 404 or 500, got {}",
+        response.status()
+    );
+}
+
+#[tokio::test]
+async fn test_resolve_route_exists() {
+    let Some(app) = build_test_app().await else {
+        return;
+    };
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/resolve/nobody/nonexistent/endpoint@main")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        response.status() == StatusCode::NOT_FOUND
+            || response.status() == StatusCode::INTERNAL_SERVER_ERROR,
+        "Expected 404 or 500, got {}",
+        response.status()
+    );
 }

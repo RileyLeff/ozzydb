@@ -118,6 +118,16 @@ pub struct ListRefsResponse {
     pub tags: Vec<RefInfo>,
 }
 
+/// Commit information returned by commit-history APIs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitInfo {
+    pub hash: String,
+    pub parent_hashes: Vec<String>,
+    pub author: String,
+    pub message: String,
+    pub created_at: DateTime<Utc>,
+}
+
 // ============================================================================
 // Push/Pull Operations
 // ============================================================================
@@ -174,6 +184,17 @@ pub struct EndpointManifest {
     pub data_hashes: HashMap<String, String>,
     pub transform_hashes: HashMap<String, String>,
     pub total_size_bytes: u64,
+}
+
+/// Resolve response for endpoint@ref references.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveEndpointResponse {
+    pub owner: String,
+    pub project: String,
+    pub endpoint: String,
+    pub ref_name: String,
+    pub commit_hash: String,
+    pub definition: serde_json::Value,
 }
 
 // ============================================================================

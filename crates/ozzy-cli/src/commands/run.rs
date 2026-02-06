@@ -1,10 +1,38 @@
 use anyhow::Result;
 use ozzy_core::cache::TieredCache;
 use ozzy_core::project::{Endpoint, SourceType};
-use ozzy_core::{canon, commit, hash, platform, runtime, Project};
+use ozzy_core::{Project, canon, commit, hash, platform, runtime};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+
+fn parse_param_value(value: &str) -> serde_json::Value {
+    serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
+}
+
+fn build_param_overrides(
+    cli_params: &[(String, String)],
+) -> (
+    serde_json::Map<String, serde_json::Value>,
+    HashMap<String, serde_json::Map<String, serde_json::Value>>,
+) {
+    let mut global = serde_json::Map::new();
+    let mut scoped: HashMap<String, serde_json::Map<String, serde_json::Value>> = HashMap::new();
+
+    for (key, raw_value) in cli_params {
+        let value = parse_param_value(raw_value);
+        if let Some((scope, param_name)) = key.split_once('.') {
+            scoped
+                .entry(scope.to_string())
+                .or_default()
+                .insert(param_name.to_string(), value);
+        } else {
+            global.insert(key.clone(), value);
+        }
+    }
+
+    (global, scoped)
+}
 
 pub async fn execute(
     endpoint_name: &str,
@@ -20,18 +48,7 @@ pub async fn execute(
     let transforms = commit::collect_transforms(&project)?;
 
     // Build params from CLI
-    let params_override: serde_json::Value = if cli_params.is_empty() {
-        serde_json::json!({})
-    } else {
-        let mut map = serde_json::Map::new();
-        for (key, value) in cli_params {
-            // Try to parse as JSON value, fall back to string
-            let json_value = serde_json::from_str(value)
-                .unwrap_or_else(|_| serde_json::Value::String(value.clone()));
-            map.insert(key.clone(), json_value);
-        }
-        serde_json::Value::Object(map)
-    };
+    let (global_param_overrides, scoped_param_overrides) = build_param_overrides(cli_params);
 
     // Get platform fingerprint
     let platform = platform::PlatformFingerprint::detect();
@@ -51,7 +68,10 @@ pub async fn execute(
 
     println!("Execution plan:");
     for node_name in &execution_order {
-        let node = endpoint.nodes.iter().find(|n| n.node_name == *node_name)
+        let node = endpoint
+            .nodes
+            .iter()
+            .find(|n| n.node_name == *node_name)
             .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in endpoint", node_name))?;
         println!("  {} (transform: {})", node_name, node.transform_name);
     }
@@ -67,16 +87,23 @@ pub async fn execute(
     // Execute each node
     let mut node_outputs: HashMap<String, PathBuf> = HashMap::new();
     // Track nodes whose output is non-reproducible (directly or inherited from upstream)
-    let mut non_reproducible_nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut non_reproducible_nodes: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     for node_name in &execution_order {
-        let node = endpoint.nodes.iter().find(|n| n.node_name == *node_name)
+        let node = endpoint
+            .nodes
+            .iter()
+            .find(|n| n.node_name == *node_name)
             .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in endpoint", node_name))?;
-        let transform = transforms.get(&node.transform_name)
+        let transform = transforms
+            .get(&node.transform_name)
             .ok_or_else(|| anyhow::anyhow!("Transform '{}' not found", node.transform_name))?;
 
         // Find ALL input edges for this node (multi-input support)
-        let input_edges: Vec<_> = endpoint.edges.iter()
+        let input_edges: Vec<_> = endpoint
+            .edges
+            .iter()
             .filter(|e| e.target_node == *node_name)
             .collect();
 
@@ -89,15 +116,15 @@ pub async fn execute(
         for edge in &input_edges {
             let input_path = match edge.source_type {
                 SourceType::DataSource => {
-                    let ds = data_sources.get(&edge.source_ref)
-                        .ok_or_else(|| anyhow::anyhow!("Data source '{}' not found", edge.source_ref))?;
+                    let ds = data_sources.get(&edge.source_ref).ok_or_else(|| {
+                        anyhow::anyhow!("Data source '{}' not found", edge.source_ref)
+                    })?;
                     project.root.join(&ds.path)
                 }
-                SourceType::Node => {
-                    node_outputs.get(&edge.source_ref)
-                        .ok_or_else(|| anyhow::anyhow!("Node output '{}' not found", edge.source_ref))?
-                        .clone()
-                }
+                SourceType::Node => node_outputs
+                    .get(&edge.source_ref)
+                    .ok_or_else(|| anyhow::anyhow!("Node output '{}' not found", edge.source_ref))?
+                    .clone(),
                 SourceType::External => {
                     anyhow::bail!("External dependencies not yet supported in local execution");
                 }
@@ -113,11 +140,24 @@ pub async fn execute(
         }
 
         // Merge node params with CLI params (CLI takes precedence)
-        let effective_params = if params_override.as_object().map(|m| !m.is_empty()).unwrap_or(false) {
+        let has_global = !global_param_overrides.is_empty();
+        let has_scoped = scoped_param_overrides.contains_key(&node.transform_name)
+            || scoped_param_overrides.contains_key(&node.node_name);
+        let effective_params = if has_global || has_scoped {
             let mut merged = node.params.clone();
-            if let (Some(base), Some(overrides)) = (merged.as_object_mut(), params_override.as_object()) {
-                for (k, v) in overrides {
+            if let Some(base) = merged.as_object_mut() {
+                for (k, v) in &global_param_overrides {
                     base.insert(k.clone(), v.clone());
+                }
+                if let Some(overrides) = scoped_param_overrides.get(&node.transform_name) {
+                    for (k, v) in overrides {
+                        base.insert(k.clone(), v.clone());
+                    }
+                }
+                if let Some(overrides) = scoped_param_overrides.get(&node.node_name) {
+                    for (k, v) in overrides {
+                        base.insert(k.clone(), v.clone());
+                    }
                 }
             }
             merged
@@ -135,7 +175,8 @@ pub async fn execute(
         );
 
         // Use the proper multi-input hash function with \0-separated format
-        let input_refs: Vec<(&str, &str)> = input_hash_pairs.iter()
+        let input_refs: Vec<(&str, &str)> = input_hash_pairs
+            .iter()
             .map(|(n, h)| (n.as_str(), h.as_str()))
             .collect();
         let materialized_hash = hash::materialized_hash_multi_input(
@@ -154,7 +195,9 @@ pub async fn execute(
         println!("  Materialized hash: {}...", &materialized_hash[..12]);
 
         // Check if this node inherits non-reproducibility from an upstream node
-        let has_non_reproducible_upstream = endpoint.edges.iter()
+        let has_non_reproducible_upstream = endpoint
+            .edges
+            .iter()
             .filter(|e| e.target_node == *node_name && e.source_type == SourceType::Node)
             .any(|e| non_reproducible_nodes.contains(&e.source_ref));
 
@@ -170,7 +213,16 @@ pub async fn execute(
             execute_node_no_cache(&project, transform, &input_paths, &effective_params).await?
         } else if force {
             println!("  Cache: SKIP (forced)");
-            execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &tiered_cache, &platform).await?
+            execute_node_multi(
+                &project,
+                transform,
+                &input_paths,
+                &effective_params,
+                &materialized_hash,
+                &tiered_cache,
+                &platform,
+            )
+            .await?
         } else if let Some(cached_path) = tiered_cache.get_path(&materialized_hash).await? {
             if cached_path.exists() {
                 if tiered_cache.contains_local(&materialized_hash)? {
@@ -180,10 +232,28 @@ pub async fn execute(
                 }
                 cached_path
             } else {
-                execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &tiered_cache, &platform).await?
+                execute_node_multi(
+                    &project,
+                    transform,
+                    &input_paths,
+                    &effective_params,
+                    &materialized_hash,
+                    &tiered_cache,
+                    &platform,
+                )
+                .await?
             }
         } else {
-            execute_node_multi(&project, transform, &input_paths, &effective_params, &materialized_hash, &tiered_cache, &platform).await?
+            execute_node_multi(
+                &project,
+                transform,
+                &input_paths,
+                &effective_params,
+                &materialized_hash,
+                &tiered_cache,
+                &platform,
+            )
+            .await?
         };
 
         // Propagate non-reproducibility to downstream nodes
@@ -195,9 +265,11 @@ pub async fn execute(
     }
 
     // Get final output
-    let final_node = execution_order.last()
+    let final_node = execution_order
+        .last()
         .ok_or_else(|| anyhow::anyhow!("Empty execution plan - endpoint has no nodes"))?;
-    let final_output = node_outputs.get(final_node)
+    let final_output = node_outputs
+        .get(final_node)
         .ok_or_else(|| anyhow::anyhow!("Final node '{}' output not found", final_node))?;
 
     // Copy to output location if specified
@@ -215,7 +287,10 @@ pub async fn execute(
 
 fn find_endpoint(project: &Project, name: &str) -> Result<Endpoint> {
     // Check staged endpoints first
-    let staged_path = project.ozzy_dir().join("staged_endpoints").join(format!("{}.json", name));
+    let staged_path = project
+        .ozzy_dir()
+        .join("staged_endpoints")
+        .join(format!("{}.json", name));
     if staged_path.exists() {
         let content = fs::read_to_string(&staged_path)?;
         let endpoint: Endpoint = serde_json::from_str(&content)?;
@@ -306,8 +381,11 @@ fn validate_output_schema(
     };
 
     let actual_schema = ozzy_core::schema::extract_parquet_schema(output_path)?;
-    let actual_columns: std::collections::HashSet<String> =
-        actual_schema.fields.iter().map(|f| f.name.clone()).collect();
+    let actual_columns: std::collections::HashSet<String> = actual_schema
+        .fields
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
 
     // Check "adds" - columns that should be present in output
     if let Some(adds) = output_schema.get("adds").and_then(|v| v.as_array()) {
@@ -316,7 +394,8 @@ fn validate_output_schema(
                 if !actual_columns.contains(col_name) {
                     anyhow::bail!(
                         "Output schema violation: transform '{}' declares output column '{}' but it was not found in output",
-                        transform.name, col_name
+                        transform.name,
+                        col_name
                     );
                 }
             }
@@ -330,7 +409,8 @@ fn validate_output_schema(
                 if !actual_columns.contains(name) {
                     anyhow::bail!(
                         "Output schema violation: transform '{}' declares output field '{}' but it was not found in output",
-                        transform.name, name
+                        transform.name,
+                        name
                     );
                 }
             }
@@ -402,11 +482,13 @@ async fn execute_node_no_cache(
     // Create temp output file that persists (not in tempdir that auto-deletes)
     let cache_dir = ozzy_core::cache::default_cache_dir();
     std::fs::create_dir_all(&cache_dir)?;
-    let temp_output = cache_dir.join(format!("nocache_{}.parquet",
+    let temp_output = cache_dir.join(format!(
+        "nocache_{}.parquet",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos()));
+            .as_nanos()
+    ));
 
     runtime::execute_transform_multi(
         &transform_path,

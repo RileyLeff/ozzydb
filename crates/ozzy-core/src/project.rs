@@ -96,6 +96,10 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub refs: RefsConfig,
 
+    /// Named remote registries.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub remotes: BTreeMap<String, String>,
+
     #[serde(default)]
     pub workspace: WorkspaceConfig,
 
@@ -186,9 +190,9 @@ pub struct DataSource {
 pub struct Transform {
     pub name: String,
     pub hash: String,
-    pub runtime: String,         // e.g., "python-3.11"
-    pub source_path: String,     // Relative path in project
-    pub function_name: String,   // Function to call
+    pub runtime: String,       // e.g., "python-3.11"
+    pub source_path: String,   // Relative path in project
+    pub function_name: String, // Function to call
     pub lockfile_hash: String,
     pub params_schema: serde_json::Value,
 
@@ -343,6 +347,7 @@ impl Project {
                 head: default_head(),
                 remote: None,
             },
+            remotes: BTreeMap::new(),
             workspace: WorkspaceConfig::default(),
             cache: CacheConfig::default(),
         };
@@ -416,7 +421,11 @@ impl Project {
         // Handle @latest → default branch
         if ref_name == "@latest" {
             let default_branch = &self.config.refs.head;
-            let ref_path = self.refs_dir().join(default_branch.strip_prefix("refs/").unwrap_or(default_branch));
+            let ref_path = self.refs_dir().join(
+                default_branch
+                    .strip_prefix("refs/")
+                    .unwrap_or(default_branch),
+            );
             if ref_path.exists() {
                 let hash = fs::read_to_string(&ref_path)?.trim().to_string();
                 return Ok(Some(hash));
@@ -444,7 +453,9 @@ impl Project {
         }
 
         // Standard ref path lookup
-        let ref_path = self.refs_dir().join(ref_name.strip_prefix("refs/").unwrap_or(ref_name));
+        let ref_path = self
+            .refs_dir()
+            .join(ref_name.strip_prefix("refs/").unwrap_or(ref_name));
         if ref_path.exists() {
             let hash = fs::read_to_string(&ref_path)?.trim().to_string();
             Ok(Some(hash))
@@ -455,7 +466,9 @@ impl Project {
 
     /// Update a ref to point to a commit.
     pub fn update_ref(&self, ref_name: &str, commit_hash: &str) -> Result<()> {
-        let ref_path = self.refs_dir().join(ref_name.strip_prefix("refs/").unwrap_or(ref_name));
+        let ref_path = self
+            .refs_dir()
+            .join(ref_name.strip_prefix("refs/").unwrap_or(ref_name));
         if let Some(parent) = ref_path.parent() {
             fs::create_dir_all(parent)?;
         }

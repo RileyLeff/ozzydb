@@ -1,8 +1,8 @@
 //! Push command for uploading commits to a remote registry.
 
 use anyhow::{Context, Result};
-use ozzy_core::registry::{CredentialsFile, RegistryClient};
 use ozzy_core::Project;
+use ozzy_core::registry::{CredentialsFile, RegistryClient};
 use std::collections::HashMap;
 
 use super::remote::get_remote_url;
@@ -23,11 +23,11 @@ fn load_credentials() -> Result<CredentialsFile> {
 }
 
 /// Push current commit to a remote registry.
-pub async fn run(message: Option<&str>, remote: Option<&str>) -> Result<()> {
+pub async fn run(message: Option<&str>, remote: &str) -> Result<()> {
     let project = Project::find_current()?;
 
     // Get remote URL
-    let (remote_name, remote_url) = get_remote_url(&project, remote)?;
+    let (remote_name, remote_url) = get_remote_url(&project, Some(remote))?;
 
     println!("Pushing to {} ({})...", remote_name, remote_url);
 
@@ -78,7 +78,7 @@ pub async fn run(message: Option<&str>, remote: Option<&str>) -> Result<()> {
                 let lockfile_path = project.root.join(parent).join("uv.lock");
                 if lockfile_path.exists() {
                     let content = std::fs::read(&lockfile_path)?;
-                    lockfiles.insert(format!("{}.lock", name), content);
+                    lockfiles.insert(format!("{}.lock", t.lockfile_hash), content);
                 }
             }
         }
@@ -111,7 +111,9 @@ pub async fn run(message: Option<&str>, remote: Option<&str>) -> Result<()> {
         .into_iter()
         .filter(|(name, _)| {
             let base_name = name.strip_suffix(".py").unwrap_or(name);
-            check_response.missing_transforms.contains(&base_name.to_string())
+            check_response
+                .missing_transforms
+                .contains(&base_name.to_string())
         })
         .collect();
 
@@ -123,6 +125,24 @@ pub async fn run(message: Option<&str>, remote: Option<&str>) -> Result<()> {
 
     // Build commit JSON
     let mut commit_json = serde_json::to_value(&commit)?;
+    commit_json["ref"] = serde_json::Value::String(project.config.refs.head.clone());
+
+    let mut tag_map = serde_json::Map::new();
+    let tags_dir = project.ozzy_dir().join("refs").join("tags");
+    if tags_dir.exists() {
+        for entry in std::fs::read_dir(&tags_dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                let tag_name = entry.file_name().to_string_lossy().to_string();
+                let commit_hash = std::fs::read_to_string(entry.path())?.trim().to_string();
+                if !tag_name.is_empty() && !commit_hash.is_empty() {
+                    tag_map.insert(tag_name, serde_json::Value::String(commit_hash));
+                }
+            }
+        }
+    }
+    commit_json["tags"] = serde_json::Value::Object(tag_map);
+
     if let Some(msg) = message {
         commit_json["message"] = serde_json::Value::String(msg.to_string());
     }
@@ -140,7 +160,11 @@ pub async fn run(message: Option<&str>, remote: Option<&str>) -> Result<()> {
         .await?;
 
     println!();
-    println!("Pushed commit {} to {}", &push_response.commit_hash[..8], push_response.ref_name);
+    println!(
+        "Pushed commit {} to {}",
+        &push_response.commit_hash[..8],
+        push_response.ref_name
+    );
     println!(
         "  {} new data files, {} new transforms",
         push_response.new_data_count, push_response.new_transform_count

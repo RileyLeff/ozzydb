@@ -38,7 +38,9 @@ df.write_parquet("{}")
     );
 
     std::process::Command::new("uv")
-        .args(["run", "--with", "polars", "--with", "pyarrow", "python", "-c", &script])
+        .args([
+            "run", "--with", "polars", "--with", "pyarrow", "python", "-c", &script,
+        ])
         .output()
         .expect("Failed to create test parquet file");
 }
@@ -135,7 +137,13 @@ fn test_data_operations() {
     // Add data source
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Added data source: raw"));
@@ -210,7 +218,13 @@ fn test_full_pipeline() {
 
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
         .assert()
         .success();
 
@@ -228,7 +242,15 @@ fn test_full_pipeline() {
     // Create endpoint
     ozzy()
         .current_dir(dir.path())
-        .args(["endpoint", "create", "filtered", "--input", "raw", "--transforms", "filter_by_value"])
+        .args([
+            "endpoint",
+            "create",
+            "filtered",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Created endpoint: filtered"));
@@ -280,7 +302,13 @@ fn test_commit_and_log() {
 
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
         .assert()
         .success();
 
@@ -306,7 +334,9 @@ fn test_commit_and_log() {
         .args(["status"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("clean").or(predicate::str::contains("Nothing to commit")));
+        .stdout(
+            predicate::str::contains("clean").or(predicate::str::contains("Nothing to commit")),
+        );
 }
 
 #[test]
@@ -350,7 +380,15 @@ fn test_endpoint_missing_data_source() {
     // Try to create endpoint with non-existent data source
     ozzy()
         .current_dir(dir.path())
-        .args(["endpoint", "create", "test", "--input", "nonexistent", "--transforms", "qc"])
+        .args([
+            "endpoint",
+            "create",
+            "test",
+            "--input",
+            "nonexistent",
+            "--transforms",
+            "qc",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("not found"));
@@ -373,14 +411,28 @@ fn test_endpoint_missing_transform() {
 
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
         .assert()
         .success();
 
     // Try to create endpoint with non-existent transform
     ozzy()
         .current_dir(dir.path())
-        .args(["endpoint", "create", "test", "--input", "raw", "--transforms", "nonexistent"])
+        .args([
+            "endpoint",
+            "create",
+            "test",
+            "--input",
+            "raw",
+            "--transforms",
+            "nonexistent",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("not found"));
@@ -404,7 +456,13 @@ fn test_caching_works() {
 
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
         .assert()
         .success();
 
@@ -422,7 +480,15 @@ fn test_caching_works() {
     // Create endpoint
     ozzy()
         .current_dir(dir.path())
-        .args(["endpoint", "create", "filtered", "--input", "raw", "--transforms", "filter_by_value"])
+        .args([
+            "endpoint",
+            "create",
+            "filtered",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
         .assert()
         .success();
 
@@ -472,7 +538,9 @@ df.write_parquet("{}")
     );
 
     std::process::Command::new("uv")
-        .args(["run", "--with", "polars", "--with", "pyarrow", "python", "-c", &script])
+        .args([
+            "run", "--with", "polars", "--with", "pyarrow", "python", "-c", &script,
+        ])
         .output()
         .expect("Failed to create metadata parquet file");
 }
@@ -526,7 +594,13 @@ fn test_multi_input_endpoint() {
     create_test_parquet(&main_path);
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", main_path.to_str().unwrap(), "--name", "main_data"])
+        .args([
+            "data",
+            "add",
+            main_path.to_str().unwrap(),
+            "--name",
+            "main_data",
+        ])
         .assert()
         .success();
 
@@ -535,7 +609,13 @@ fn test_multi_input_endpoint() {
     create_metadata_parquet(&meta_path);
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", meta_path.to_str().unwrap(), "--name", "metadata"])
+        .args([
+            "data",
+            "add",
+            meta_path.to_str().unwrap(),
+            "--name",
+            "metadata",
+        ])
         .assert()
         .success();
 
@@ -553,10 +633,15 @@ fn test_multi_input_endpoint() {
     ozzy()
         .current_dir(dir.path())
         .args([
-            "endpoint", "create", "merged",
-            "--input", "main:main_data",
-            "--input", "meta:metadata",
-            "--transforms", "merge_with_weights"
+            "endpoint",
+            "create",
+            "merged",
+            "--input",
+            "main:main_data",
+            "--input",
+            "meta:metadata",
+            "--transforms",
+            "merge_with_weights",
         ])
         .assert()
         .success()
@@ -601,7 +686,13 @@ fn test_cli_params() {
     create_test_parquet(&parquet_path);
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
         .assert()
         .success();
 
@@ -618,7 +709,15 @@ fn test_cli_params() {
     // Create endpoint
     ozzy()
         .current_dir(dir.path())
-        .args(["endpoint", "create", "filtered", "--input", "raw", "--transforms", "filter_by_value"])
+        .args([
+            "endpoint",
+            "create",
+            "filtered",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
         .assert()
         .success();
 
@@ -658,7 +757,13 @@ fn test_transform_with_schema_hints() {
     create_test_parquet(&parquet_path);
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
         .assert()
         .success();
 
@@ -708,8 +813,361 @@ def scale_values(inputs, params):
     // Create endpoint - schema validation should pass since required columns exist
     ozzy()
         .current_dir(dir.path())
-        .args(["endpoint", "create", "scaled", "--input", "raw", "--transforms", "scale_values"])
+        .args([
+            "endpoint",
+            "create",
+            "scaled",
+            "--input",
+            "raw",
+            "--transforms",
+            "scale_values",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Created endpoint: scaled"));
+}
+
+fn create_sap_flux_parquet(path: &Path) {
+    let script = format!(
+        r#"
+import polars as pl
+
+df = pl.DataFrame({{
+    "timestamp": ["2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z", "2026-01-01T00:02:00Z", "2026-01-01T00:03:00Z"],
+    "sensor_id": ["A", "A", "B", "B"],
+    "raw_mv": [10.0, 11.5, 8.0, 12.2],
+    "temp_c": [20.0, 20.5, 21.0, 22.0],
+}})
+
+df.write_parquet("{}")
+"#,
+        path.display()
+    );
+
+    std::process::Command::new("uv")
+        .args([
+            "run", "--with", "polars", "--with", "pyarrow", "python", "-c", &script,
+        ])
+        .output()
+        .expect("Failed to create sap flux parquet file");
+}
+
+fn create_sap_flux_transforms(path: &Path) {
+    let content = r#"
+import polars as pl
+
+class ozzy:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
+@ozzy.transform(params={"min_raw_mv": float})
+def qc(inputs, params):
+    df = inputs["main"]
+    min_raw_mv = getattr(params, "min_raw_mv", 9.0)
+    return (
+        df.filter(pl.col("raw_mv") >= min_raw_mv)
+          .with_columns(pl.col("raw_mv").alias("signal_mv_qc"))
+    )
+
+@ozzy.transform(params={"gain": float, "offset": float})
+def calibrate(inputs, params):
+    df = inputs["main"]
+    gain = getattr(params, "gain", 1.05)
+    offset = getattr(params, "offset", 0.1)
+    return df.with_columns(
+        (pl.col("signal_mv_qc") * gain + offset).alias("signal_mv_cal")
+    )
+
+@ozzy.transform(params={"ambient_offset": float})
+def corrected_signal(inputs, params):
+    df = inputs["main"]
+    ambient_offset = getattr(params, "ambient_offset", 0.2)
+    return df.with_columns(
+        (pl.col("signal_mv_cal") - ambient_offset).alias("corrected")
+    )
+"#;
+
+    fs::write(path, content).expect("Failed to write sap flux transforms");
+}
+
+fn parquet_row_count(path: &Path) -> usize {
+    let script = format!(
+        r#"
+import polars as pl
+print(pl.read_parquet(r'''{}''').height)
+"#,
+        path.display()
+    );
+
+    let output = std::process::Command::new("uv")
+        .args([
+            "run", "--with", "polars", "--with", "pyarrow", "python", "-c", &script,
+        ])
+        .output()
+        .expect("Failed to read parquet row count");
+    assert!(output.status.success(), "Failed to read parquet row count");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<usize>()
+        .expect("Invalid row count output")
+}
+
+#[test]
+fn test_remotes_persist_after_workspace_save() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "test-project", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["remote", "add", "origin", "https://registry.example.com"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["remote", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "origin -> https://registry.example.com",
+        ));
+}
+
+#[test]
+fn test_dag_svg_output() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "test-project", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
+        .assert()
+        .success();
+
+    let transform_path = dir.path().join("transforms/qc.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    create_test_transform(&transform_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/qc.py"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "endpoint",
+            "create",
+            "filtered",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["dag", "--format", "svg"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<svg"))
+        .stdout(predicate::str::contains("Endpoint: filtered"));
+}
+
+#[test]
+fn test_scoped_cli_params_apply_to_transform() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "test-project", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
+        .assert()
+        .success();
+
+    let transform_path = dir.path().join("transforms/qc.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    create_test_transform(&transform_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/qc.py"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "endpoint",
+            "create",
+            "filtered",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
+        .assert()
+        .success();
+
+    let output_default = dir.path().join("default.parquet");
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "run",
+            "filtered",
+            "--output",
+            output_default.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output_scoped = dir.path().join("scoped.parquet");
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "run",
+            "filtered",
+            "--param",
+            "filter_by_value.threshold=15.0",
+            "--output",
+            output_scoped.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(parquet_row_count(&output_default), 4);
+    assert_eq!(parquet_row_count(&output_scoped), 2);
+}
+
+#[test]
+fn test_sap_flux_end_to_end_pipeline() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "sapflux", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("sap_flux_raw.parquet");
+    create_sap_flux_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
+        .assert()
+        .success();
+
+    let transform_path = dir.path().join("transforms/sap_flux.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    create_sap_flux_transforms(&transform_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/sap_flux.py"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("qc"))
+        .stdout(predicate::str::contains("calibrate"))
+        .stdout(predicate::str::contains("corrected_signal"));
+
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "endpoint",
+            "create",
+            "corrected",
+            "--input",
+            "raw",
+            "--transforms",
+            "qc,calibrate,corrected_signal",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created endpoint: corrected"));
+
+    let output_path = dir.path().join("corrected.parquet");
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "run",
+            "corrected",
+            "--param",
+            "qc.min_raw_mv=9.5",
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(
+        output_path.exists(),
+        "Corrected output parquet should exist"
+    );
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["commit", "-m", "sap flux e2e fixture"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["log"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sap flux e2e fixture"));
 }

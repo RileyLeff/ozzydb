@@ -7,7 +7,7 @@ use ozzy_core::registry::{CredentialsFile, RegistryClient};
 use ozzy_core::{canon, commit, hash, platform, runtime};
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 /// Load credentials from config.
 fn load_credentials() -> Result<CredentialsFile> {
@@ -74,12 +74,82 @@ fn default_registry() -> String {
     std::env::var("OZZY_REGISTRY").unwrap_or_else(|_| "https://registry.ozzydb.dev".to_string())
 }
 
+fn parse_param_value(value: &str) -> serde_json::Value {
+    serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
+}
+
+fn build_param_overrides(
+    cli_params: &[(String, String)],
+) -> (
+    serde_json::Map<String, serde_json::Value>,
+    HashMap<String, serde_json::Map<String, serde_json::Value>>,
+) {
+    let mut global = serde_json::Map::new();
+    let mut scoped: HashMap<String, serde_json::Map<String, serde_json::Value>> = HashMap::new();
+
+    for (key, raw_value) in cli_params {
+        let value = parse_param_value(raw_value);
+        if let Some((scope, param_name)) = key.split_once('.') {
+            scoped
+                .entry(scope.to_string())
+                .or_default()
+                .insert(param_name.to_string(), value);
+        } else {
+            global.insert(key.clone(), value);
+        }
+    }
+
+    (global, scoped)
+}
+
+fn sanitize_archive_relative_path(path: &Path) -> Result<PathBuf> {
+    let mut sanitized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => sanitized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("Refusing unsafe archive path: {}", path.display());
+            }
+        }
+    }
+
+    if sanitized.as_os_str().is_empty() {
+        anyhow::bail!("Refusing empty archive path");
+    }
+
+    Ok(sanitized)
+}
+
+fn checked_destination(base: &Path, canonical_base: &Path, rel: &Path) -> Result<PathBuf> {
+    let dest = base.join(rel);
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+        let canonical_parent = parent.canonicalize()?;
+        if !canonical_parent.starts_with(canonical_base) {
+            anyhow::bail!(
+                "Archive extraction escaped destination root: {}",
+                rel.display()
+            );
+        }
+    }
+
+    if dest.exists() {
+        let canonical_dest = dest.canonicalize()?;
+        if !canonical_dest.starts_with(canonical_base) {
+            anyhow::bail!(
+                "Archive extraction escaped destination root: {}",
+                rel.display()
+            );
+        }
+    }
+
+    Ok(dest)
+}
+
 /// Set up a temp directory as a minimal ozzy project for execution.
-fn setup_temp_project(
-    temp_path: &std::path::Path,
-    project_name: &str,
-    owner: &str,
-) -> Result<()> {
+fn setup_temp_project(temp_path: &std::path::Path, project_name: &str, owner: &str) -> Result<()> {
     let ozzy_dir = temp_path.join(".ozzy");
     std::fs::create_dir_all(ozzy_dir.join("commits"))?;
     std::fs::create_dir_all(ozzy_dir.join("refs").join("heads"))?;
@@ -102,8 +172,7 @@ fn setup_temp_project(
 fn build_execution_order(endpoint: &Endpoint) -> Vec<String> {
     use std::collections::{HashSet, VecDeque};
 
-    let node_names: HashSet<String> =
-        endpoint.nodes.iter().map(|n| n.node_name.clone()).collect();
+    let node_names: HashSet<String> = endpoint.nodes.iter().map(|n| n.node_name.clone()).collect();
     let mut dependencies: HashMap<String, HashSet<String>> = HashMap::new();
     for node in &endpoint.nodes {
         dependencies.insert(node.node_name.clone(), HashSet::new());
@@ -156,10 +225,13 @@ pub async fn run(
     endpoint_ref: &str,
     output: Option<&str>,
     params: &[(String, String)],
+    registry_override: Option<&str>,
 ) -> Result<()> {
     // Parse the endpoint reference
     let (registry_opt, owner, project, endpoint, ref_name) = parse_endpoint_ref(endpoint_ref)?;
-    let registry = registry_opt.unwrap_or_else(default_registry);
+    let registry = registry_opt
+        .or_else(|| registry_override.map(|s| s.to_string()))
+        .unwrap_or_else(default_registry);
 
     println!(
         "Fetching {}/{}/{}@{} from {}...",
@@ -192,9 +264,7 @@ pub async fn run(
     println!("  Transforms: {}", manifest.transform_hashes.len());
 
     // Download the endpoint content
-    let tar_data = client
-        .fetch(&owner, &project, &endpoint, &ref_name)
-        .await?;
+    let tar_data = client.fetch(&owner, &project, &endpoint, &ref_name).await?;
 
     // Create a temporary directory and set up as minimal ozzy project
     let temp_dir = tempfile::tempdir()?;
@@ -205,14 +275,12 @@ pub async fn run(
     let cursor = std::io::Cursor::new(tar_data);
     let mut archive = tar::Archive::new(cursor);
 
+    let canonical_temp_path = temp_path.canonicalize()?;
     for entry in archive.entries()? {
         let mut entry = entry?;
-        let path = entry.path()?.to_path_buf();
-        let dest_path = temp_path.join(&path);
-
-        if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let raw_path = entry.path()?.to_path_buf();
+        let path = sanitize_archive_relative_path(&raw_path)?;
+        let dest_path = checked_destination(temp_path, &canonical_temp_path, &path)?;
 
         let mut content = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut content)?;
@@ -236,17 +304,7 @@ pub async fn run(
     println!("Executing endpoint locally...");
 
     // Build params from CLI
-    let params_override: serde_json::Value = if params.is_empty() {
-        serde_json::json!({})
-    } else {
-        let mut map = serde_json::Map::new();
-        for (key, value) in params {
-            let json_value = serde_json::from_str(value)
-                .unwrap_or_else(|_| serde_json::Value::String(value.clone()));
-            map.insert(key.clone(), json_value);
-        }
-        serde_json::Value::Object(map)
-    };
+    let (global_param_overrides, scoped_param_overrides) = build_param_overrides(params);
 
     // Platform fingerprint and cache
     let plat = platform::PlatformFingerprint::detect();
@@ -270,7 +328,8 @@ pub async fn run(
 
     // Execute each node
     let mut node_outputs: HashMap<String, PathBuf> = HashMap::new();
-    let mut non_reproducible_nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut non_reproducible_nodes: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     for node_name in &execution_order {
         let node = endpoint_def
@@ -329,20 +388,30 @@ pub async fn run(
             input_hash_pairs.push((input_name.clone(), h));
         }
 
-        let effective_params =
-            if params_override.as_object().map(|m| !m.is_empty()).unwrap_or(false) {
-                let mut merged = node.params.clone();
-                if let (Some(base), Some(overrides)) =
-                    (merged.as_object_mut(), params_override.as_object())
-                {
+        let has_global = !global_param_overrides.is_empty();
+        let has_scoped = scoped_param_overrides.contains_key(&node.transform_name)
+            || scoped_param_overrides.contains_key(&node.node_name);
+        let effective_params = if has_global || has_scoped {
+            let mut merged = node.params.clone();
+            if let Some(base) = merged.as_object_mut() {
+                for (k, v) in &global_param_overrides {
+                    base.insert(k.clone(), v.clone());
+                }
+                if let Some(overrides) = scoped_param_overrides.get(&node.transform_name) {
                     for (k, v) in overrides {
                         base.insert(k.clone(), v.clone());
                     }
                 }
-                merged
-            } else {
-                node.params.clone()
-            };
+                if let Some(overrides) = scoped_param_overrides.get(&node.node_name) {
+                    for (k, v) in overrides {
+                        base.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            merged
+        } else {
+            node.params.clone()
+        };
 
         let params_hash = canon::hash_json(&effective_params);
         let params_schema_hash = canon::hash_json(&transform.params_schema);
@@ -354,7 +423,8 @@ pub async fn run(
         );
 
         // Use the proper multi-input hash function with \0-separated format
-        let input_refs: Vec<(&str, &str)> = input_hash_pairs.iter()
+        let input_refs: Vec<(&str, &str)> = input_hash_pairs
+            .iter()
             .map(|(n, h)| (n.as_str(), h.as_str()))
             .collect();
         let materialized_hash = hash::materialized_hash_multi_input(
@@ -368,7 +438,9 @@ pub async fn run(
         println!("  Materialized hash: {}...", &materialized_hash[..12]);
 
         // Check if this node inherits non-reproducibility from an upstream node
-        let has_non_reproducible_upstream = endpoint_def.edges.iter()
+        let has_non_reproducible_upstream = endpoint_def
+            .edges
+            .iter()
             .filter(|e| e.target_node == *node_name && e.source_type == SourceType::Node)
             .any(|e| non_reproducible_nodes.contains(&e.source_ref));
 
@@ -385,18 +457,6 @@ pub async fn run(
             if cached_path.exists() {
                 println!("  Cache: HIT");
                 cached_path
-                } else {
-                    execute_node(
-                        &temp_project,
-                        transform,
-                        &input_paths,
-                        &effective_params,
-                        &materialized_hash,
-                        &tiered_cache,
-                        &plat,
-                    )
-                    .await?
-                }
             } else {
                 execute_node(
                     &temp_project,
@@ -408,7 +468,19 @@ pub async fn run(
                     &plat,
                 )
                 .await?
-            };
+            }
+        } else {
+            execute_node(
+                &temp_project,
+                transform,
+                &input_paths,
+                &effective_params,
+                &materialized_hash,
+                &tiered_cache,
+                &plat,
+            )
+            .await?
+        };
 
         if effectively_non_reproducible {
             non_reproducible_nodes.insert(node_name.clone());
@@ -453,10 +525,21 @@ async fn execute_node(
     let temp_dir = tempfile::tempdir()?;
     let temp_output = temp_dir.path().join("output.parquet");
 
-    runtime::execute_transform_multi(&transform_path, &transform.function_name, input_paths, &temp_output, params)?;
+    runtime::execute_transform_multi(
+        &transform_path,
+        &transform.function_name,
+        input_paths,
+        &temp_output,
+        params,
+    )?;
 
     let cached_path = cache
-        .put(materialized_hash, &platform.short_string(), &temp_output, None)
+        .put(
+            materialized_hash,
+            &platform.short_string(),
+            &temp_output,
+            None,
+        )
         .await?;
 
     println!("  Cached at: {}", cached_path.display());
@@ -475,14 +558,40 @@ async fn execute_node_no_cache(
     let transform_path = project.root.join(&transform.source_path);
     let cache_dir = ozzy_core::cache::default_cache_dir();
     std::fs::create_dir_all(&cache_dir)?;
-    let temp_output = cache_dir.join(format!("nocache_{}.parquet",
+    let temp_output = cache_dir.join(format!(
+        "nocache_{}.parquet",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos()));
+            .as_nanos()
+    ));
 
-    runtime::execute_transform_multi(&transform_path, &transform.function_name, input_paths, &temp_output, params)?;
+    runtime::execute_transform_multi(
+        &transform_path,
+        &transform.function_name,
+        input_paths,
+        &temp_output,
+        params,
+    )?;
 
     println!("  Output: {}", temp_output.display());
     Ok(temp_output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_archive_relative_path;
+    use std::path::Path;
+
+    #[test]
+    fn sanitize_archive_path_rejects_traversal() {
+        assert!(sanitize_archive_relative_path(Path::new("../escape")).is_err());
+        assert!(sanitize_archive_relative_path(Path::new("/absolute/path")).is_err());
+    }
+
+    #[test]
+    fn sanitize_archive_path_allows_relative_paths() {
+        let path = sanitize_archive_relative_path(Path::new("transforms/qc.py")).unwrap();
+        assert_eq!(path.to_string_lossy(), "transforms/qc.py");
+    }
 }

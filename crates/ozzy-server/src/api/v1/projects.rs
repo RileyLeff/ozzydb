@@ -1,15 +1,20 @@
 //! Project management API endpoints.
 
 use axum::{
+    Json, Router,
     extract::{Path, Query, State},
     routing::{get, post},
-    Json, Router,
 };
-use ozzy_core::registry::protocol::{CreateProjectRequest, ListRefsResponse, ProjectInfo, RefInfo};
+use ozzy_core::registry::protocol::{
+    CommitInfo, CreateProjectRequest, ListRefsResponse, ProjectInfo, RefInfo,
+};
 use serde::Deserialize;
 
 use super::auth::ApiError;
-use crate::{auth::middleware::{AuthUser, MaybeAuthUser}, AppState};
+use crate::{
+    AppState,
+    auth::middleware::{AuthUser, MaybeAuthUser},
+};
 
 /// Pagination query parameters.
 #[derive(Debug, Deserialize)]
@@ -29,7 +34,33 @@ pub fn router() -> Router<AppState> {
         .route("/projects", get(list_projects))
         .route("/projects", post(create_project))
         .route("/{owner}/{project}", get(get_project))
+        .route("/{owner}/{project}/commits", get(list_commits))
         .route("/{owner}/{project}/refs", get(list_refs))
+}
+
+fn enforce_project_access(
+    project: &crate::db::Project,
+    user: &Option<crate::db::User>,
+) -> Result<(), ApiError> {
+    match project.visibility.as_str() {
+        "public" => Ok(()),
+        "org" => match user {
+            Some(u) if u.id == project.owner_user_id => Ok(()),
+            Some(_) => Err(ApiError::forbidden(
+                "Organization visibility is not yet supported for non-owners",
+            )),
+            None => Err(ApiError::unauthorized(
+                "Authentication required for org-visible projects",
+            )),
+        },
+        _ => match user {
+            Some(u) if u.id == project.owner_user_id => Ok(()),
+            Some(_) => Err(ApiError::forbidden("You don't have access to this project")),
+            None => Err(ApiError::unauthorized(
+                "Authentication required for private projects",
+            )),
+        },
+    }
 }
 
 /// List projects owned by the authenticated user.
@@ -38,7 +69,10 @@ async fn list_projects(
     State(state): State<AppState>,
     Query(pagination): Query<PaginationParams>,
 ) -> Result<Json<Vec<ProjectInfo>>, ApiError> {
-    let projects = state.db.list_user_projects_paginated(user.id, pagination.limit, pagination.offset).await?;
+    let projects = state
+        .db
+        .list_user_projects_paginated(user.id, pagination.limit, pagination.offset)
+        .await?;
 
     let infos: Vec<ProjectInfo> = projects
         .into_iter()
@@ -60,15 +94,23 @@ async fn list_projects(
 /// Validate a project slug format.
 fn validate_slug(slug: &str) -> Result<(), ApiError> {
     if slug.is_empty() || slug.len() > 100 {
-        return Err(ApiError::BadRequest("Project slug must be 1-100 characters".to_string()));
-    }
-    if !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
         return Err(ApiError::BadRequest(
-            "Project slug must contain only lowercase letters, digits, hyphens, and underscores".to_string(),
+            "Project slug must be 1-100 characters".to_string(),
+        ));
+    }
+    if !slug
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return Err(ApiError::BadRequest(
+            "Project slug must contain only lowercase letters, digits, hyphens, and underscores"
+                .to_string(),
         ));
     }
     if slug.starts_with('-') || slug.ends_with('-') {
-        return Err(ApiError::BadRequest("Project slug cannot start or end with a hyphen".to_string()));
+        return Err(ApiError::BadRequest(
+            "Project slug cannot start or end with a hyphen".to_string(),
+        ));
     }
     Ok(())
 }
@@ -79,16 +121,18 @@ async fn create_project(
     State(state): State<AppState>,
     Json(req): Json<CreateProjectRequest>,
 ) -> Result<Json<ProjectInfo>, ApiError> {
+    let visibility = req.visibility.as_deref().unwrap_or("private");
+    if !matches!(visibility, "private" | "public" | "org") {
+        return Err(ApiError::bad_request(
+            "visibility must be one of: private, public, org",
+        ));
+    }
+
     validate_slug(&req.slug)?;
 
     let project = state
         .db
-        .create_project(
-            user.id,
-            &req.slug,
-            req.description.as_deref(),
-            req.visibility.as_deref().unwrap_or("private"),
-        )
+        .create_project(user.id, &req.slug, req.description.as_deref(), visibility)
         .await?;
 
     Ok(Json(ProjectInfo {
@@ -115,14 +159,7 @@ async fn get_project(
         .await?
         .ok_or_else(|| ApiError::NotFound("Project not found".to_string()))?;
 
-    // Enforce access control based on visibility
-    if project.visibility != "public" {
-        match &user {
-            Some(u) if u.id == project.owner_user_id => { /* owner can always access */ }
-            Some(_) => return Err(ApiError::forbidden("You don't have access to this project")),
-            None => return Err(ApiError::unauthorized("Authentication required for private projects")),
-        }
-    }
+    enforce_project_access(&project, &user)?;
 
     Ok(Json(ProjectInfo {
         id: project.id,
@@ -134,6 +171,40 @@ async fn get_project(
         created_at: project.created_at,
         updated_at: project.updated_at,
     }))
+}
+
+/// List commit history for a project.
+async fn list_commits(
+    MaybeAuthUser(user): MaybeAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug)): Path<(String, String)>,
+    Query(pagination): Query<PaginationParams>,
+) -> Result<Json<Vec<CommitInfo>>, ApiError> {
+    let project = state
+        .db
+        .get_project(&owner, &project_slug)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("Project not found".to_string()))?;
+
+    enforce_project_access(&project, &user)?;
+
+    let commits = state
+        .db
+        .list_commits_paginated(project.id, pagination.limit, pagination.offset)
+        .await?;
+
+    let infos = commits
+        .into_iter()
+        .map(|c| CommitInfo {
+            hash: c.hash,
+            parent_hashes: c.parent_hashes,
+            author: c.author_name,
+            message: c.message,
+            created_at: c.created_at,
+        })
+        .collect();
+
+    Ok(Json(infos))
 }
 
 /// List refs (branches and tags) for a project.
@@ -148,14 +219,7 @@ async fn list_refs(
         .await?
         .ok_or_else(|| ApiError::NotFound("Project not found".to_string()))?;
 
-    // Enforce access control
-    if project.visibility != "public" {
-        match &user {
-            Some(u) if u.id == project.owner_user_id => { /* owner can always access */ }
-            Some(_) => return Err(ApiError::forbidden("You don't have access to this project")),
-            None => return Err(ApiError::unauthorized("Authentication required for private projects")),
-        }
-    }
+    enforce_project_access(&project, &user)?;
 
     let refs = state.db.list_refs(project.id).await?;
 

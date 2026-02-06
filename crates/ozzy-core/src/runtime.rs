@@ -34,23 +34,130 @@ pub const DETERMINISTIC_ENV: &[(&str, &str)] = &[
 fn extract_transform_info(transform_source: &Path) -> Result<(String, String)> {
     let transform_dir = transform_source
         .parent()
-        .ok_or_else(|| Error::RuntimeError(format!(
-            "Transform path has no parent directory: {}",
-            transform_source.display()
-        )))?
+        .ok_or_else(|| {
+            Error::RuntimeError(format!(
+                "Transform path has no parent directory: {}",
+                transform_source.display()
+            ))
+        })?
         .display()
         .to_string();
 
     let module_name = transform_source
         .file_stem()
-        .ok_or_else(|| Error::RuntimeError(format!(
-            "Transform path has no file stem: {}",
-            transform_source.display()
-        )))?
+        .ok_or_else(|| {
+            Error::RuntimeError(format!(
+                "Transform path has no file stem: {}",
+                transform_source.display()
+            ))
+        })?
         .to_string_lossy()
         .to_string();
 
     Ok((transform_dir, module_name))
+}
+
+fn lockfile_requirements(lockfile_path: &Path) -> Result<Vec<String>> {
+    let content = fs::read_to_string(lockfile_path)?;
+    let lockfile: toml::Value = toml::from_str(&content).map_err(|e| {
+        Error::PythonError(format!(
+            "Failed to parse uv.lock at {}: {}",
+            lockfile_path.display(),
+            e
+        ))
+    })?;
+
+    let mut requirements = std::collections::BTreeSet::new();
+    if let Some(packages) = lockfile.get("package").and_then(|v| v.as_array()) {
+        for package in packages {
+            let Some(pkg_table) = package.as_table() else {
+                continue;
+            };
+            let Some(name) = pkg_table.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(version) = pkg_table.get("version").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            requirements.insert(format!("{}=={}", name, version));
+        }
+    }
+
+    Ok(requirements.into_iter().collect())
+}
+
+fn normalized_python_version(raw: Option<&str>) -> String {
+    match raw {
+        Some(version) => {
+            let mut parts = version.split('.');
+            let major = parts.next().unwrap_or("3");
+            let minor = parts.next().unwrap_or("11");
+            format!("{}.{}", major, minor)
+        }
+        None => "3.11".to_string(),
+    }
+}
+
+fn ensure_env_from_lockfile(
+    uv_path: &Path,
+    lockfile_path: &Path,
+    envs_dir: &Path,
+    python_version: &str,
+) -> Result<PathBuf> {
+    let lockfile_hash = blake3_hash_file(lockfile_path)?;
+    let env_name = format!(
+        "py{}-{}",
+        python_version.replace('.', ""),
+        &lockfile_hash[..12]
+    );
+    let env_path = envs_dir.join(env_name);
+    let python_path = env_path.join("bin/python");
+
+    if python_path.exists() {
+        return Ok(env_path);
+    }
+
+    fs::create_dir_all(envs_dir)?;
+
+    let venv_output = Command::new(uv_path)
+        .args(["venv", "--python", python_version])
+        .arg(&env_path)
+        .output()
+        .map_err(|e| Error::PythonError(format!("Failed to run uv venv: {}", e)))?;
+    if !venv_output.status.success() {
+        return Err(Error::PythonError(format!(
+            "uv venv failed:\n{}",
+            String::from_utf8_lossy(&venv_output.stderr)
+        )));
+    }
+
+    let requirements = lockfile_requirements(lockfile_path)?;
+    if requirements.is_empty() {
+        return Ok(env_path);
+    }
+
+    let requirements_file = tempfile::NamedTempFile::new().map_err(|e| {
+        Error::PythonError(format!("Failed to create temp requirements file: {}", e))
+    })?;
+    fs::write(requirements_file.path(), requirements.join("\n")).map_err(|e| {
+        Error::PythonError(format!("Failed to write temp requirements file: {}", e))
+    })?;
+
+    let install_output = Command::new(uv_path)
+        .args(["pip", "install", "--python"])
+        .arg(&python_path)
+        .args(["-r"])
+        .arg(requirements_file.path())
+        .output()
+        .map_err(|e| Error::PythonError(format!("Failed to run uv pip install: {}", e)))?;
+    if !install_output.status.success() {
+        return Err(Error::PythonError(format!(
+            "uv pip install failed:\n{}",
+            String::from_utf8_lossy(&install_output.stderr)
+        )));
+    }
+
+    Ok(env_path)
 }
 
 /// Python runtime for executing transforms using uv.
@@ -90,7 +197,11 @@ impl PythonRuntime {
 
     /// Get the environment directory for a given lockfile hash and python version.
     pub fn env_path(&self, lockfile_hash: &str, python_version: &str) -> PathBuf {
-        let env_name = format!("py{}-{}", python_version.replace('.', ""), &lockfile_hash[..12]);
+        let env_name = format!(
+            "py{}-{}",
+            python_version.replace('.', ""),
+            &lockfile_hash[..12]
+        );
         self.envs_dir.join(env_name)
     }
 
@@ -101,11 +212,7 @@ impl PythonRuntime {
     }
 
     /// Create a virtual environment from a requirements file or uv.lock.
-    pub fn create_env(
-        &self,
-        requirements_path: &Path,
-        python_version: &str,
-    ) -> Result<PathBuf> {
+    pub fn create_env(&self, requirements_path: &Path, python_version: &str) -> Result<PathBuf> {
         let lockfile_hash = blake3_hash_file(requirements_path)?;
         let env_path = self.env_path(&lockfile_hash, python_version);
 
@@ -122,10 +229,7 @@ impl PythonRuntime {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::PythonError(format!(
-                "uv venv failed: {}",
-                stderr
-            )));
+            return Err(Error::PythonError(format!("uv venv failed: {}", stderr)));
         }
 
         // Install dependencies
@@ -446,7 +550,9 @@ result.write_parquet("{escaped_output_path}")
     }
 
     let output = Command::new(&uv_path)
-        .args(["run", "--with", "polars", "--with", "pyarrow", "python", "-c", &script])
+        .args([
+            "run", "--with", "polars", "--with", "pyarrow", "python", "-c", &script,
+        ])
         .envs(env_vars)
         .output()
         .map_err(|e| Error::PythonError(format!("Failed to execute uv run: {}", e)))?;
@@ -473,7 +579,13 @@ pub fn execute_transform_simple(
 ) -> Result<()> {
     // Try uv first, fall back to system python
     if which::which("uv").is_ok() {
-        return execute_transform_uv(transform_source, function_name, input_path, output_path, params);
+        return execute_transform_uv(
+            transform_source,
+            function_name,
+            input_path,
+            output_path,
+            params,
+        );
     }
 
     let python = which::which("python3")
@@ -628,11 +740,39 @@ result.write_parquet("{escaped_output_path}")
         env_vars.insert(key.to_string(), value.to_string());
     }
 
-    let output = Command::new(&uv_path)
-        .args(["run", "--with", "polars", "--with", "pyarrow", "python", "-c", &script])
-        .envs(env_vars)
-        .output()
-        .map_err(|e| Error::PythonError(format!("Failed to execute uv run: {}", e)))?;
+    let lockfile_path = transform_source
+        .parent()
+        .map(|p| p.join("uv.lock"))
+        .unwrap_or_else(|| PathBuf::from("uv.lock"));
+
+    let output = if lockfile_path.exists() {
+        let envs_dir = dirs::home_dir()
+            .map(|h| h.join(".ozzy/envs"))
+            .unwrap_or_else(|| PathBuf::from(".ozzy/envs"));
+        let python_version =
+            normalized_python_version(PlatformFingerprint::detect().python_version.as_deref());
+        let env_path =
+            ensure_env_from_lockfile(&uv_path, &lockfile_path, &envs_dir, &python_version)?;
+        let python_path = env_path.join("bin/python");
+        Command::new(&python_path)
+            .args(["-c", &script])
+            .envs(env_vars)
+            .output()
+            .map_err(|e| {
+                Error::PythonError(format!(
+                    "Failed to execute lockfile environment Python: {}",
+                    e
+                ))
+            })?
+    } else {
+        Command::new(&uv_path)
+            .args([
+                "run", "--with", "polars", "--with", "pyarrow", "python", "-c", &script,
+            ])
+            .envs(env_vars)
+            .output()
+            .map_err(|e| Error::PythonError(format!("Failed to execute uv run: {}", e)))?
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -652,8 +792,16 @@ mod tests {
 
     #[test]
     fn test_deterministic_env_vars() {
-        assert!(DETERMINISTIC_ENV.iter().any(|(k, _)| *k == "PYTHONHASHSEED"));
-        assert!(DETERMINISTIC_ENV.iter().any(|(k, _)| *k == "OMP_NUM_THREADS"));
+        assert!(
+            DETERMINISTIC_ENV
+                .iter()
+                .any(|(k, _)| *k == "PYTHONHASHSEED")
+        );
+        assert!(
+            DETERMINISTIC_ENV
+                .iter()
+                .any(|(k, _)| *k == "OMP_NUM_THREADS")
+        );
     }
 
     #[test]

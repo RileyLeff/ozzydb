@@ -1,7 +1,7 @@
 //! Remote registry management commands.
 
-use anyhow::{Context, Result};
-use ozzy_core::{validate_safe_name, Project};
+use anyhow::Result;
+use ozzy_core::{Project, validate_safe_name};
 
 /// Add a remote registry to the current project.
 pub async fn add(name: &str, url: &str) -> Result<()> {
@@ -17,31 +17,19 @@ pub async fn add(name: &str, url: &str) -> Result<()> {
         anyhow::bail!("Invalid remote URL: must include a host");
     }
 
-    let project = Project::find_current()?;
-
-    // Load current config
-    let config_path = project.root.join("ozzy.toml");
-    let content = std::fs::read_to_string(&config_path)?;
-    let mut config: toml::Value = toml::from_str(&content)?;
-
-    // Get or create remotes table
-    let remotes = config
-        .as_table_mut()
-        .context("Invalid TOML configuration")?
-        .entry("remotes")
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
-        .as_table_mut()
-        .context("Invalid remotes configuration")?;
-
-    if remotes.contains_key(name) {
-        anyhow::bail!("Remote '{}' already exists. Use 'ozzy remote rm {}' first.", name, name);
+    let mut project = Project::find_current()?;
+    if project.config.remotes.contains_key(name) {
+        anyhow::bail!(
+            "Remote '{}' already exists. Use 'ozzy remote rm {}' first.",
+            name,
+            name
+        );
     }
-
-    remotes.insert(name.to_string(), toml::Value::String(url.to_string()));
-
-    // Save config
-    let new_content = toml::to_string_pretty(&config)?;
-    std::fs::write(&config_path, new_content)?;
+    project
+        .config
+        .remotes
+        .insert(name.to_string(), url.to_string());
+    project.save_config()?;
 
     println!("Added remote '{}' -> {}", name, url);
 
@@ -51,28 +39,12 @@ pub async fn add(name: &str, url: &str) -> Result<()> {
 /// Remove a remote registry from the current project.
 pub async fn remove(name: &str) -> Result<()> {
     validate_safe_name(name)?;
-    let project = Project::find_current()?;
+    let mut project = Project::find_current()?;
 
-    // Load current config
-    let config_path = project.root.join("ozzy.toml");
-    let content = std::fs::read_to_string(&config_path)?;
-    let mut config: toml::Value = toml::from_str(&content)?;
-
-    // Get remotes table
-    let remotes = config
-        .as_table_mut()
-        .context("Invalid TOML configuration")?
-        .get_mut("remotes")
-        .and_then(|v| v.as_table_mut())
-        .context("No remotes configured")?;
-
-    if remotes.remove(name).is_none() {
+    if project.config.remotes.remove(name).is_none() {
         anyhow::bail!("Remote '{}' not found", name);
     }
-
-    // Save config
-    let new_content = toml::to_string_pretty(&config)?;
-    std::fs::write(&config_path, new_content)?;
+    project.save_config()?;
 
     println!("Removed remote '{}'", name);
 
@@ -83,30 +55,15 @@ pub async fn remove(name: &str) -> Result<()> {
 pub async fn list() -> Result<()> {
     let project = Project::find_current()?;
 
-    // Load current config
-    let config_path = project.root.join("ozzy.toml");
-    let content = std::fs::read_to_string(&config_path)?;
-    let config: toml::Value = toml::from_str(&content)?;
-
-    // Get remotes table
-    let remotes = config
-        .get("remotes")
-        .and_then(|v| v.as_table());
-
-    match remotes {
-        Some(remotes) if !remotes.is_empty() => {
-            println!("Configured remotes:");
-            for (name, url) in remotes {
-                if let Some(url_str) = url.as_str() {
-                    println!("  {} -> {}", name, url_str);
-                }
-            }
+    if !project.config.remotes.is_empty() {
+        println!("Configured remotes:");
+        for (name, url) in &project.config.remotes {
+            println!("  {} -> {}", name, url);
         }
-        _ => {
-            println!("No remotes configured.");
-            println!();
-            println!("Add a remote with: ozzy remote add <name> <url>");
-        }
+    } else {
+        println!("No remotes configured.");
+        println!();
+        println!("Add a remote with: ozzy remote add <name> <url>");
     }
 
     Ok(())
@@ -114,34 +71,23 @@ pub async fn list() -> Result<()> {
 
 /// Get the URL for a named remote, or the default remote URL.
 pub fn get_remote_url(project: &Project, remote_name: Option<&str>) -> Result<(String, String)> {
-    let config_path = project.root.join("ozzy.toml");
-    let content = std::fs::read_to_string(&config_path)?;
-    let config: toml::Value = toml::from_str(&content)?;
-
-    let remotes = config
-        .get("remotes")
-        .and_then(|v| v.as_table());
-
     // If a specific remote is requested
     if let Some(name) = remote_name {
-        let url = remotes
-            .and_then(|r| r.get(name))
-            .and_then(|v| v.as_str())
+        let url = project
+            .config
+            .remotes
+            .get(name)
             .ok_or_else(|| anyhow::anyhow!("Remote '{}' not found", name))?;
-        return Ok((name.to_string(), url.to_string()));
+        return Ok((name.to_string(), url.clone()));
     }
 
     // Otherwise, try to find "origin" or the only remote
-    if let Some(remotes) = remotes {
-        if let Some(url) = remotes.get("origin").and_then(|v| v.as_str()) {
-            return Ok(("origin".to_string(), url.to_string()));
-        }
-        if remotes.len() == 1 {
-            let (name, url) = remotes.iter().next().unwrap();
-            if let Some(url_str) = url.as_str() {
-                return Ok((name.clone(), url_str.to_string()));
-            }
-        }
+    if let Some(url) = project.config.remotes.get("origin") {
+        return Ok(("origin".to_string(), url.clone()));
+    }
+    if project.config.remotes.len() == 1 {
+        let (name, url) = project.config.remotes.iter().next().expect("len == 1");
+        return Ok((name.clone(), url.clone()));
     }
 
     anyhow::bail!("No remote configured. Use 'ozzy remote add <name> <url>' to add one.")

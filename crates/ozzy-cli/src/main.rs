@@ -433,76 +433,49 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { name, owner } => {
-            commands::init::run(name, owner).await
-        }
+        Commands::Init { name, owner } => commands::init::run(name, owner).await,
         Commands::Data { command } => match command {
-            DataCommands::Add { file, name } => {
-                commands::data::add(&file, &name).await
-            }
-            DataCommands::Ls => {
-                commands::data::list().await
-            }
-            DataCommands::Rm { name } => {
-                commands::data::remove(&name).await
-            }
-            DataCommands::Schema { name } => {
-                commands::data::schema(&name).await
-            }
+            DataCommands::Add { file, name } => commands::data::add(&file, &name).await,
+            DataCommands::Ls => commands::data::list().await,
+            DataCommands::Rm { name } => commands::data::remove(&name).await,
+            DataCommands::Schema { name } => commands::data::schema(&name).await,
         },
         Commands::Transform { command } => match command {
             TransformCommands::Add { file, name } => {
                 commands::transform::add(&file, name.as_deref()).await
             }
-            TransformCommands::Ls => {
-                commands::transform::list().await
-            }
-            TransformCommands::Rm { name } => {
-                commands::transform::remove(&name).await
-            }
+            TransformCommands::Ls => commands::transform::list().await,
+            TransformCommands::Rm { name } => commands::transform::remove(&name).await,
             TransformCommands::Test { name, sample } => {
                 commands::transform::test(&name, sample).await
             }
         },
         Commands::Endpoint { command } => match command {
-            EndpointCommands::Create { name, input, transforms } => {
-                commands::endpoint::create(&name, &input, &transforms).await
-            }
-            EndpointCommands::Ls => {
-                commands::endpoint::list().await
-            }
-            EndpointCommands::Rm { name } => {
-                commands::endpoint::remove(&name).await
-            }
-            EndpointCommands::Show { name } => {
-                commands::endpoint::show(&name).await
-            }
+            EndpointCommands::Create {
+                name,
+                input,
+                transforms,
+            } => commands::endpoint::create(&name, &input, &transforms).await,
+            EndpointCommands::Ls => commands::endpoint::list().await,
+            EndpointCommands::Rm { name } => commands::endpoint::remove(&name).await,
+            EndpointCommands::Show { name } => commands::endpoint::show(&name).await,
         },
         Commands::Dag { format, endpoint } => {
             commands::dag::show(&format, endpoint.as_deref()).await
         }
-        Commands::Run { endpoint, output, force, params } => {
-            commands::run::execute(&endpoint, output.as_deref(), force, &params).await
-        }
-        Commands::Commit { message } => {
-            commands::commit::create(message.as_deref()).await
-        }
-        Commands::Log { num } => {
-            commands::log::show(num).await
-        }
-        Commands::Status => {
-            commands::status::show().await
-        }
+        Commands::Run {
+            endpoint,
+            output,
+            force,
+            params,
+        } => commands::run::execute(&endpoint, output.as_deref(), force, &params).await,
+        Commands::Commit { message } => commands::commit::create(message.as_deref()).await,
+        Commands::Log { num } => commands::log::show(num).await,
+        Commands::Status => commands::status::show().await,
         Commands::Cache { command } => match command {
-            CacheCommands::Ls => {
-                commands::cache::list().await
-            }
-            CacheCommands::Size => {
-                commands::cache::size().await
-            }
-            CacheCommands::Clear => {
-                commands::cache::clear().await
-            }
+            CacheCommands::Ls => commands::cache::list().await,
+            CacheCommands::Size => commands::cache::size().await,
+            CacheCommands::Clear => commands::cache::clear().await,
             CacheCommands::Push { all, hash, dry_run } => {
                 commands::cache::push(all, hash.as_deref(), dry_run).await
             }
@@ -512,21 +485,22 @@ async fn main() -> Result<()> {
             CacheCommands::Sync { direction, dry_run } => {
                 commands::cache::sync(&direction, dry_run).await
             }
-            CacheCommands::Status => {
-                commands::cache::status().await
-            }
+            CacheCommands::Status => commands::cache::status().await,
         },
         Commands::Auth { command } => match command {
-            AuthCommands::Login { registry } => {
-                commands::auth::login(registry.as_deref()).await
-            }
-            AuthCommands::Logout { registry } => {
-                commands::auth::logout(registry.as_deref()).await
-            }
+            AuthCommands::Login { registry } => commands::auth::login(registry.as_deref()).await,
+            AuthCommands::Logout { registry } => commands::auth::logout(registry.as_deref()).await,
             AuthCommands::Token { command } => match command {
-                TokenCommands::Create { name, scopes, expires, registry } => {
-                    let scope_list: Vec<String> = scopes.split(',').map(|s| s.trim().to_string()).collect();
-                    commands::auth::token_create(&name, &scope_list, expires, registry.as_deref()).await
+                TokenCommands::Create {
+                    name,
+                    scopes,
+                    expires,
+                    registry,
+                } => {
+                    let scope_list: Vec<String> =
+                        scopes.split(',').map(|s| s.trim().to_string()).collect();
+                    commands::auth::token_create(&name, &scope_list, expires, registry.as_deref())
+                        .await
                 }
                 TokenCommands::Ls { registry } => {
                     commands::auth::token_list(registry.as_deref()).await
@@ -537,39 +511,27 @@ async fn main() -> Result<()> {
             },
         },
         Commands::Remote { command } => match command {
-            RemoteCommands::Add { name, url } => {
-                commands::remote::add(&name, &url).await
-            }
-            RemoteCommands::Rm { name } => {
-                commands::remote::remove(&name).await
-            }
-            RemoteCommands::Ls => {
-                commands::remote::list().await
-            }
+            RemoteCommands::Add { name, url } => commands::remote::add(&name, &url).await,
+            RemoteCommands::Rm { name } => commands::remote::remove(&name).await,
+            RemoteCommands::Ls => commands::remote::list().await,
         },
         Commands::Push { message, remote } => {
-            commands::push::run(message.as_deref(), Some(&remote)).await
+            commands::push::run(message.as_deref(), &remote).await
         }
-        Commands::Pull { remote, r#ref } => {
-            commands::pull::run(Some(&remote), Some(&r#ref)).await
-        }
-        Commands::Fetch { endpoint, output, params, registry: _ } => {
-            // Registry is parsed from the endpoint reference itself
-            commands::fetch::run(&endpoint, output.as_deref(), &params).await
-        }
+        Commands::Pull { remote, r#ref } => commands::pull::run(Some(&remote), Some(&r#ref)).await,
+        Commands::Fetch {
+            endpoint,
+            output,
+            params,
+            registry,
+        } => commands::fetch::run(&endpoint, output.as_deref(), &params, registry.as_deref()).await,
         Commands::Tag { command } => match command {
             TagCommands::Create { name, message } => {
                 commands::tag::create(&name, message.as_deref()).await
             }
-            TagCommands::Ls => {
-                commands::tag::list().await
-            }
-            TagCommands::Rm { name } => {
-                commands::tag::delete(&name).await
-            }
-            TagCommands::Show { name } => {
-                commands::tag::show(&name).await
-            }
+            TagCommands::Ls => commands::tag::list().await,
+            TagCommands::Rm { name } => commands::tag::delete(&name).await,
+            TagCommands::Show { name } => commands::tag::show(&name).await,
         },
     }
 }

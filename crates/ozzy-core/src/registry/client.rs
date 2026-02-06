@@ -39,9 +39,7 @@ impl RegistryClient {
     }
 
     fn auth_header(&self) -> Option<String> {
-        self.access_token
-            .as_ref()
-            .map(|t| format!("Bearer {}", t))
+        self.access_token.as_ref().map(|t| format!("Bearer {}", t))
     }
 
     // ========================================================================
@@ -91,9 +89,7 @@ impl RegistryClient {
 
     /// Get current user info.
     pub async fn get_me(&self) -> Result<UserInfo> {
-        let mut request = self
-            .client
-            .get(format!("{}/api/v1/auth/me", self.base_url));
+        let mut request = self.client.get(format!("{}/api/v1/auth/me", self.base_url));
 
         if let Some(auth) = self.auth_header() {
             request = request.header("Authorization", auth);
@@ -110,7 +106,12 @@ impl RegistryClient {
     }
 
     /// Create a new API token.
-    pub async fn create_token(&self, name: &str, scopes: &[String], expires_in_days: Option<u32>) -> Result<CreateTokenResponse> {
+    pub async fn create_token(
+        &self,
+        name: &str,
+        scopes: &[String],
+        expires_in_days: Option<u32>,
+    ) -> Result<CreateTokenResponse> {
         let mut request = self
             .client
             .post(format!("{}/api/v1/auth/token", self.base_url))
@@ -218,6 +219,44 @@ impl RegistryClient {
         response.json().await.context("Failed to parse project")
     }
 
+    /// List project commits.
+    pub async fn list_commits(
+        &self,
+        owner: &str,
+        project: &str,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<Vec<CommitInfo>> {
+        let mut url = format!("{}/api/v1/{}/{}/commits", self.base_url, owner, project);
+        let mut query = Vec::new();
+        if let Some(l) = limit {
+            query.push(format!("limit={}", l));
+        }
+        if let Some(o) = offset {
+            query.push(format!("offset={}", o));
+        }
+        if !query.is_empty() {
+            url.push('?');
+            url.push_str(&query.join("&"));
+        }
+
+        let mut request = self.client.get(&url);
+        if let Some(auth) = self.auth_header() {
+            request = request.header("Authorization", auth);
+        }
+
+        let response = request.send().await.context("Failed to list commits")?;
+        if !response.status().is_success() {
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("List commits failed: {}", text);
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse commits response")
+    }
+
     // ========================================================================
     // Push/Pull
     // ========================================================================
@@ -304,7 +343,10 @@ impl RegistryClient {
 
         let mut request = self
             .client
-            .post(format!("{}/api/v1/{}/{}/push", self.base_url, owner, project))
+            .post(format!(
+                "{}/api/v1/{}/{}/push",
+                self.base_url, owner, project
+            ))
             .multipart(form);
 
         if let Some(auth) = self.auth_header() {
@@ -318,7 +360,10 @@ impl RegistryClient {
             anyhow::bail!("Push failed: {}", text);
         }
 
-        response.json().await.context("Failed to parse push response")
+        response
+            .json()
+            .await
+            .context("Failed to parse push response")
     }
 
     /// Get pull manifest.
@@ -328,7 +373,10 @@ impl RegistryClient {
         project: &str,
         ref_name: Option<&str>,
     ) -> Result<PullManifest> {
-        let mut url = format!("{}/api/v1/{}/{}/pull/manifest", self.base_url, owner, project);
+        let mut url = format!(
+            "{}/api/v1/{}/{}/pull/manifest",
+            self.base_url, owner, project
+        );
         if let Some(r) = ref_name {
             url = format!("{}?ref={}", url, r);
         }
@@ -375,7 +423,11 @@ impl RegistryClient {
             anyhow::bail!("Pull failed: {}", text);
         }
 
-        response.bytes().await.map(|b| b.to_vec()).context("Failed to read pull response")
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .context("Failed to read pull response")
     }
 
     // ========================================================================
@@ -438,6 +490,40 @@ impl RegistryClient {
             anyhow::bail!("Fetch failed: {}", text);
         }
 
-        response.bytes().await.map(|b| b.to_vec()).context("Failed to read fetch response")
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .context("Failed to read fetch response")
+    }
+
+    /// Resolve endpoint@ref to concrete commit and endpoint metadata.
+    pub async fn resolve(
+        &self,
+        owner: &str,
+        project: &str,
+        endpoint: &str,
+        ref_name: &str,
+    ) -> Result<ResolveEndpointResponse> {
+        let url = format!(
+            "{}/api/v1/resolve/{}/{}/{}@{}",
+            self.base_url, owner, project, endpoint, ref_name
+        );
+
+        let mut request = self.client.get(&url);
+        if let Some(auth) = self.auth_header() {
+            request = request.header("Authorization", auth);
+        }
+
+        let response = request.send().await.context("Failed to resolve endpoint")?;
+        if !response.status().is_success() {
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Resolve failed: {}", text);
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse resolve response")
     }
 }

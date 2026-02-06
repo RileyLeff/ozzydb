@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ozzy_core::{commit, validate_safe_name, Project};
+use ozzy_core::{Project, commit, validate_safe_name};
 use std::fs;
 use std::path::Path;
 
@@ -57,7 +57,10 @@ pub async fn add(file: &str, _name: Option<&str>) -> Result<()> {
             println!("Transform file already exists and is identical.");
         } else {
             fs::copy(source_path, &dest_path)?;
-            println!("Updated transform file: transforms/{}", dest_name.to_string_lossy());
+            println!(
+                "Updated transform file: transforms/{}",
+                dest_name.to_string_lossy()
+            );
         }
     } else {
         fs::copy(source_path, &dest_path)?;
@@ -90,7 +93,11 @@ pub async fn list() -> Result<()> {
 
     println!("Transforms:");
     for (name, transform) in &transforms {
-        let reproducible = if transform.reproducible { "" } else { " (non-deterministic)" };
+        let reproducible = if transform.reproducible {
+            ""
+        } else {
+            " (non-deterministic)"
+        };
         println!("  {} [{}]{}", name, transform.runtime, reproducible);
         println!("    Source: {}", transform.source_path);
     }
@@ -166,7 +173,11 @@ pub async fn test(name: &str, _sample: usize) -> Result<()> {
         anyhow::bail!("Data source file not found: {}", input_path.display());
     }
 
-    println!("Input: {} ({} rows)", test_input.name, test_input.row_count.unwrap_or(0));
+    println!(
+        "Input: {} ({} rows)",
+        test_input.name,
+        test_input.row_count.unwrap_or(0)
+    );
     println!();
 
     // Execute the transform
@@ -193,7 +204,11 @@ pub async fn test(name: &str, _sample: usize) -> Result<()> {
             if temp_output.exists() {
                 let metadata = fs::metadata(&temp_output)?;
                 let row_count = ozzy_core::schema::get_parquet_row_count(&temp_output).unwrap_or(0);
-                println!("Output: {} rows, {}", row_count, ozzy_core::cache::format_size(metadata.len()));
+                println!(
+                    "Output: {} rows, {}",
+                    row_count,
+                    ozzy_core::cache::format_size(metadata.len())
+                );
 
                 if let Ok(schema) = ozzy_core::schema::extract_parquet_schema(&temp_output) {
                     println!();
@@ -220,20 +235,47 @@ fn find_transform_functions(content: &str) -> Vec<&str> {
     let mut functions = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
 
-    for (i, line) in lines.iter().enumerate() {
-        if line.trim().starts_with("@ozzy.transform") {
-            // Look for the function definition
-            for j in (i + 1)..lines.len() {
-                let l = lines[j].trim();
-                if l.starts_with("def ") {
-                    if let Some(paren_pos) = l.find('(') {
-                        let name = l[4..paren_pos].trim();
-                        functions.push(name);
-                    }
-                    break;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
+        if !line.starts_with("@ozzy.transform") {
+            i += 1;
+            continue;
+        }
+
+        // Consume decorator block (supports single-line and multiline decorators).
+        let mut j = i;
+        let mut paren_depth = 0;
+        let mut saw_open_paren = false;
+        while j < lines.len() {
+            let l = lines[j];
+            let open_count = l.chars().filter(|&c| c == '(').count() as i32;
+            let close_count = l.chars().filter(|&c| c == ')').count() as i32;
+            if open_count > 0 {
+                saw_open_paren = true;
+            }
+            paren_depth += open_count;
+            paren_depth -= close_count;
+
+            if (!saw_open_paren && j == i) || (saw_open_paren && paren_depth == 0) {
+                break;
+            }
+            j += 1;
+        }
+
+        // Look for the function definition after the decorator block.
+        for k in (j + 1)..lines.len() {
+            let l = lines[k].trim();
+            if l.starts_with("def ") {
+                if let Some(paren_pos) = l.find('(') {
+                    let name = l[4..paren_pos].trim();
+                    functions.push(name);
                 }
+                i = k;
+                break;
             }
         }
+        i += 1;
     }
 
     functions
