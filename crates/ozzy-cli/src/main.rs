@@ -61,12 +61,16 @@ enum Commands {
 
     /// Show the transform DAG
     Dag {
-        /// Output format
+        /// Legacy shorthand output format for `ozzy dag` (without subcommand)
         #[arg(long, default_value = "ascii")]
         format: String,
 
-        /// Endpoint to visualize (defaults to all)
+        /// Legacy shorthand endpoint for `ozzy dag` (without subcommand)
         endpoint: Option<String>,
+
+        /// Subcommands (`show` preferred).
+        #[command(subcommand)]
+        command: Option<DagCommands>,
     },
 
     /// Execute an endpoint locally
@@ -165,7 +169,27 @@ enum Commands {
     /// Manage tags
     Tag {
         #[command(subcommand)]
-        command: TagCommands,
+        command: Option<TagCommands>,
+
+        /// Shorthand for `ozzy tag create <name>`
+        name: Option<String>,
+
+        /// Tag message (used with shorthand create)
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DagCommands {
+    /// Visualize the DAG
+    Show {
+        /// Output format
+        #[arg(long, default_value = "ascii")]
+        format: String,
+
+        /// Endpoint to visualize (defaults to all)
+        endpoint: Option<String>,
     },
 }
 
@@ -460,9 +484,16 @@ async fn main() -> Result<()> {
             EndpointCommands::Rm { name } => commands::endpoint::remove(&name).await,
             EndpointCommands::Show { name } => commands::endpoint::show(&name).await,
         },
-        Commands::Dag { format, endpoint } => {
-            commands::dag::show(&format, endpoint.as_deref()).await
-        }
+        Commands::Dag {
+            format,
+            endpoint,
+            command,
+        } => match command {
+            Some(DagCommands::Show { format, endpoint }) => {
+                commands::dag::show(&format, endpoint.as_deref()).await
+            }
+            None => commands::dag::show(&format, endpoint.as_deref()).await,
+        },
         Commands::Run {
             endpoint,
             output,
@@ -525,13 +556,25 @@ async fn main() -> Result<()> {
             params,
             registry,
         } => commands::fetch::run(&endpoint, output.as_deref(), &params, registry.as_deref()).await,
-        Commands::Tag { command } => match command {
-            TagCommands::Create { name, message } => {
+        Commands::Tag {
+            command,
+            name,
+            message,
+        } => match command {
+            Some(TagCommands::Create { name, message }) => {
                 commands::tag::create(&name, message.as_deref()).await
             }
-            TagCommands::Ls => commands::tag::list().await,
-            TagCommands::Rm { name } => commands::tag::delete(&name).await,
-            TagCommands::Show { name } => commands::tag::show(&name).await,
+            Some(TagCommands::Ls) => commands::tag::list().await,
+            Some(TagCommands::Rm { name }) => commands::tag::delete(&name).await,
+            Some(TagCommands::Show { name }) => commands::tag::show(&name).await,
+            None => {
+                let name = name.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Tag name required. Use `ozzy tag <name>` or `ozzy tag create <name>`"
+                    )
+                })?;
+                commands::tag::create(&name, message.as_deref()).await
+            }
         },
     }
 }

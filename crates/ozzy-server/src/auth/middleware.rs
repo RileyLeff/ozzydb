@@ -1,15 +1,15 @@
 //! Authentication middleware for extracting user from requests.
 
 use axum::{
-    extract::FromRequestParts,
-    http::{request::Parts, StatusCode},
-    response::{IntoResponse, Response},
     Json,
+    extract::FromRequestParts,
+    http::{StatusCode, request::Parts},
+    response::{IntoResponse, Response},
 };
 use chrono::Utc;
 
-use crate::db::{Database, User};
 use crate::AppState;
+use crate::db::{Database, User};
 use ozzy_core::hash::blake3_hash;
 use ozzy_core::registry::protocol::ApiError;
 
@@ -25,6 +25,10 @@ pub struct WriteAuthUser(pub User);
 #[derive(Debug, Clone)]
 pub struct MaybeAuthUser(pub Option<User>);
 
+fn has_read_scope(scopes: &[String]) -> bool {
+    scopes.iter().any(|s| s == "read" || s == "write")
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AuthError;
 
@@ -34,7 +38,10 @@ impl FromRequestParts<AppState> for AuthUser {
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         async move {
             let token = extract_token(parts)?;
-            let (user, _scopes) = validate_token_with_scopes(&state.db, &token).await?;
+            let (user, scopes) = validate_token_with_scopes(&state.db, &token).await?;
+            if !has_read_scope(&scopes) {
+                return Err(AuthError::InsufficientScope);
+            }
             Ok(AuthUser(user))
         }
     }
@@ -68,8 +75,9 @@ impl FromRequestParts<AppState> for MaybeAuthUser {
         async move {
             match extract_token(parts) {
                 Ok(token) => match validate_token_with_scopes(&state.db, &token).await {
-                    Ok((user, _scopes)) => Ok(MaybeAuthUser(Some(user))),
+                    Ok((user, scopes)) if has_read_scope(&scopes) => Ok(MaybeAuthUser(Some(user))),
                     Err(_) => Ok(MaybeAuthUser(None)),
+                    _ => Ok(MaybeAuthUser(None)),
                 },
                 Err(_) => Ok(MaybeAuthUser(None)),
             }
@@ -95,7 +103,10 @@ fn extract_token(parts: &Parts) -> Result<String, AuthError> {
 /// Minimum interval between token touch updates (5 minutes).
 const TOKEN_TOUCH_INTERVAL_SECS: i64 = 300;
 
-async fn validate_token_with_scopes(db: &Database, token: &str) -> Result<(User, Vec<String>), AuthError> {
+async fn validate_token_with_scopes(
+    db: &Database,
+    token: &str,
+) -> Result<(User, Vec<String>), AuthError> {
     // Hash the token to look it up
     let token_hash = blake3_hash(token.as_bytes());
 
@@ -180,5 +191,22 @@ impl IntoResponse for AuthError {
         };
 
         (status, Json(ApiError::new(error, message))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_read_scope;
+
+    #[test]
+    fn read_scope_accepts_read_and_write() {
+        assert!(has_read_scope(&["read".to_string()]));
+        assert!(has_read_scope(&["write".to_string()]));
+    }
+
+    #[test]
+    fn read_scope_rejects_missing_scope() {
+        assert!(!has_read_scope(&[]));
+        assert!(!has_read_scope(&["admin".to_string()]));
     }
 }

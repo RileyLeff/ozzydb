@@ -84,6 +84,38 @@ Evidence:
 
 No `GET /{owner}/{project}/commits` route is currently exposed, so clients cannot browse project history via API without pulling project artifacts.
 
+## Follow-up Review (Post-Fix)
+
+1. Medium: Pulling a tag updates a branch ref path instead of a tag ref path.
+Evidence:
+`crates/ozzy-cli/src/commands/pull.rs:153`, `crates/ozzy-core/src/project.rs:436`, `ozzydb-architecture_draft_1.md:1861`
+
+`pull` always wrote `refs/heads/{ref}` locally, which could leave local tag refs out-of-sync.
+
+2. Medium: Scoped API tokens were only partially enforced.
+Evidence:
+`crates/ozzy-server/src/auth/middleware.rs:37`, `crates/ozzy-server/src/auth/middleware.rs:52`, `ozzydb-architecture_draft_1.md:1867`
+
+Write endpoints enforced `write`, but read-protected paths accepted tokens without validating read scope.
+
+3. Low: CLI shape drift from architecture for DAG command.
+Evidence:
+`ozzydb-architecture_draft_1.md:1223`, `ozzydb-architecture_draft_1.md:1824`, `crates/ozzy-cli/src/main.rs:62`
+
+Architecture specifies `ozzy dag show`; CLI only exposed `ozzy dag`.
+
+4. Low: CLI shape drift from architecture for tag command.
+Evidence:
+`ozzydb-architecture_draft_1.md:1876`, `crates/ozzy-cli/src/main.rs:404`
+
+Architecture specifies `ozzy tag <name>`; CLI only exposed `ozzy tag create <name>`.
+
+5. Low: Phase 1 validation checklist remained partially unproven in tests.
+Evidence:
+`ozzydb-architecture_draft_1.md:1851`, `ozzydb-architecture_draft_1.md:1852`, `ozzydb-architecture_draft_1.md:1853`, `crates/ozzy-cli/tests/integration_test.rs:21`
+
+At review time, explicit tests for cache invalidation on transform code changes, deterministic hash stability in end-to-end flow, and negative schema-mismatch endpoint creation were not yet present.
+
 ## Validation Performed
 
 1. `cargo test --workspace` passed.

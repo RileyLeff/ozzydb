@@ -257,6 +257,29 @@ impl RegistryClient {
             .context("Failed to parse commits response")
     }
 
+    /// List project refs (branches and tags).
+    pub async fn list_refs(&self, owner: &str, project: &str) -> Result<ListRefsResponse> {
+        let mut request = self.client.get(format!(
+            "{}/api/v1/{}/{}/refs",
+            self.base_url, owner, project
+        ));
+
+        if let Some(auth) = self.auth_header() {
+            request = request.header("Authorization", auth);
+        }
+
+        let response = request.send().await.context("Failed to list refs")?;
+        if !response.status().is_success() {
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("List refs failed: {}", text);
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse refs response")
+    }
+
     // ========================================================================
     // Push/Pull
     // ========================================================================

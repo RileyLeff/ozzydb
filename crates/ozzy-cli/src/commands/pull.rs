@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use ozzy_core::Project;
+use ozzy_core::registry::protocol::ListRefsResponse;
 use ozzy_core::registry::{CredentialsFile, RegistryClient};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -69,6 +70,30 @@ fn checked_destination(base: &Path, canonical_base: &Path, rel: &Path) -> Result
     Ok(dest)
 }
 
+fn resolve_local_ref_path(
+    normalized_ref: &str,
+    refs: Option<&ListRefsResponse>,
+    head_ref: &str,
+) -> String {
+    if normalized_ref == "@latest" {
+        return head_ref.to_string();
+    }
+
+    let is_tag_only = refs
+        .map(|r| {
+            let tag_match = r.tags.iter().any(|t| t.name == normalized_ref);
+            let branch_match = r.branches.iter().any(|b| b.name == normalized_ref);
+            tag_match && !branch_match
+        })
+        .unwrap_or(false);
+
+    if is_tag_only {
+        format!("refs/tags/{}", normalized_ref)
+    } else {
+        format!("refs/heads/{}", normalized_ref)
+    }
+}
+
 /// Pull from a remote registry.
 pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
     let project = Project::find_current()?;
@@ -93,9 +118,20 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
 
     let owner = &project.config.project.owner;
     let project_slug = &project.config.project.name;
+    let requested_ref = ref_name.unwrap_or("main");
+    let normalized_ref = match requested_ref {
+        "@latest" => "@latest",
+        s => s
+            .strip_prefix("refs/heads/")
+            .or_else(|| s.strip_prefix("refs/tags/"))
+            .or_else(|| s.strip_prefix('@'))
+            .unwrap_or(s),
+    };
 
     // Get manifest first to show what will be downloaded
-    let manifest = client.pull_manifest(owner, project_slug, ref_name).await?;
+    let manifest = client
+        .pull_manifest(owner, project_slug, Some(normalized_ref))
+        .await?;
 
     println!(
         "Pulling commit {} ({} data sources, {} transforms)",
@@ -105,7 +141,9 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
     );
 
     // Download the tar archive
-    let tar_data = client.pull(owner, project_slug, ref_name).await?;
+    let tar_data = client
+        .pull(owner, project_slug, Some(normalized_ref))
+        .await?;
 
     // Extract the tar archive
     let cursor = std::io::Cursor::new(tar_data);
@@ -149,20 +187,20 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
         file.write_all(commit_data)?;
     }
 
-    // Update local ref to point to the pulled commit
-    let ref_branch = ref_name.unwrap_or("main");
-    let ref_full = format!("refs/heads/{}", ref_branch);
+    // Resolve whether this is a branch or tag ref so local refs stay consistent.
+    let refs = client.list_refs(owner, project_slug).await.ok();
+    let ref_full = resolve_local_ref_path(normalized_ref, refs.as_ref(), &project.config.refs.head);
     project.update_ref(&ref_full, &manifest.commit_hash)?;
 
     // Also update HEAD if we're pulling the default branch
-    if ref_branch == "main" || ref_full == project.config.refs.head {
+    if ref_full == project.config.refs.head || normalized_ref == "main" {
         project.update_ref(&project.config.refs.head, &manifest.commit_hash)?;
     }
 
     println!();
     println!(
         "Pull complete. Updated ref '{}' -> {}",
-        ref_branch,
+        normalized_ref,
         &manifest.commit_hash[..8]
     );
 
@@ -171,7 +209,8 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_archive_relative_path;
+    use super::{resolve_local_ref_path, sanitize_archive_relative_path};
+    use ozzy_core::registry::protocol::{ListRefsResponse, RefInfo};
     use std::path::Path;
 
     #[test]
@@ -184,5 +223,26 @@ mod tests {
     fn sanitize_archive_path_allows_relative_paths() {
         let p = sanitize_archive_relative_path(Path::new("data/raw.parquet")).unwrap();
         assert_eq!(p.to_string_lossy(), "data/raw.parquet");
+    }
+
+    #[test]
+    fn resolve_ref_path_uses_tag_for_tag_only_name() {
+        let refs = ListRefsResponse {
+            branches: vec![RefInfo {
+                name: "main".to_string(),
+                ref_type: "branch".to_string(),
+                commit_hash: "a".to_string(),
+                updated_at: "now".to_string(),
+            }],
+            tags: vec![RefInfo {
+                name: "v1.0.0".to_string(),
+                ref_type: "tag".to_string(),
+                commit_hash: "b".to_string(),
+                updated_at: "now".to_string(),
+            }],
+        };
+
+        let resolved = resolve_local_ref_path("v1.0.0", Some(&refs), "refs/heads/main");
+        assert_eq!(resolved, "refs/tags/v1.0.0");
     }
 }

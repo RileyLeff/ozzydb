@@ -1171,3 +1171,320 @@ fn test_sap_flux_end_to_end_pipeline() {
         .success()
         .stdout(predicate::str::contains("sap flux e2e fixture"));
 }
+
+fn extract_materialized_hash_prefix(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .find(|line| line.contains("Materialized hash: "))
+        .and_then(|line| line.split("Materialized hash: ").nth(1))
+        .map(|part| part.trim().trim_end_matches("...").to_string())
+}
+
+#[test]
+fn test_cache_invalidation_when_transform_code_changes() {
+    let dir = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "init",
+            "--name",
+            "invalidate-project",
+            "--owner",
+            "testuser",
+        ])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
+        .assert()
+        .success();
+
+    let transform_path = dir.path().join("transforms/qc.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    create_test_transform(&transform_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/qc.py"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "endpoint",
+            "create",
+            "filtered",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .env("OZZY_CACHE_DIR", cache_dir.path())
+        .args(["run", "filtered"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MISS"));
+
+    let original = fs::read_to_string(&transform_path).unwrap();
+    let updated = original.replace(
+        "threshold = getattr(params, \"threshold\", 10.0)",
+        "threshold = getattr(params, \"threshold\", 11.0)",
+    );
+    fs::write(&transform_path, updated).unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .env("OZZY_CACHE_DIR", cache_dir.path())
+        .args(["run", "filtered"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MISS"));
+}
+
+#[test]
+fn test_materialized_hash_is_stable_for_same_inputs() {
+    let dir = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "hash-project", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
+        .assert()
+        .success();
+
+    let transform_path = dir.path().join("transforms/qc.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    create_test_transform(&transform_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/qc.py"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "endpoint",
+            "create",
+            "filtered",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
+        .assert()
+        .success();
+
+    let output_1 = ozzy()
+        .current_dir(dir.path())
+        .env("OZZY_CACHE_DIR", cache_dir.path())
+        .args(["run", "filtered"])
+        .output()
+        .unwrap();
+    assert!(output_1.status.success());
+    let stdout_1 = String::from_utf8_lossy(&output_1.stdout);
+
+    let output_2 = ozzy()
+        .current_dir(dir.path())
+        .env("OZZY_CACHE_DIR", cache_dir.path())
+        .args(["run", "filtered"])
+        .output()
+        .unwrap();
+    assert!(output_2.status.success());
+    let stdout_2 = String::from_utf8_lossy(&output_2.stdout);
+
+    let hash_1 = extract_materialized_hash_prefix(&stdout_1).expect("hash missing in first run");
+    let hash_2 = extract_materialized_hash_prefix(&stdout_2).expect("hash missing in second run");
+    assert_eq!(hash_1, hash_2);
+}
+
+#[test]
+fn test_endpoint_create_rejects_schema_mismatch() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "schema-fail", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
+        .assert()
+        .success();
+
+    let transform_path = dir.path().join("transforms/bad_schema.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    fs::write(
+        &transform_path,
+        r#"
+import polars as pl
+
+class ozzy:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
+@ozzy.transform(input_schema={"requires": ["missing_column"]})
+def bad_transform(inputs, params):
+    return inputs["main"]
+"#,
+    )
+    .unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/bad_schema.py"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "endpoint",
+            "create",
+            "bad",
+            "--input",
+            "raw",
+            "--transforms",
+            "bad_transform",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Pipeline validation failed"));
+}
+
+#[test]
+fn test_dag_show_subcommand_works() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "dag-show", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
+        .assert()
+        .success();
+
+    let transform_path = dir.path().join("transforms/qc.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    create_test_transform(&transform_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/qc.py"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "endpoint",
+            "create",
+            "filtered",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["dag", "show", "--format", "ascii"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Endpoint: filtered"));
+}
+
+#[test]
+fn test_tag_shorthand_create_works() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "tag-short", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["commit", "-m", "seed commit"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["tag", "v1.0.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created tag 'v1.0.0'"));
+}
