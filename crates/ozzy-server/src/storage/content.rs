@@ -1,61 +1,148 @@
-//! Content-addressed R2/S3 storage.
+//! Content-addressed storage with local-first writes and optional R2 redundancy.
 //!
-//! Files are stored by their BLAKE3 content hash, enabling automatic deduplication.
-//! Storage layout: {prefix}/{hash[0:2]}/{hash[2:4]}/{hash}.{ext}
+//! Files are addressed by BLAKE3 content hash.
+//! Layout: {root}/{prefix}/{hash[0:2]}/{hash[2:4]}/{hash}.{ext}
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use futures::TryStreamExt;
+use futures::Stream;
+use object_store::ObjectStore;
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as ObjectPath;
-use object_store::ObjectStore;
 use ozzy_core::hash;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::config::R2Config;
+use crate::config::{Config, R2Config};
 
-/// Content-addressed storage backend using R2/S3.
+/// Content-addressed storage backend using local filesystem as primary with optional R2 mirror.
 #[derive(Clone)]
 pub struct ContentStorage {
-    store: Arc<dyn ObjectStore>,
+    local_root: PathBuf,
+    remote_store: Option<Arc<dyn ObjectStore>>,
     prefix: String,
 }
 
 impl ContentStorage {
-    /// Create a new content storage connected to R2.
-    pub fn new(config: &R2Config) -> Result<Self> {
+    fn build_remote_store(config: &R2Config) -> Result<Arc<dyn ObjectStore>> {
         let store = AmazonS3Builder::new()
             .with_endpoint(&config.endpoint)
             .with_bucket_name(&config.bucket)
             .with_access_key_id(&config.access_key_id)
             .with_secret_access_key(&config.secret_access_key)
             .with_region(&config.region)
-            // R2 requires virtual-hosted-style to be disabled
             .with_virtual_hosted_style_request(false)
             .build()
             .context("Failed to create R2 storage client")?;
+        Ok(Arc::new(store))
+    }
 
+    fn default_local_root() -> PathBuf {
+        std::env::temp_dir().join("ozzydb-content")
+    }
+
+    fn new_with_root_and_remote(
+        local_root: PathBuf,
+        remote_store: Option<Arc<dyn ObjectStore>>,
+        prefix: impl Into<String>,
+    ) -> Result<Self> {
+        std::fs::create_dir_all(&local_root)?;
         Ok(Self {
-            store: Arc::new(store),
-            prefix: "content".to_string(),
+            local_root,
+            remote_store,
+            prefix: prefix.into(),
         })
     }
 
-    /// Create a new content storage with a custom prefix.
+    /// Create storage from server config (local-first, optional R2 mirror).
+    pub fn from_config(config: &Config) -> Result<Self> {
+        let remote_store = config
+            .r2
+            .as_ref()
+            .map(Self::build_remote_store)
+            .transpose()?;
+        Self::new_with_root_and_remote(
+            PathBuf::from(&config.local_storage_path),
+            remote_store,
+            "content",
+        )
+    }
+
+    /// Create storage with R2-only configuration (used by legacy tests).
+    pub fn new(config: &R2Config) -> Result<Self> {
+        let remote_store = Some(Self::build_remote_store(config)?);
+        Self::new_with_root_and_remote(Self::default_local_root(), remote_store, "content")
+    }
+
+    /// Create storage with custom prefix (used by integration tests).
     pub fn with_prefix(config: &R2Config, prefix: impl Into<String>) -> Result<Self> {
-        let mut storage = Self::new(config)?;
-        storage.prefix = prefix.into();
-        Ok(storage)
+        let remote_store = Some(Self::build_remote_store(config)?);
+        Self::new_with_root_and_remote(Self::default_local_root(), remote_store, prefix)
+    }
+
+    fn object_path(&self, content_hash: &str, extension: &str) -> ObjectPath {
+        let dir1 = &content_hash[0..2];
+        let dir2 = &content_hash[2..4];
+        ObjectPath::from(format!(
+            "{}/{}/{}/{}.{}",
+            self.prefix, dir1, dir2, content_hash, extension
+        ))
+    }
+
+    fn local_path(&self, content_hash: &str, extension: &str) -> PathBuf {
+        let dir1 = &content_hash[0..2];
+        let dir2 = &content_hash[2..4];
+        self.local_root
+            .join(&self.prefix)
+            .join(dir1)
+            .join(dir2)
+            .join(format!("{}.{}", content_hash, extension))
+    }
+
+    fn ensure_parent(path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        Ok(())
+    }
+
+    async fn upload_remote_best_effort(
+        &self,
+        content_hash: &str,
+        extension: &str,
+        content: &[u8],
+    ) -> Result<()> {
+        let Some(remote) = &self.remote_store else {
+            return Ok(());
+        };
+        let path = self.object_path(content_hash, extension);
+        if let Err(e) = remote
+            .put(&path, Bytes::copy_from_slice(content).into())
+            .await
+        {
+            eprintln!("Warning: failed to mirror content to R2: {}", e);
+        }
+        Ok(())
     }
 
     /// Check if content with the given hash exists.
     pub async fn exists(&self, content_hash: &str, extension: &str) -> Result<bool> {
-        let path = self.object_path(content_hash, extension);
-        match self.store.head(&path).await {
-            Ok(_) => Ok(true),
-            Err(object_store::Error::NotFound { .. }) => Ok(false),
-            Err(e) => Err(e).context("Failed to check if content exists"),
+        let local_path = self.local_path(content_hash, extension);
+        if local_path.exists() {
+            return Ok(true);
         }
+
+        if let Some(remote) = &self.remote_store {
+            let remote_path = self.object_path(content_hash, extension);
+            match remote.head(&remote_path).await {
+                Ok(_) => return Ok(true),
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(e) => return Err(e).context("Failed to check remote content existence"),
+            }
+        }
+
+        Ok(false)
     }
 
     /// Check which hashes from a list already exist.
@@ -70,68 +157,68 @@ impl ContentStorage {
     }
 
     /// Store content and return its hash.
-    /// If content with this hash already exists, this is a no-op.
     pub async fn store(&self, content: &[u8], extension: &str) -> Result<String> {
         let content_hash = hash::blake3_hash(content);
+        let local_path = self.local_path(&content_hash, extension);
 
-        // Check if already exists (deduplication)
-        if self.exists(&content_hash, extension).await? {
-            return Ok(content_hash);
+        if !local_path.exists() {
+            Self::ensure_parent(&local_path)?;
+            std::fs::write(&local_path, content)?;
         }
 
-        let path = self.object_path(&content_hash, extension);
-
-        self.store
-            .put(&path, Bytes::copy_from_slice(content).into())
-            .await
-            .context("Failed to store content in R2")?;
-
+        self.upload_remote_best_effort(&content_hash, extension, content)
+            .await?;
         Ok(content_hash)
     }
 
-    /// Store content from bytes, computing hash as we go.
+    /// Store content from bytes.
     pub async fn store_bytes(&self, content: Bytes, extension: &str) -> Result<String> {
-        let content_hash = hash::blake3_hash(&content);
-
-        // Check if already exists (deduplication)
-        if self.exists(&content_hash, extension).await? {
-            return Ok(content_hash);
-        }
-
-        let path = self.object_path(&content_hash, extension);
-
-        self.store
-            .put(&path, content.into())
-            .await
-            .context("Failed to store content in R2")?;
-
-        Ok(content_hash)
+        self.store(&content, extension).await
     }
 
     /// Retrieve content by hash.
-    /// Validates that the retrieved content's hash matches the expected hash.
+    /// If local copy is missing and remote is configured, attempts remote hydrate.
     pub async fn get(&self, content_hash: &str, extension: &str) -> Result<Bytes> {
-        let path = self.object_path(content_hash, extension);
-        let result = self
-            .store
-            .get(&path)
+        let local_path = self.local_path(content_hash, extension);
+        if local_path.exists() {
+            let content = std::fs::read(&local_path)?;
+            let actual_hash = hash::blake3_hash(&content);
+            if actual_hash != content_hash {
+                anyhow::bail!(
+                    "Content hash mismatch: expected {}, got {}. Local storage may be corrupted.",
+                    content_hash,
+                    actual_hash
+                );
+            }
+            return Ok(Bytes::from(content));
+        }
+
+        let Some(remote) = &self.remote_store else {
+            anyhow::bail!("Content not found: {}", content_hash);
+        };
+
+        let remote_path = self.object_path(content_hash, extension);
+        let result = remote
+            .get(&remote_path)
             .await
             .with_context(|| format!("Content not found: {}", content_hash))?;
-
         let content = result
             .bytes()
             .await
-            .context("Failed to read content from R2")?;
+            .context("Failed to read content from remote storage")?;
 
-        // Validate the content hash matches what was requested
         let actual_hash = hash::blake3_hash(&content);
         if actual_hash != content_hash {
             anyhow::bail!(
-                "Content hash mismatch: expected {}, got {}. Storage may be corrupted.",
+                "Content hash mismatch: expected {}, got {}. Remote storage may be corrupted.",
                 content_hash,
                 actual_hash
             );
         }
+
+        // Hydrate local cache for future reads.
+        Self::ensure_parent(&local_path)?;
+        std::fs::write(&local_path, &content)?;
 
         Ok(content)
     }
@@ -141,50 +228,72 @@ impl ContentStorage {
         &self,
         content_hash: &str,
         extension: &str,
-    ) -> Result<impl futures::Stream<Item = Result<Bytes, object_store::Error>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, object_store::Error>> + Send>>> {
+        let local_path = self.local_path(content_hash, extension);
+        if local_path.exists() {
+            let bytes = std::fs::read(&local_path).map(Bytes::from).map_err(|e| {
+                object_store::Error::Generic {
+                    store: "local",
+                    source: Box::new(e),
+                }
+            })?;
+            return Ok(Box::pin(futures::stream::once(async move { Ok(bytes) })));
+        }
+
+        let remote = self
+            .remote_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Content not found: {}", content_hash))?;
         let path = self.object_path(content_hash, extension);
-        let result = self
-            .store
+        let result = remote
             .get(&path)
             .await
             .with_context(|| format!("Content not found: {}", content_hash))?;
-
         Ok(result.into_stream())
-    }
-
-    /// Get the object path for a content hash.
-    fn object_path(&self, content_hash: &str, extension: &str) -> ObjectPath {
-        // Use first 4 chars for 2-level directory structure
-        let dir1 = &content_hash[0..2];
-        let dir2 = &content_hash[2..4];
-        ObjectPath::from(format!(
-            "{}/{}/{}/{}.{}",
-            self.prefix, dir1, dir2, content_hash, extension
-        ))
     }
 
     /// Delete content by hash.
     pub async fn delete(&self, content_hash: &str, extension: &str) -> Result<()> {
-        let path = self.object_path(content_hash, extension);
-        self.store
-            .delete(&path)
-            .await
-            .context("Failed to delete content from R2")?;
+        let local_path = self.local_path(content_hash, extension);
+        if local_path.exists() {
+            std::fs::remove_file(&local_path)?;
+        }
+
+        if let Some(remote) = &self.remote_store {
+            let path = self.object_path(content_hash, extension);
+            match remote.delete(&path).await {
+                Ok(()) => {}
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(e) => return Err(e).context("Failed to delete content from remote storage"),
+            }
+        }
+
         Ok(())
     }
 
     /// List all content hashes with a given prefix (first 2 chars).
     pub async fn list_by_prefix(&self, hash_prefix: &str) -> Result<Vec<String>> {
-        let path = ObjectPath::from(format!("{}/{}", self.prefix, hash_prefix));
-
+        let root = self.local_root.join(&self.prefix).join(hash_prefix);
         let mut hashes = Vec::new();
-        let mut list_stream = self.store.list(Some(&path));
 
-        while let Some(meta) = list_stream.try_next().await? {
-            // Extract hash from path like "content/ab/cd/abcd1234.parquet"
-            if let Some(filename) = meta.location.filename() {
-                if let Some(hash) = filename.split('.').next() {
-                    hashes.push(hash.to_string());
+        if !root.exists() {
+            return Ok(hashes);
+        }
+
+        for level2 in std::fs::read_dir(&root)? {
+            let level2 = level2?;
+            if !level2.file_type()?.is_dir() {
+                continue;
+            }
+            for file in std::fs::read_dir(level2.path())? {
+                let file = file?;
+                if !file.file_type()?.is_file() {
+                    continue;
+                }
+                if let Some(name) = file.file_name().to_str() {
+                    if let Some(hash) = name.split('.').next() {
+                        hashes.push(hash.to_string());
+                    }
                 }
             }
         }
@@ -198,11 +307,34 @@ impl ContentStorage {
         content_hash: &str,
         extension: &str,
     ) -> Result<object_store::ObjectMeta> {
+        let local_path = self.local_path(content_hash, extension);
+        if local_path.exists() {
+            let metadata = std::fs::metadata(&local_path)?;
+            let last_modified = metadata
+                .modified()
+                .ok()
+                .map(chrono::DateTime::<chrono::Utc>::from)
+                .unwrap_or_else(chrono::Utc::now);
+
+            return Ok(object_store::ObjectMeta {
+                location: self.object_path(content_hash, extension),
+                last_modified,
+                size: metadata.len() as usize,
+                e_tag: None,
+                version: None,
+            });
+        }
+
+        let remote = self
+            .remote_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Content not found: {}", content_hash))?;
         let path = self.object_path(content_hash, extension);
-        self.store
+        let meta = remote
             .head(&path)
             .await
-            .with_context(|| format!("Content not found: {}", content_hash))
+            .with_context(|| format!("Content not found: {}", content_hash))?;
+        Ok(meta)
     }
 }
 
@@ -210,7 +342,6 @@ impl ContentStorage {
 mod tests {
     #[test]
     fn test_object_path() {
-        // We can't easily test the full storage without R2, but we can test path generation
         let hash = "abcd1234567890abcd1234567890abcd1234567890abcd1234567890abcd1234";
         let dir1 = &hash[0..2];
         let dir2 = &hash[2..4];

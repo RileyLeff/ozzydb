@@ -116,6 +116,38 @@ Evidence:
 
 At review time, explicit tests for cache invalidation on transform code changes, deterministic hash stability in end-to-end flow, and negative schema-mismatch endpoint creation were not yet present.
 
+## Follow-up Review (Phase 2 Compliance Recheck)
+
+1. High: Authenticated pull/fetch paths dropped bearer auth in shared Rust client.
+Evidence:
+`crates/ozzy-cli/src/commands/pull.rs:113`, `crates/ozzy-cli/src/commands/fetch.rs:248`, `crates/ozzy-core/src/registry/client.rs:393`, `crates/ozzy-core/src/registry/client.rs:426`, `crates/ozzy-core/src/registry/client.rs:461`, `crates/ozzy-core/src/registry/client.rs:492`
+
+Private/org pulls and endpoint fetches were built with token-bearing clients, but several read methods in `RegistryClient` did not attach `Authorization`, causing avoidable auth failures.
+
+2. High: Scoped token behavior was out of spec and allowed privilege escalation.
+Evidence:
+`ozzydb-architecture_draft_1.md:1431`, `ozzydb-architecture_draft_1.md:1443`, `crates/ozzy-server/src/auth/middleware.rs:28`, `crates/ozzy-server/src/api/v1/auth.rs:111`
+
+Middleware only recognized bare `read`/`write` scopes (not `read:owner/project` style), and token creation accepted arbitrary requested scopes under `AuthUser`, enabling a read token holder to mint stronger tokens.
+
+3. Medium: Collaboration model remained owner-only in practice.
+Evidence:
+`ozzydb-architecture_draft_1.md:1857`, `ozzydb-architecture_draft_1.md:1065`, `crates/ozzy-server/src/api/v1/projects.rs:41`, `crates/ozzy-server/src/api/v1/push_pull.rs:52`
+
+No collaborator persistence/routes existed, and private/org access checks only admitted owners.
+
+4. Medium: Deduplicated push path could drop schema metadata in commit rows.
+Evidence:
+`crates/ozzy-server/src/api/v1/push_pull.rs:223`, `crates/ozzy-server/src/db/queries.rs:188`
+
+When parquet blobs were skipped due to deduplication, extracted schema JSON was absent and commit inserts fell back to `{}` schema payloads.
+
+5. Medium: Storage deployment model was not aligned with phase-2 NVMe-primary goal.
+Evidence:
+`ozzydb-architecture_draft_1.md:1879`, `crates/ozzy-server/src/config.rs:26`, `crates/ozzy-server/src/storage/content.rs:1`
+
+Server storage required R2 configuration and lacked a local-filesystem primary mode with optional R2 redundancy.
+
 ## Validation Performed
 
 1. `cargo test --workspace` passed.

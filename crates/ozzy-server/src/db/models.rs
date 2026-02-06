@@ -97,6 +97,24 @@ pub struct DbRef {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Project collaborator record.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ProjectCollaborator {
+    pub project_id: Uuid,
+    pub user_id: Uuid,
+    pub permission: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Project collaborator joined with username.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ProjectCollaboratorWithUser {
+    pub user_id: Uuid,
+    pub username: String,
+    pub permission: String,
+    pub created_at: DateTime<Utc>,
+}
+
 /// API token record.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct ApiToken {

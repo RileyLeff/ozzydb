@@ -179,6 +179,81 @@ impl Database {
         Ok(projects)
     }
 
+    /// Add or update a collaborator on a project.
+    pub async fn upsert_project_collaborator(
+        &self,
+        project_id: Uuid,
+        user_id: Uuid,
+        permission: &str,
+    ) -> Result<ProjectCollaborator> {
+        let collaborator = sqlx::query_as::<_, ProjectCollaborator>(
+            r#"
+            INSERT INTO project_collaborators (project_id, user_id, permission)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (project_id, user_id) DO UPDATE SET
+                permission = EXCLUDED.permission
+            RETURNING project_id, user_id, permission, created_at
+            "#,
+        )
+        .bind(project_id)
+        .bind(user_id)
+        .bind(permission)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(collaborator)
+    }
+
+    /// Remove a collaborator from a project.
+    pub async fn remove_project_collaborator(
+        &self,
+        project_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool> {
+        let result =
+            sqlx::query("DELETE FROM project_collaborators WHERE project_id = $1 AND user_id = $2")
+                .bind(project_id)
+                .bind(user_id)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Get a collaborator permission entry.
+    pub async fn get_project_collaborator(
+        &self,
+        project_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<ProjectCollaborator>> {
+        let collaborator = sqlx::query_as::<_, ProjectCollaborator>(
+            "SELECT project_id, user_id, permission, created_at FROM project_collaborators WHERE project_id = $1 AND user_id = $2"
+        )
+        .bind(project_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(collaborator)
+    }
+
+    /// List collaborators for a project.
+    pub async fn list_project_collaborators(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<ProjectCollaboratorWithUser>> {
+        let collaborators = sqlx::query_as::<_, ProjectCollaboratorWithUser>(
+            r#"
+            SELECT c.user_id, u.username, c.permission, c.created_at
+            FROM project_collaborators c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.project_id = $1
+            ORDER BY u.username
+            "#,
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(collaborators)
+    }
+
     // ========================================================================
     // Commit Operations
     // ========================================================================
@@ -341,6 +416,26 @@ impl Database {
                 .fetch_all(&self.pool)
                 .await?;
         Ok(sources)
+    }
+
+    /// Get an existing non-empty schema JSON by content hash.
+    pub async fn get_data_schema_by_hash(
+        &self,
+        content_hash: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let schema = sqlx::query_scalar::<_, serde_json::Value>(
+            r#"
+            SELECT schema_json
+            FROM data_sources
+            WHERE content_hash = $1
+              AND schema_json <> '{}'::jsonb
+            LIMIT 1
+            "#,
+        )
+        .bind(content_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(schema)
     }
 
     /// Get transforms for a commit.

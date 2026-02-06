@@ -440,3 +440,109 @@ async fn test_content_deduplication() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_project_collaborator_operations() -> Result<()> {
+    if should_skip_db_tests() {
+        eprintln!("Skipping DB tests - DATABASE_URL not set");
+        return Ok(());
+    }
+
+    let db = get_test_db().await.unwrap();
+
+    let owner_github_id = rand::random::<i64>().abs();
+    let owner_name = format!("collab_owner_{}", owner_github_id);
+    let owner = db
+        .upsert_user_from_github(owner_github_id, &owner_name, None, None)
+        .await?;
+
+    let collab_github_id = rand::random::<i64>().abs();
+    let collab_name = format!("collab_user_{}", collab_github_id);
+    let collaborator = db
+        .upsert_user_from_github(collab_github_id, &collab_name, None, None)
+        .await?;
+
+    let slug = format!("collab-test-{}", Uuid::new_v4());
+    let project = db.create_project(owner.id, &slug, None, "private").await?;
+
+    db.upsert_project_collaborator(project.id, collaborator.id, "write")
+        .await?;
+    let fetched = db
+        .get_project_collaborator(project.id, collaborator.id)
+        .await?
+        .expect("collaborator should exist");
+    assert_eq!(fetched.permission, "write");
+
+    let all = db.list_project_collaborators(project.id).await?;
+    assert!(all.iter().any(|c| c.user_id == collaborator.id));
+
+    let removed = db
+        .remove_project_collaborator(project.id, collaborator.id)
+        .await?;
+    assert!(removed);
+    let missing = db
+        .get_project_collaborator(project.id, collaborator.id)
+        .await?;
+    assert!(missing.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_lookup_data_schema_by_hash() -> Result<()> {
+    if should_skip_db_tests() {
+        eprintln!("Skipping DB tests - DATABASE_URL not set");
+        return Ok(());
+    }
+
+    let db = get_test_db().await.unwrap();
+
+    let github_id = rand::random::<i64>().abs();
+    let username = format!("schema_lookup_{}", github_id);
+    let user = db
+        .upsert_user_from_github(github_id, &username, None, None)
+        .await?;
+    let slug = format!("schema-lookup-{}", Uuid::new_v4());
+    let project = db.create_project(user.id, &slug, None, "private").await?;
+
+    let mut data_sources = std::collections::BTreeMap::new();
+    let content_hash = format!("{:064x}", rand::random::<u64>());
+    data_sources.insert(
+        "raw".to_string(),
+        ozzy_core::project::DataSource {
+            name: "raw".to_string(),
+            path: "data/raw.parquet".to_string(),
+            hash: content_hash.clone(),
+            schema_hash: "schemahash".to_string(),
+            row_count: Some(10),
+            byte_size: Some(100),
+        },
+    );
+
+    let commit = ozzy_core::project::Commit {
+        hash: format!("{:064x}", rand::random::<u64>()),
+        parent_hashes: vec![],
+        author: "test".to_string(),
+        message: "schema commit".to_string(),
+        timestamp: chrono::Utc::now(),
+        data_sources,
+        transforms: Default::default(),
+        endpoints: Default::default(),
+    };
+
+    let mut schemas = std::collections::HashMap::new();
+    schemas.insert(
+        content_hash.clone(),
+        serde_json::json!({"fields": [{"name": "x", "type": "INT64"}]}),
+    );
+    db.create_commit(project.id, &commit, Some(user.id), &schemas)
+        .await?;
+
+    let found = db
+        .get_data_schema_by_hash(&content_hash)
+        .await?
+        .expect("schema should exist");
+    assert!(found.get("fields").is_some());
+
+    Ok(())
+}

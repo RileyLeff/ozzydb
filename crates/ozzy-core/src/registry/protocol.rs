@@ -102,6 +102,21 @@ pub struct CreateProjectRequest {
     pub visibility: Option<String>,
 }
 
+/// Add/update collaborator request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddCollaboratorRequest {
+    pub username: String,
+    pub permission: String, // read|write|admin
+}
+
+/// Collaborator entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollaboratorInfo {
+    pub username: String,
+    pub permission: String,
+    pub added_at: DateTime<Utc>,
+}
+
 /// Ref information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefInfo {

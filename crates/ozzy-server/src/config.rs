@@ -23,8 +23,11 @@ pub struct Config {
     /// Base URL for this server (for OAuth callbacks)
     pub base_url: String,
 
-    /// R2/S3 configuration (required)
-    pub r2: R2Config,
+    /// Local filesystem storage root (NVMe primary).
+    pub local_storage_path: String,
+
+    /// Optional R2/S3 redundancy backend.
+    pub r2: Option<R2Config>,
 
     /// Maximum tar archive size in bytes (default: 1GB)
     pub max_tar_size_bytes: u64,
@@ -70,9 +73,10 @@ impl Config {
                 .context("GITHUB_CLIENT_ID environment variable required")?,
             github_client_secret: std::env::var("GITHUB_CLIENT_SECRET")
                 .context("GITHUB_CLIENT_SECRET environment variable required")?,
-            base_url: std::env::var("BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:3000".into()),
-            r2: R2Config::from_env()?,
+            base_url: std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3000".into()),
+            local_storage_path: std::env::var("LOCAL_STORAGE_PATH")
+                .unwrap_or_else(|_| "/tmp/ozzydb-content".into()),
+            r2: R2Config::from_env_optional(),
             max_tar_size_bytes: std::env::var("MAX_TAR_SIZE_BYTES")
                 .unwrap_or_else(|_| "1073741824".into()) // 1GB default
                 .parse()
@@ -98,6 +102,23 @@ impl R2Config {
                 .context("R2_ACCESS_KEY_ID environment variable required")?,
             secret_access_key: std::env::var("R2_SECRET_ACCESS_KEY")
                 .context("R2_SECRET_ACCESS_KEY environment variable required")?,
+            region: std::env::var("R2_REGION").unwrap_or_else(|_| "auto".into()),
+        })
+    }
+
+    /// Load optional R2 configuration.
+    /// Returns None when required R2 credentials are not all present.
+    pub fn from_env_optional() -> Option<Self> {
+        let endpoint = std::env::var("R2_ENDPOINT").ok()?;
+        let bucket = std::env::var("R2_BUCKET").ok()?;
+        let access_key_id = std::env::var("R2_ACCESS_KEY_ID").ok()?;
+        let secret_access_key = std::env::var("R2_SECRET_ACCESS_KEY").ok()?;
+
+        Some(Self {
+            endpoint,
+            bucket,
+            access_key_id,
+            secret_access_key,
             region: std::env::var("R2_REGION").unwrap_or_else(|_| "auto".into()),
         })
     }

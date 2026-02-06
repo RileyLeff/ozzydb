@@ -1,19 +1,22 @@
 //! Authentication API endpoints.
 
 use axum::{
+    Json, Router,
     extract::State,
     routing::{get, post},
-    Json, Router,
 };
 use ozzy_core::registry::protocol::{
-    AuthResponse, CreateTokenRequest, CreateTokenResponse, DeviceCodeResponse,
-    TokenInfo, UserInfo,
+    AuthResponse, CreateTokenRequest, CreateTokenResponse, DeviceCodeResponse, TokenInfo, UserInfo,
 };
 use serde::Deserialize;
 
 use crate::{
-    auth::{github, middleware::AuthUser, tokens},
     AppState,
+    auth::{
+        github,
+        middleware::{AuthUser, WriteAuthUser, can_delegate_scopes},
+        tokens,
+    },
 };
 
 pub fn router() -> Router<AppState> {
@@ -60,7 +63,7 @@ async fn github_poll(
                 token_type: None,
                 user: None,
                 pending: true,
-            }))
+            }));
         }
     };
 
@@ -89,7 +92,7 @@ async fn github_poll(
             "cli-session",
             &token_hash,
             token_prefix,
-            &["read".to_string(), "write".to_string()],
+            &["owner".to_string()],
             Some(chrono::Utc::now() + chrono::Duration::days(90)),
         )
         .await?;
@@ -109,10 +112,19 @@ async fn github_poll(
 
 /// Create a new API token.
 async fn create_token(
-    AuthUser(user): AuthUser,
+    WriteAuthUser { user, scopes }: WriteAuthUser,
     State(state): State<AppState>,
     Json(req): Json<CreateTokenRequest>,
 ) -> Result<Json<CreateTokenResponse>, ApiError> {
+    if req.scopes.is_empty() {
+        return Err(ApiError::bad_request("At least one scope is required"));
+    }
+    if !can_delegate_scopes(&scopes, &req.scopes) {
+        return Err(ApiError::forbidden(
+            "Cannot grant scopes you do not already have",
+        ));
+    }
+
     let (plaintext_token, token_hash) = tokens::generate_api_token();
     let token_prefix = &plaintext_token[..12.min(plaintext_token.len())];
 
@@ -144,7 +156,7 @@ async fn create_token(
 
 /// List user's API tokens.
 async fn list_tokens(
-    AuthUser(user): AuthUser,
+    AuthUser { user, .. }: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<TokenInfo>>, ApiError> {
     let tokens = state.db.list_user_tokens(user.id).await?;
@@ -166,7 +178,7 @@ async fn list_tokens(
 
 /// Delete an API token.
 async fn delete_token(
-    AuthUser(user): AuthUser,
+    AuthUser { user, .. }: AuthUser,
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Result<Json<()>, ApiError> {
@@ -175,7 +187,7 @@ async fn delete_token(
 }
 
 /// Get current user info.
-async fn get_me(AuthUser(user): AuthUser) -> Json<UserInfo> {
+async fn get_me(AuthUser { user, .. }: AuthUser) -> Json<UserInfo> {
     Json(UserInfo {
         id: user.id,
         username: user.username,
@@ -228,11 +240,17 @@ impl From<anyhow::Error> for ApiError {
             Self::NotFound(err.to_string())
         } else if msg.contains("unauthorized") || msg.contains("invalid token") {
             Self::Unauthorized(err.to_string())
-        } else if msg.contains("forbidden") || msg.contains("cannot push") || msg.contains("not allowed") {
+        } else if msg.contains("forbidden")
+            || msg.contains("cannot push")
+            || msg.contains("not allowed")
+        {
             Self::Forbidden(err.to_string())
         } else if msg.contains("already exists") || msg.contains("conflict") {
             Self::Conflict(err.to_string())
-        } else if msg.contains("invalid") || msg.contains("missing") || msg.contains("path traversal") {
+        } else if msg.contains("invalid")
+            || msg.contains("missing")
+            || msg.contains("path traversal")
+        {
             Self::BadRequest(err.to_string())
         } else {
             Self::Internal(err)
@@ -271,7 +289,10 @@ impl axum::response::IntoResponse for ApiError {
             ApiError::Internal(err) => {
                 // Log internal errors but don't expose details to clients
                 tracing::error!("Internal error: {:?}", err);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
             }
         };
 

@@ -4,10 +4,10 @@
 
 use anyhow::Result;
 use axum::Router;
-use ozzy_server::{api, config::Config, db::Database, storage::ContentStorage, AppState};
+use axum::http::{HeaderValue, Method};
+use ozzy_server::{AppState, api, config::Config, db::Database, storage::ContentStorage};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
-use axum::http::{HeaderValue, Method};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -39,13 +39,14 @@ async fn main() -> Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("Database migrations complete");
 
-    // Initialize R2 storage
-    let storage = ContentStorage::new(&config.r2)?;
-    tracing::info!(
-        "R2 storage initialized: {}/{}",
-        config.r2.endpoint,
-        config.r2.bucket
-    );
+    // Initialize storage (local NVMe primary, optional R2 redundancy)
+    let storage = ContentStorage::from_config(&config)?;
+    tracing::info!("Local storage initialized at {}", config.local_storage_path);
+    if let Some(r2) = &config.r2 {
+        tracing::info!("R2 redundancy enabled: {}/{}", r2.endpoint, r2.bucket);
+    } else {
+        tracing::info!("R2 redundancy disabled");
+    }
 
     // Build application state
     let state = AppState {
@@ -65,7 +66,8 @@ async fn main() -> Result<()> {
             if config.cors_origins == "*" {
                 cors.allow_origin(Any)
             } else {
-                let origins: Vec<HeaderValue> = config.cors_origins
+                let origins: Vec<HeaderValue> = config
+                    .cors_origins
                     .split(',')
                     .filter_map(|s| s.trim().parse().ok())
                     .collect();

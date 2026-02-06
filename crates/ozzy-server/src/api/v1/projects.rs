@@ -3,17 +3,18 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use ozzy_core::registry::protocol::{
-    CommitInfo, CreateProjectRequest, ListRefsResponse, ProjectInfo, RefInfo,
+    AddCollaboratorRequest, CollaboratorInfo, CommitInfo, CreateProjectRequest, ListRefsResponse,
+    ProjectInfo, RefInfo,
 };
 use serde::Deserialize;
 
 use super::auth::ApiError;
 use crate::{
     AppState,
-    auth::middleware::{AuthUser, MaybeAuthUser},
+    auth::middleware::{AuthUser, MaybeAuthUser, ScopeAction, WriteAuthUser, has_project_scope},
 };
 
 /// Pagination query parameters.
@@ -36,36 +37,75 @@ pub fn router() -> Router<AppState> {
         .route("/{owner}/{project}", get(get_project))
         .route("/{owner}/{project}/commits", get(list_commits))
         .route("/{owner}/{project}/refs", get(list_refs))
+        .route("/{owner}/{project}/collaborators", get(list_collaborators))
+        .route("/{owner}/{project}/collaborators", post(add_collaborator))
+        .route(
+            "/{owner}/{project}/collaborators/{username}",
+            delete(remove_collaborator),
+        )
 }
 
-fn enforce_project_access(
+fn collaborator_allows(permission: &str, need: ScopeAction) -> bool {
+    match need {
+        ScopeAction::Read => matches!(permission, "read" | "write" | "admin"),
+        ScopeAction::Write => matches!(permission, "write" | "admin"),
+        ScopeAction::Admin => permission == "admin",
+        ScopeAction::Owner => false,
+    }
+}
+
+async fn user_has_project_permission(
+    state: &AppState,
     project: &crate::db::Project,
-    user: &Option<crate::db::User>,
+    user_id: uuid::Uuid,
+    need: ScopeAction,
+) -> Result<bool, ApiError> {
+    if user_id == project.owner_user_id {
+        return Ok(true);
+    }
+
+    let collaborator = state
+        .db
+        .get_project_collaborator(project.id, user_id)
+        .await?;
+    Ok(collaborator
+        .as_ref()
+        .map(|c| collaborator_allows(&c.permission, need))
+        .unwrap_or(false))
+}
+
+async fn enforce_read_access(
+    state: &AppState,
+    project: &crate::db::Project,
+    owner: &str,
+    project_slug: &str,
+    auth: &MaybeAuthUser,
 ) -> Result<(), ApiError> {
-    match project.visibility.as_str() {
-        "public" => Ok(()),
-        "org" => match user {
-            Some(u) if u.id == project.owner_user_id => Ok(()),
-            Some(_) => Err(ApiError::forbidden(
-                "Organization visibility is not yet supported for non-owners",
-            )),
-            None => Err(ApiError::unauthorized(
-                "Authentication required for org-visible projects",
-            )),
-        },
-        _ => match user {
-            Some(u) if u.id == project.owner_user_id => Ok(()),
-            Some(_) => Err(ApiError::forbidden("You don't have access to this project")),
-            None => Err(ApiError::unauthorized(
-                "Authentication required for private projects",
-            )),
-        },
+    // Public projects are readable without authentication.
+    if project.visibility == "public" {
+        return Ok(());
+    }
+
+    let user = auth.user.as_ref().ok_or_else(|| {
+        ApiError::unauthorized("Authentication required for private/org projects")
+    })?;
+
+    if !has_project_scope(&auth.scopes, ScopeAction::Read, owner, project_slug) {
+        return Err(ApiError::forbidden(
+            "Token lacks read scope for this project",
+        ));
+    }
+
+    if user_has_project_permission(state, project, user.id, ScopeAction::Read).await? {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("You don't have access to this project"))
     }
 }
 
 /// List projects owned by the authenticated user.
 async fn list_projects(
-    AuthUser(user): AuthUser,
+    AuthUser { user, .. }: AuthUser,
     State(state): State<AppState>,
     Query(pagination): Query<PaginationParams>,
 ) -> Result<Json<Vec<ProjectInfo>>, ApiError> {
@@ -117,7 +157,7 @@ fn validate_slug(slug: &str) -> Result<(), ApiError> {
 
 /// Create a new project.
 async fn create_project(
-    AuthUser(user): AuthUser,
+    WriteAuthUser { user, scopes }: WriteAuthUser,
     State(state): State<AppState>,
     Json(req): Json<CreateProjectRequest>,
 ) -> Result<Json<ProjectInfo>, ApiError> {
@@ -129,6 +169,11 @@ async fn create_project(
     }
 
     validate_slug(&req.slug)?;
+    if !has_project_scope(&scopes, ScopeAction::Write, &user.username, &req.slug) {
+        return Err(ApiError::forbidden(
+            "Token lacks write scope for this project slug",
+        ));
+    }
 
     let project = state
         .db
@@ -147,9 +192,9 @@ async fn create_project(
     }))
 }
 
-/// Get project info (respects visibility: public projects are open, private require auth + ownership).
+/// Get project info.
 async fn get_project(
-    MaybeAuthUser(user): MaybeAuthUser,
+    auth: MaybeAuthUser,
     State(state): State<AppState>,
     Path((owner, project_slug)): Path<(String, String)>,
 ) -> Result<Json<ProjectInfo>, ApiError> {
@@ -159,7 +204,7 @@ async fn get_project(
         .await?
         .ok_or_else(|| ApiError::NotFound("Project not found".to_string()))?;
 
-    enforce_project_access(&project, &user)?;
+    enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
     Ok(Json(ProjectInfo {
         id: project.id,
@@ -175,7 +220,7 @@ async fn get_project(
 
 /// List commit history for a project.
 async fn list_commits(
-    MaybeAuthUser(user): MaybeAuthUser,
+    auth: MaybeAuthUser,
     State(state): State<AppState>,
     Path((owner, project_slug)): Path<(String, String)>,
     Query(pagination): Query<PaginationParams>,
@@ -186,7 +231,7 @@ async fn list_commits(
         .await?
         .ok_or_else(|| ApiError::NotFound("Project not found".to_string()))?;
 
-    enforce_project_access(&project, &user)?;
+    enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
     let commits = state
         .db
@@ -209,7 +254,7 @@ async fn list_commits(
 
 /// List refs (branches and tags) for a project.
 async fn list_refs(
-    MaybeAuthUser(user): MaybeAuthUser,
+    auth: MaybeAuthUser,
     State(state): State<AppState>,
     Path((owner, project_slug)): Path<(String, String)>,
 ) -> Result<Json<ListRefsResponse>, ApiError> {
@@ -219,11 +264,11 @@ async fn list_refs(
         .await?
         .ok_or_else(|| ApiError::NotFound("Project not found".to_string()))?;
 
-    enforce_project_access(&project, &user)?;
+    enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
     let refs = state.db.list_refs(project.id).await?;
 
-    // Look up commit hashes for each ref
+    // Look up commit hashes for each ref.
     let mut branches = Vec::new();
     let mut tags = Vec::new();
 
@@ -249,4 +294,132 @@ async fn list_refs(
     }
 
     Ok(Json(ListRefsResponse { branches, tags }))
+}
+
+/// List collaborators for a project.
+async fn list_collaborators(
+    auth: MaybeAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug)): Path<(String, String)>,
+) -> Result<Json<Vec<CollaboratorInfo>>, ApiError> {
+    let project = state
+        .db
+        .get_project(&owner, &project_slug)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("Project not found".to_string()))?;
+
+    enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
+
+    let collaborators = state.db.list_project_collaborators(project.id).await?;
+    let infos = collaborators
+        .into_iter()
+        .map(|c| CollaboratorInfo {
+            username: c.username,
+            permission: c.permission,
+            added_at: c.created_at,
+        })
+        .collect();
+
+    Ok(Json(infos))
+}
+
+/// Add or update a collaborator.
+async fn add_collaborator(
+    AuthUser { user, scopes }: AuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug)): Path<(String, String)>,
+    Json(req): Json<AddCollaboratorRequest>,
+) -> Result<Json<CollaboratorInfo>, ApiError> {
+    if !matches!(req.permission.as_str(), "read" | "write" | "admin") {
+        return Err(ApiError::bad_request(
+            "permission must be one of: read, write, admin",
+        ));
+    }
+
+    let project = state
+        .db
+        .get_project(&owner, &project_slug)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("Project not found".to_string()))?;
+
+    if !has_project_scope(&scopes, ScopeAction::Admin, &owner, &project_slug) {
+        return Err(ApiError::forbidden(
+            "Token lacks admin scope for this project",
+        ));
+    }
+
+    if !user_has_project_permission(&state, &project, user.id, ScopeAction::Admin).await? {
+        return Err(ApiError::forbidden(
+            "Only project admins can manage collaborators",
+        ));
+    }
+
+    let target_user = state
+        .db
+        .get_user_by_username(&req.username)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("Collaborator user not found".to_string()))?;
+
+    if target_user.id == project.owner_user_id {
+        return Err(ApiError::bad_request(
+            "Project owner does not need collaborator permissions",
+        ));
+    }
+
+    let collaborator = state
+        .db
+        .upsert_project_collaborator(project.id, target_user.id, &req.permission)
+        .await?;
+
+    Ok(Json(CollaboratorInfo {
+        username: req.username,
+        permission: collaborator.permission,
+        added_at: collaborator.created_at,
+    }))
+}
+
+/// Remove a collaborator.
+async fn remove_collaborator(
+    AuthUser { user, scopes }: AuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug, username)): Path<(String, String, String)>,
+) -> Result<Json<()>, ApiError> {
+    let project = state
+        .db
+        .get_project(&owner, &project_slug)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("Project not found".to_string()))?;
+
+    if !has_project_scope(&scopes, ScopeAction::Admin, &owner, &project_slug) {
+        return Err(ApiError::forbidden(
+            "Token lacks admin scope for this project",
+        ));
+    }
+
+    if !user_has_project_permission(&state, &project, user.id, ScopeAction::Admin).await? {
+        return Err(ApiError::forbidden(
+            "Only project admins can manage collaborators",
+        ));
+    }
+
+    let target_user = state
+        .db
+        .get_user_by_username(&username)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("Collaborator user not found".to_string()))?;
+
+    if target_user.id == project.owner_user_id {
+        return Err(ApiError::bad_request("Cannot remove the project owner"));
+    }
+
+    let removed = state
+        .db
+        .remove_project_collaborator(project.id, target_user.id)
+        .await?;
+
+    if !removed {
+        return Err(ApiError::NotFound("Collaborator not found".to_string()));
+    }
+
+    Ok(Json(()))
 }

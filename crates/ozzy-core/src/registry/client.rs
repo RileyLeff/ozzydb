@@ -204,12 +204,15 @@ impl RegistryClient {
 
     /// Get project info.
     pub async fn get_project(&self, owner: &str, slug: &str) -> Result<ProjectInfo> {
-        let response = self
+        let mut request = self
             .client
-            .get(format!("{}/api/v1/{}/{}", self.base_url, owner, slug))
-            .send()
-            .await
-            .context("Failed to get project")?;
+            .get(format!("{}/api/v1/{}/{}", self.base_url, owner, slug));
+
+        if let Some(auth) = self.auth_header() {
+            request = request.header("Authorization", auth);
+        }
+
+        let response = request.send().await.context("Failed to get project")?;
 
         if !response.status().is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -404,9 +407,12 @@ impl RegistryClient {
             url = format!("{}?ref={}", url, r);
         }
 
-        let response = self
-            .client
-            .get(&url)
+        let mut request = self.client.get(&url);
+        if let Some(auth) = self.auth_header() {
+            request = request.header("Authorization", auth);
+        }
+
+        let response = request
             .send()
             .await
             .context("Failed to get pull manifest")?;
@@ -434,12 +440,12 @@ impl RegistryClient {
             url = format!("{}?ref={}", url, r);
         }
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .context("Failed to pull")?;
+        let mut request = self.client.get(&url);
+        if let Some(auth) = self.auth_header() {
+            request = request.header("Authorization", auth);
+        }
+
+        let response = request.send().await.context("Failed to pull")?;
 
         if !response.status().is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -470,9 +476,12 @@ impl RegistryClient {
             self.base_url, owner, project, endpoint, ref_name
         );
 
-        let response = self
-            .client
-            .get(&url)
+        let mut request = self.client.get(&url);
+        if let Some(auth) = self.auth_header() {
+            request = request.header("Authorization", auth);
+        }
+
+        let response = request
             .send()
             .await
             .context("Failed to get endpoint manifest")?;
@@ -501,12 +510,12 @@ impl RegistryClient {
             self.base_url, owner, project, endpoint, ref_name
         );
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .context("Failed to fetch endpoint")?;
+        let mut request = self.client.get(&url);
+        if let Some(auth) = self.auth_header() {
+            request = request.header("Authorization", auth);
+        }
+
+        let response = request.send().await.context("Failed to fetch endpoint")?;
 
         if !response.status().is_success() {
             let text = response.text().await.unwrap_or_default();

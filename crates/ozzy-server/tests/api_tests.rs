@@ -17,8 +17,10 @@ use tower::ServiceExt;
 /// Build a test app with real DB + storage (returns None if credentials unavailable).
 async fn build_test_app() -> Option<Router> {
     let db_url = env::var("DATABASE_URL").ok()?;
-    let r2_endpoint = env::var("R2_ENDPOINT").ok()?;
-    let r2_bucket = env::var("R2_BUCKET").ok()?;
+    let r2_endpoint = env::var("R2_ENDPOINT").ok();
+    let r2_bucket = env::var("R2_BUCKET").ok();
+    let r2_access_key = env::var("R2_ACCESS_KEY_ID").ok();
+    let r2_secret = env::var("R2_SECRET_ACCESS_KEY").ok();
 
     let pool = PgPoolOptions::new()
         .max_connections(2)
@@ -28,6 +30,8 @@ async fn build_test_app() -> Option<Router> {
 
     sqlx::migrate!("./migrations").run(&pool).await.ok()?;
 
+    let local_storage_path = tempfile::tempdir().ok()?.into_path();
+
     let config = Config {
         bind_address: "127.0.0.1:0".to_string(),
         database_url: db_url,
@@ -35,19 +39,25 @@ async fn build_test_app() -> Option<Router> {
         github_client_id: "test_client_id".to_string(),
         github_client_secret: "test_client_secret".to_string(),
         base_url: "http://localhost:3000".to_string(),
-        r2: ozzy_server::config::R2Config {
-            endpoint: r2_endpoint,
-            bucket: r2_bucket,
-            access_key_id: env::var("R2_ACCESS_KEY_ID").unwrap_or_default(),
-            secret_access_key: env::var("R2_SECRET_ACCESS_KEY").unwrap_or_default(),
-            region: env::var("R2_REGION").unwrap_or_else(|_| "us-east-1".into()),
+        local_storage_path: local_storage_path.to_string_lossy().to_string(),
+        r2: match (r2_endpoint, r2_bucket, r2_access_key, r2_secret) {
+            (Some(endpoint), Some(bucket), Some(access_key_id), Some(secret_access_key)) => {
+                Some(ozzy_server::config::R2Config {
+                    endpoint,
+                    bucket,
+                    access_key_id,
+                    secret_access_key,
+                    region: env::var("R2_REGION").unwrap_or_else(|_| "us-east-1".into()),
+                })
+            }
+            _ => None,
         },
         max_tar_size_bytes: 1_073_741_824,
         max_upload_size_bytes: 104_857_600,
         cors_origins: "*".to_string(),
     };
 
-    let storage = ContentStorage::new(&config.r2).ok()?;
+    let storage = ContentStorage::from_config(&config).ok()?;
     let state = AppState {
         config: Arc::new(config),
         db: Database::new(pool),
@@ -259,6 +269,31 @@ async fn test_resolve_route_exists() {
         response.status() == StatusCode::NOT_FOUND
             || response.status() == StatusCode::INTERNAL_SERVER_ERROR,
         "Expected 404 or 500, got {}",
+        response.status()
+    );
+}
+
+#[tokio::test]
+async fn test_collaborators_route_exists() {
+    let Some(app) = build_test_app().await else {
+        return;
+    };
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/nobody/nonexistent/collaborators")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        response.status() == StatusCode::NOT_FOUND
+            || response.status() == StatusCode::UNAUTHORIZED
+            || response.status() == StatusCode::INTERNAL_SERVER_ERROR,
+        "Expected 404, 401, or 500, got {}",
         response.status()
     );
 }

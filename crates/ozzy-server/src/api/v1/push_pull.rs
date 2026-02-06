@@ -20,7 +20,7 @@ use std::path::{Component, Path as FsPath, PathBuf};
 use super::auth::ApiError;
 use crate::{
     AppState,
-    auth::middleware::{AuthUser, MaybeAuthUser, WriteAuthUser},
+    auth::middleware::{AuthUser, MaybeAuthUser, ScopeAction, WriteAuthUser, has_project_scope},
     db::Project,
 };
 
@@ -49,31 +49,82 @@ fn normalize_ref_name(ref_name: &str) -> &str {
 }
 
 /// Check if a user can access a project based on visibility.
-fn check_project_access(project: &Project, user: &Option<crate::db::User>) -> Result<(), ApiError> {
-    match project.visibility.as_str() {
-        "public" => Ok(()),
-        "org" => {
-            // Org membership model is not implemented yet; only the owner can access org projects.
-            match user {
-                Some(u) if u.id == project.owner_user_id => Ok(()),
-                Some(_) => Err(ApiError::forbidden(
-                    "Organization visibility is not yet supported for non-owners",
-                )),
-                None => Err(ApiError::unauthorized(
-                    "Authentication required for org-visible projects",
-                )),
-            }
-        }
-        _ => {
-            // Private project - require authentication and ownership
-            match user {
-                Some(u) if u.id == project.owner_user_id => Ok(()),
-                Some(_) => Err(ApiError::forbidden("You don't have access to this project")),
-                None => Err(ApiError::unauthorized(
-                    "Authentication required for private projects",
-                )),
-            }
-        }
+fn collaborator_allows(permission: &str, need: ScopeAction) -> bool {
+    match need {
+        ScopeAction::Read => matches!(permission, "read" | "write" | "admin"),
+        ScopeAction::Write => matches!(permission, "write" | "admin"),
+        ScopeAction::Admin => permission == "admin",
+        ScopeAction::Owner => false,
+    }
+}
+
+async fn user_has_project_permission(
+    state: &AppState,
+    project: &Project,
+    user_id: uuid::Uuid,
+    need: ScopeAction,
+) -> Result<bool, ApiError> {
+    if user_id == project.owner_user_id {
+        return Ok(true);
+    }
+    let collaborator = state
+        .db
+        .get_project_collaborator(project.id, user_id)
+        .await?;
+    Ok(collaborator
+        .as_ref()
+        .map(|c| collaborator_allows(&c.permission, need))
+        .unwrap_or(false))
+}
+
+async fn enforce_read_access(
+    state: &AppState,
+    project: &Project,
+    owner: &str,
+    project_slug: &str,
+    auth: &MaybeAuthUser,
+) -> Result<(), ApiError> {
+    if project.visibility == "public" {
+        return Ok(());
+    }
+
+    let user = auth.user.as_ref().ok_or_else(|| {
+        ApiError::unauthorized("Authentication required for private/org projects")
+    })?;
+
+    if !has_project_scope(&auth.scopes, ScopeAction::Read, owner, project_slug) {
+        return Err(ApiError::forbidden(
+            "Token lacks read scope for this project",
+        ));
+    }
+
+    if user_has_project_permission(state, project, user.id, ScopeAction::Read).await? {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("You don't have access to this project"))
+    }
+}
+
+async fn enforce_write_access(
+    state: &AppState,
+    project: &Project,
+    owner: &str,
+    project_slug: &str,
+    user: &crate::db::User,
+    scopes: &[String],
+) -> Result<(), ApiError> {
+    if !has_project_scope(scopes, ScopeAction::Write, owner, project_slug) {
+        return Err(ApiError::forbidden(
+            "Token lacks write scope for this project",
+        ));
+    }
+
+    if user_has_project_permission(state, project, user.id, ScopeAction::Write).await? {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(
+            "You don't have write access to this project",
+        ))
     }
 }
 
@@ -131,21 +182,31 @@ struct RefQuery {
 
 /// Push a commit with data and transforms.
 async fn push(
-    WriteAuthUser(user): WriteAuthUser,
+    WriteAuthUser { user, scopes }: WriteAuthUser,
     State(state): State<AppState>,
     Path((owner, project_slug)): Path<(String, String)>,
     mut multipart: Multipart,
 ) -> Result<Json<PushResponse>, ApiError> {
-    // Verify ownership
-    if owner != user.username {
-        return Err(anyhow::anyhow!("Cannot push to another user's project").into());
-    }
-
-    // Get or create project (upsert to avoid race on first push)
-    let project = state
-        .db
-        .get_or_create_project(user.id, &project_slug, "private")
-        .await?;
+    // Existing project: require project write permission. New project: only owner can create.
+    let project = if let Some(existing) = state.db.get_project(&owner, &project_slug).await? {
+        enforce_write_access(&state, &existing, &owner, &project_slug, &user, &scopes).await?;
+        existing
+    } else {
+        if owner != user.username {
+            return Err(ApiError::forbidden(
+                "Cannot create a project for another user",
+            ));
+        }
+        if !has_project_scope(&scopes, ScopeAction::Write, &owner, &project_slug) {
+            return Err(ApiError::forbidden(
+                "Token lacks write scope for this project",
+            ));
+        }
+        state
+            .db
+            .get_or_create_project(user.id, &project_slug, "private")
+            .await?
+    };
 
     let mut commit_json: Option<serde_json::Value> = None;
     let mut data_files: HashMap<String, Vec<u8>> = HashMap::new();
@@ -320,6 +381,22 @@ async fn push(
 
     let new_transform_count = transform_files.len();
 
+    // Ensure schema metadata is available for all committed data sources, including
+    // deduplicated blobs that may not have been uploaded in this push.
+    for ds in commit.data_sources.values() {
+        if data_schemas.contains_key(&ds.hash) {
+            continue;
+        }
+        if let Some(existing_schema) = state.db.get_data_schema_by_hash(&ds.hash).await? {
+            data_schemas.insert(ds.hash.clone(), existing_schema);
+        } else {
+            return Err(ApiError::bad_request(format!(
+                "Missing schema metadata for data source '{}' (hash {}). Re-upload the parquet file.",
+                ds.name, ds.hash
+            )));
+        }
+    }
+
     // Get the ref name from commit data or default to main, then normalize it
     let raw_ref_name = commit_data["ref"].as_str().unwrap_or("refs/heads/main");
     let ref_name = normalize_ref_name(raw_ref_name).to_string();
@@ -405,25 +482,17 @@ async fn push(
 /// Check which content hashes already exist (for deduplication).
 /// Requires ownership of the project to prevent probing for other users' content.
 async fn check_content(
-    AuthUser(user): AuthUser,
+    AuthUser { user, scopes }: AuthUser,
     State(state): State<AppState>,
     Path((owner, project_slug)): Path<(String, String)>,
     Json(req): Json<ContentCheckRequest>,
 ) -> Result<Json<ContentCheckResponse>, ApiError> {
-    // Verify ownership - only project owner can check content
-    if owner != user.username {
-        return Err(ApiError::forbidden(
-            "Can only check content for your own projects",
-        ));
-    }
-
-    // Verify project exists and user owns it
-    let project = state.db.get_project(&owner, &project_slug).await?;
-    match project {
-        Some(p) if p.owner_user_id == user.id => { /* OK */ }
-        Some(_) => return Err(ApiError::forbidden("You don't own this project")),
-        None => return Err(ApiError::not_found("Project not found")),
-    }
+    let project = state
+        .db
+        .get_project(&owner, &project_slug)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Project not found"))?;
+    enforce_write_access(&state, &project, &owner, &project_slug, &user, &scopes).await?;
 
     let mut missing_data = Vec::new();
     let mut missing_transforms = Vec::new();
@@ -450,7 +519,7 @@ async fn check_content(
 
 /// Pull manifest (metadata only, for selective pulls).
 async fn pull_manifest(
-    MaybeAuthUser(user): MaybeAuthUser,
+    auth: MaybeAuthUser,
     State(state): State<AppState>,
     Path((owner, project_slug)): Path<(String, String)>,
     Query(query): Query<RefQuery>,
@@ -461,7 +530,7 @@ async fn pull_manifest(
         .await?
         .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
 
-    check_project_access(&project, &user)?;
+    enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
     let ref_name = query.ref_name.as_deref().unwrap_or("main");
     let db_ref = state
@@ -509,7 +578,7 @@ async fn pull_manifest(
 
 /// Pull full project content as streaming tar.
 async fn pull(
-    MaybeAuthUser(user): MaybeAuthUser,
+    auth: MaybeAuthUser,
     State(state): State<AppState>,
     Path((owner, project_slug)): Path<(String, String)>,
     Query(query): Query<RefQuery>,
@@ -520,7 +589,7 @@ async fn pull(
         .await?
         .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
 
-    check_project_access(&project, &user)?;
+    enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
     let ref_name = query.ref_name.as_deref().unwrap_or("main");
     let db_ref = state
@@ -722,7 +791,7 @@ async fn pull(
 
 /// Fetch endpoint manifest.
 async fn fetch_endpoint_manifest(
-    MaybeAuthUser(user): MaybeAuthUser,
+    auth: MaybeAuthUser,
     State(state): State<AppState>,
     Path((owner, project_slug, endpoint_name, ref_name)): Path<(String, String, String, String)>,
 ) -> Result<Json<EndpointManifest>, ApiError> {
@@ -732,7 +801,7 @@ async fn fetch_endpoint_manifest(
         .await?
         .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
 
-    check_project_access(&project, &user)?;
+    enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
     let db_ref = state
         .db
@@ -785,7 +854,7 @@ async fn fetch_endpoint_manifest(
 
 /// Resolve endpoint metadata for an endpoint@ref without downloading content.
 async fn resolve_endpoint(
-    MaybeAuthUser(user): MaybeAuthUser,
+    auth: MaybeAuthUser,
     State(state): State<AppState>,
     Path((owner, project_slug, endpoint_name, ref_name)): Path<(String, String, String, String)>,
 ) -> Result<Json<ResolveEndpointResponse>, ApiError> {
@@ -795,7 +864,7 @@ async fn resolve_endpoint(
         .await?
         .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
 
-    check_project_access(&project, &user)?;
+    enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
     let db_ref = state
         .db
@@ -827,7 +896,7 @@ async fn resolve_endpoint(
 
 /// Fetch endpoint content as streaming tar.
 async fn fetch_endpoint(
-    MaybeAuthUser(user): MaybeAuthUser,
+    auth: MaybeAuthUser,
     State(state): State<AppState>,
     Path((owner, project_slug, endpoint_name, ref_name)): Path<(String, String, String, String)>,
 ) -> Result<Response, ApiError> {
@@ -837,7 +906,7 @@ async fn fetch_endpoint(
         .await?
         .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
 
-    check_project_access(&project, &user)?;
+    enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
     let db_ref = state
         .db
