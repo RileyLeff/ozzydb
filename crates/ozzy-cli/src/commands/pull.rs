@@ -52,6 +52,23 @@ fn checked_destination(base: &Path, canonical_base: &Path, rel: &Path) -> Result
     let dest = base.join(rel);
 
     if let Some(parent) = dest.parent() {
+        // Walk up to the nearest existing ancestor and validate it's within the
+        // base BEFORE creating any directories, to prevent symlink traversal.
+        let mut ancestor = parent.to_path_buf();
+        while !ancestor.exists() {
+            ancestor = ancestor
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("Invalid extraction path: {}", rel.display()))?
+                .to_path_buf();
+        }
+        let canonical_ancestor = ancestor.canonicalize()?;
+        if !canonical_ancestor.starts_with(canonical_base) {
+            anyhow::bail!(
+                "Archive extraction escaped destination root: {}",
+                rel.display()
+            );
+        }
+
         std::fs::create_dir_all(parent)?;
         let canonical_parent = parent.canonicalize()?;
         if !canonical_parent.starts_with(canonical_base) {
@@ -136,10 +153,7 @@ fn is_workspace_dirty_since_last_commit(project: &Project) -> Result<bool> {
         .into_values()
         .map(|ds| (ds.path, ds.hash))
         .collect();
-    let current_transform_hashes: BTreeMap<String, String> = commit::collect_transforms(project)?
-        .into_values()
-        .map(|transform| (transform.source_path, transform.hash))
-        .collect();
+    let current_transforms = commit::collect_transforms(project)?;
 
     let last_commit = match project.latest_commit() {
         Ok(commit) => commit,
@@ -153,16 +167,10 @@ fn is_workspace_dirty_since_last_commit(project: &Project) -> Result<bool> {
             .into_values()
             .map(|ds| (ds.path, ds.hash))
             .collect();
-        let committed_transform_hashes: BTreeMap<String, String> = last_commit
-            .transforms
-            .into_values()
-            .map(|transform| (transform.source_path, transform.hash))
-            .collect();
-
         Ok(current_data_hashes != committed_data_hashes
-            || current_transform_hashes != committed_transform_hashes)
+            || current_transforms != last_commit.transforms)
     } else {
-        Ok(!current_data_hashes.is_empty() || !current_transform_hashes.is_empty())
+        Ok(!current_data_hashes.is_empty() || !current_transforms.is_empty())
     }
 }
 

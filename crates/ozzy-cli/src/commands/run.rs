@@ -112,7 +112,7 @@ pub async fn execute(
     println!();
 
     // Build execution plan (topological order)
-    let execution_order = build_execution_order(&endpoint);
+    let execution_order = build_execution_order(&endpoint)?;
 
     println!("Execution plan:");
     for node_name in &execution_order {
@@ -372,7 +372,7 @@ fn find_endpoint(project: &Project, name: &str) -> Result<Endpoint> {
     anyhow::bail!("Endpoint '{}' not found", name);
 }
 
-fn build_execution_order(endpoint: &Endpoint) -> Vec<String> {
+fn build_execution_order(endpoint: &Endpoint) -> anyhow::Result<Vec<String>> {
     use std::collections::{HashSet, VecDeque};
 
     // Build dependency graph from edges
@@ -428,11 +428,10 @@ fn build_execution_order(endpoint: &Endpoint) -> Vec<String> {
 
     // If we didn't process all nodes, there's a cycle
     if order.len() != endpoint.nodes.len() {
-        eprintln!("Warning: Cycle detected in pipeline DAG, falling back to insertion order");
-        return endpoint.nodes.iter().map(|n| n.node_name.clone()).collect();
+        anyhow::bail!("Cycle detected in pipeline DAG. Cannot determine execution order.");
     }
 
-    order
+    Ok(order)
 }
 
 /// Validate output schema against transform's declared output_schema.

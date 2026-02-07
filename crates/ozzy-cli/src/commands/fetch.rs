@@ -169,6 +169,23 @@ fn checked_destination(base: &Path, canonical_base: &Path, rel: &Path) -> Result
     let dest = base.join(rel);
 
     if let Some(parent) = dest.parent() {
+        // Walk up to the nearest existing ancestor and validate it's within the
+        // base BEFORE creating any directories, to prevent symlink traversal.
+        let mut ancestor = parent.to_path_buf();
+        while !ancestor.exists() {
+            ancestor = ancestor
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("Invalid extraction path: {}", rel.display()))?
+                .to_path_buf();
+        }
+        let canonical_ancestor = ancestor.canonicalize()?;
+        if !canonical_ancestor.starts_with(canonical_base) {
+            anyhow::bail!(
+                "Archive extraction escaped destination root: {}",
+                rel.display()
+            );
+        }
+
         std::fs::create_dir_all(parent)?;
         let canonical_parent = parent.canonicalize()?;
         if !canonical_parent.starts_with(canonical_base) {
@@ -225,7 +242,7 @@ fn setup_temp_project(temp_path: &std::path::Path, project_name: &str, owner: &s
 }
 
 /// Build execution order using Kahn's topological sort.
-fn build_execution_order(endpoint: &Endpoint) -> Vec<String> {
+fn build_execution_order(endpoint: &Endpoint) -> anyhow::Result<Vec<String>> {
     use std::collections::{HashSet, VecDeque};
 
     let node_names: HashSet<String> = endpoint.nodes.iter().map(|n| n.node_name.clone()).collect();
@@ -269,11 +286,10 @@ fn build_execution_order(endpoint: &Endpoint) -> Vec<String> {
     }
 
     if order.len() != endpoint.nodes.len() {
-        eprintln!("Warning: Cycle detected in pipeline DAG, falling back to insertion order");
-        return endpoint.nodes.iter().map(|n| n.node_name.clone()).collect();
+        anyhow::bail!("Cycle detected in pipeline DAG. Cannot determine execution order.");
     }
 
-    order
+    Ok(order)
 }
 
 /// Fetch and execute a remote endpoint.
@@ -369,7 +385,7 @@ pub async fn run(
     let local_cache = LocalCache::open()?;
 
     // Build and display execution plan
-    let execution_order = build_execution_order(&endpoint_def);
+    let execution_order = build_execution_order(&endpoint_def)?;
     println!("Execution plan:");
     for node_name in &execution_order {
         let node = endpoint_def

@@ -273,8 +273,8 @@ impl Database {
         let commit_id = Uuid::new_v4();
         sqlx::query(
             r#"
-            INSERT INTO commits (id, project_id, hash, parent_hashes, author_id, author_name, message)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO commits (id, project_id, hash, parent_hashes, author_id, author_name, message, commit_timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#
         )
         .bind(commit_id)
@@ -284,6 +284,7 @@ impl Database {
         .bind(author_id)
         .bind(&commit.author)
         .bind(&commit.message)
+        .bind(commit.timestamp.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
         .execute(&mut **tx)
         .await?;
 

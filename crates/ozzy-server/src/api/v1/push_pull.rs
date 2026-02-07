@@ -214,12 +214,11 @@ async fn push(
         )));
     }
 
-    // Track newly stored hashes for cleanup on failure
-    let mut stored_hashes: Vec<(String, String)> = Vec::new(); // (hash, ext)
     let mut content_registrations: Vec<(String, String, String, i64)> = Vec::new();
 
     // Store data files and extract schemas
-    let mut new_data_count = 0;
+    let mut new_data_count: usize = 0;
+    let mut new_transform_count: usize = 0;
     let mut data_schemas: HashMap<String, serde_json::Value> = HashMap::new();
     let store_result: Result<(), ApiError> = async {
         for (filename, content) in &data_files {
@@ -240,7 +239,6 @@ async fn push(
             let is_new = !state.storage.exists(&content_hash, ext).await?;
             if is_new {
                 state.storage.store(content, ext).await?;
-                stored_hashes.push((content_hash.clone(), ext.to_string()));
                 new_data_count += 1;
             }
             let storage_key = format!(
@@ -268,7 +266,7 @@ async fn push(
             let is_new = !state.storage.exists(&content_hash, ext).await?;
             if is_new {
                 state.storage.store(content, ext).await?;
-                stored_hashes.push((content_hash.clone(), ext.to_string()));
+                new_transform_count += 1;
             }
             let storage_key = format!(
                 "content/{}/{}/{}.{}",
@@ -291,7 +289,6 @@ async fn push(
             let is_new = !state.storage.exists(&content_hash, "lock").await?;
             if is_new {
                 state.storage.store(content, "lock").await?;
-                stored_hashes.push((content_hash.clone(), "lock".to_string()));
             }
             let storage_key = format!(
                 "content/{}/{}/{}.lock",
@@ -312,15 +309,15 @@ async fn push(
     }
     .await;
 
-    // If storage failed, attempt to clean up newly stored files
+    // If storage failed, leave orphaned blobs for GC rather than deleting them.
+    // Concurrent pushes may reference the same content-addressed blobs, and deleting
+    // them here could cause data loss for other successful commits.
     if let Err(e) = store_result {
-        for (hash, ext) in &stored_hashes {
-            let _ = state.storage.delete(hash, ext).await;
-        }
+        tracing::warn!("push aborted after upload; leaving blobs for GC");
         return Err(e);
     }
 
-    let new_transform_count = stored_hashes.iter().filter(|(_, ext)| ext == "py").count();
+    // new_transform_count already tracked during upload loop above
 
     // Ensure schema metadata is available for all committed data sources, including
     // deduplicated blobs that may not have been uploaded in this push.
@@ -389,10 +386,7 @@ async fn push(
     {
         Ok(id) => id,
         Err(e) => {
-            // Persistence failed, so rollback newly uploaded blobs.
-            for (hash, ext) in &stored_hashes {
-                let _ = state.storage.delete(hash, ext).await;
-            }
+            tracing::warn!("push commit persistence failed; leaving uploaded blobs for GC");
             return Err(e.into());
         }
     };
@@ -403,9 +397,7 @@ async fn push(
         .upsert_ref_in_tx(&mut tx, project.id, &ref_name, ref_type, commit_id)
         .await
     {
-        for (hash, ext) in &stored_hashes {
-            let _ = state.storage.delete(hash, ext).await;
-        }
+        tracing::warn!("push ref upsert failed; leaving uploaded blobs for GC");
         return Err(e.into());
     }
 
@@ -416,17 +408,13 @@ async fn push(
             .register_content_in_tx(&mut tx, hash, storage_key, content_type, *byte_size)
             .await
         {
-            for (hash, ext) in &stored_hashes {
-                let _ = state.storage.delete(hash, ext).await;
-            }
+            tracing::warn!("push content registration failed; leaving uploaded blobs for GC");
             return Err(e.into());
         }
     }
 
     if let Err(e) = tx.commit().await {
-        for (hash, ext) in &stored_hashes {
-            let _ = state.storage.delete(hash, ext).await;
-        }
+        tracing::warn!("push transaction commit failed; leaving uploaded blobs for GC");
         return Err(anyhow::Error::from(e).into());
     }
 
@@ -637,13 +625,19 @@ async fn pull(
     {
         let mut builder = tar::Builder::new(&mut tar_data);
 
-        // Add commit.json with full commit data (data_sources, transforms, endpoints)
+        // Add commit.json with full commit data (data_sources, transforms, endpoints).
+        // Use the preserved original timestamp string (not DB created_at) to
+        // ensure the pulled commit.json can reproduce the original commit hash.
+        let original_ts: serde_json::Value =
+            chrono::DateTime::parse_from_rfc3339(&commit.commit_timestamp)
+                .map(|dt| serde_json::json!(dt.with_timezone(&chrono::Utc)))
+                .unwrap_or_else(|_| serde_json::json!(commit.created_at));
         let mut commit_data = serde_json::json!({
             "hash": commit.hash,
             "message": commit.message,
             "parent_hashes": commit.parent_hashes,
             "author": commit.author_name,
-            "timestamp": commit.created_at,
+            "timestamp": original_ts,
         });
 
         // Include data_sources

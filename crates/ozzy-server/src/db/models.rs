@@ -41,6 +41,7 @@ pub struct DbCommit {
     pub author_id: Option<Uuid>,
     pub author_name: String,
     pub message: String,
+    pub commit_timestamp: String,
     pub created_at: DateTime<Utc>,
 }
 
