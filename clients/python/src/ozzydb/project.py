@@ -193,6 +193,17 @@ class Project:
             endpoints[f.stem] = data
         return endpoints
 
+    def _load_staged_endpoint_deletions(self) -> set[str]:
+        """Load endpoint names staged for deletion."""
+        staged_dir = self.ozzy_dir / "staged_endpoints"
+        if not staged_dir.exists():
+            return set()
+
+        deletions = set()
+        for marker in staged_dir.glob("*.deleted"):
+            deletions.add(marker.stem)
+        return deletions
+
     @property
     def data_sources(self) -> dict[str, DataSourceMeta]:
         """All data sources (committed + staged)."""
@@ -245,6 +256,8 @@ class Project:
     def endpoints(self) -> list[str]:
         """List of endpoint names."""
         endpoint_names = set()
+        staged = self._load_staged_endpoints()
+        staged_deletions = self._load_staged_endpoint_deletions()
 
         # From commit
         commit = self._load_latest_commit()
@@ -252,7 +265,11 @@ class Project:
             endpoint_names.update(commit.get("endpoints", {}).keys())
 
         # From staged
-        endpoint_names.update(self._load_staged_endpoints().keys())
+        endpoint_names.update(staged.keys())
+
+        # Staged deletions hide committed endpoints, unless the endpoint is
+        # simultaneously restaged with a JSON definition.
+        endpoint_names.difference_update(staged_deletions - set(staged.keys()))
 
         return sorted(endpoint_names)
 
@@ -268,8 +285,11 @@ class Project:
         """
         # Check staged first
         staged = self._load_staged_endpoints()
+        staged_deletions = self._load_staged_endpoint_deletions()
         if name in staged:
             endpoint_data = staged[name]
+        elif name in staged_deletions:
+            raise KeyError(f"Endpoint '{name}' is staged for deletion")
         else:
             # Check committed
             commit = self._load_latest_commit()

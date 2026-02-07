@@ -6,13 +6,6 @@ use std::path::Path;
 pub async fn add(file: &str, name: Option<&str>) -> Result<()> {
     let project = Project::find_current()?;
 
-    if name.is_some() {
-        anyhow::bail!(
-            "--name is not supported yet for transform registration. \
-            Rename the function in source code instead."
-        );
-    }
-
     // Parse file:function format or just file
     let (source_path, function_name) = if file.contains(':') {
         let parts: Vec<&str> = file.splitn(2, ':').collect();
@@ -59,30 +52,67 @@ pub async fn add(file: &str, name: Option<&str>) -> Result<()> {
         }
     }
 
+    let selected_function = if let Some(ref fn_name) = function_name {
+        Some(fn_name.clone())
+    } else if functions.len() == 1 {
+        Some(functions[0].to_string())
+    } else {
+        None
+    };
+
+    let (dest_file_name, content_to_write, displayed_functions): (String, String, Vec<String>) =
+        if let Some(alias) = name {
+            validate_safe_name(alias)?;
+
+            if functions.len() > 1 && function_name.is_none() {
+                anyhow::bail!(
+                    "--name is only supported for files that contain a single @ozzy.transform function"
+                );
+            }
+
+            let source_function = selected_function.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Could not determine source transform. Use <file.py:function> with --name."
+                )
+            })?;
+            let renamed = rename_transform_function(&content, source_function, alias)?;
+            (format!("{}.py", alias), renamed, vec![alias.to_string()])
+        } else {
+            (
+                source_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+                content.clone(),
+                functions.iter().map(|f| (*f).to_string()).collect(),
+            )
+        };
+
     // Copy to transforms/ directory
-    let dest_name = source_path.file_name().unwrap();
-    let dest_path = project.transforms_dir().join(dest_name);
+    let dest_path = project.transforms_dir().join(&dest_file_name);
 
     if dest_path.exists() {
         // Check if content is different
         let existing = fs::read_to_string(&dest_path)?;
-        if existing == content {
+        if existing == content_to_write {
             println!("Transform file already exists and is identical.");
         } else {
-            fs::copy(source_path, &dest_path)?;
-            println!(
-                "Updated transform file: transforms/{}",
-                dest_name.to_string_lossy()
-            );
+            fs::write(&dest_path, &content_to_write)?;
+            println!("Updated transform file: transforms/{}", dest_file_name);
         }
     } else {
-        fs::copy(source_path, &dest_path)?;
+        fs::write(&dest_path, &content_to_write)?;
     }
 
     // Show what transforms were found
     println!("Found transforms:");
-    for func in &functions {
-        let selected = function_name.as_ref().map(|n| n == *func).unwrap_or(true);
+    for func in &displayed_functions {
+        let selected = if let Some(alias) = name {
+            func == alias
+        } else {
+            function_name.as_ref().map(|n| n == func).unwrap_or(true)
+        };
         if selected {
             println!("  {} ✓", func);
         } else {
@@ -292,4 +322,40 @@ fn find_transform_functions(content: &str) -> Vec<&str> {
     }
 
     functions
+}
+
+fn rename_transform_function(content: &str, from: &str, to: &str) -> Result<String> {
+    if from == to {
+        return Ok(content.to_string());
+    }
+
+    let mut renamed = false;
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if !renamed && trimmed.starts_with("def ") {
+            if let Some(paren_pos) = trimmed.find('(') {
+                let current_name = trimmed[4..paren_pos].trim();
+                if current_name == from {
+                    let indent_len = line.len() - trimmed.len();
+                    let indent = &line[..indent_len];
+                    let suffix = &trimmed[paren_pos..];
+                    out.push(format!("{indent}def {to}{suffix}"));
+                    renamed = true;
+                    continue;
+                }
+            }
+        }
+        out.push(line.to_string());
+    }
+
+    if !renamed {
+        anyhow::bail!("Could not rename function '{}' in transform source", from);
+    }
+
+    let mut rewritten = out.join("\n");
+    if content.ends_with('\n') {
+        rewritten.push('\n');
+    }
+    Ok(rewritten)
 }

@@ -1452,6 +1452,134 @@ fn test_dag_show_subcommand_works() {
 }
 
 #[test]
+fn test_staged_endpoint_deletion_blocks_run_and_dag() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "endpoint-delete", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
+        .assert()
+        .success();
+
+    let transform_path = dir.path().join("transforms/qc.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    create_test_transform(&transform_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/qc.py"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "endpoint",
+            "create",
+            "filtered",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["commit", "-m", "seed"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["endpoint", "rm", "filtered"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Staged endpoint deletion"));
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["run", "filtered"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("staged for deletion"));
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["dag", "show", "filtered"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn test_transform_add_name_registers_renamed_transform() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "rename-transform", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let transform_path = dir.path().join("single.py");
+    fs::write(
+        &transform_path,
+        r#"
+import polars as pl
+
+class ozzy:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
+@ozzy.transform()
+def original_name(inputs, params):
+    return inputs["main"]
+"#,
+    )
+    .unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "transform",
+            "add",
+            "single.py",
+            "--name",
+            "renamed_transform",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("renamed_transform"));
+
+    assert!(dir.path().join("transforms/renamed_transform.py").exists());
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("renamed_transform"));
+}
+
+#[test]
 fn test_tag_shorthand_create_works() {
     let dir = tempdir().unwrap();
 

@@ -7,6 +7,7 @@ use ozzy_core::registry::{CredentialsFile, RegistryClient};
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::remote::get_remote_url;
 
@@ -125,6 +126,41 @@ fn resolve_local_ref_path(
     } else {
         format!("refs/heads/{}", normalized_ref)
     }
+}
+
+fn reconcile_staged_endpoints_after_pull(project: &Project) -> Result<()> {
+    let staged_dir = project.ozzy_dir().join("staged_endpoints");
+    if !staged_dir.exists() {
+        return Ok(());
+    }
+
+    let has_entries = std::fs::read_dir(&staged_dir)?.next().is_some();
+    if !has_entries {
+        std::fs::remove_dir_all(&staged_dir)?;
+        return Ok(());
+    }
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut backup_dir = project
+        .ozzy_dir()
+        .join(format!("staged_endpoints.backup.{}", ts));
+    let mut suffix = 0u32;
+    while backup_dir.exists() {
+        suffix += 1;
+        backup_dir = project
+            .ozzy_dir()
+            .join(format!("staged_endpoints.backup.{}.{}", ts, suffix));
+    }
+
+    std::fs::rename(&staged_dir, &backup_dir)?;
+    println!(
+        "  Note: moved local staged endpoints to {}",
+        backup_dir.display()
+    );
+    Ok(())
 }
 
 /// Pull from a remote registry.
@@ -250,6 +286,10 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
         project.update_ref(&project.config.refs.head, &manifest.commit_hash)?;
     }
 
+    // Reconcile any pre-existing local endpoint staging so pulled state becomes
+    // authoritative for subsequent commits.
+    reconcile_staged_endpoints_after_pull(&project)?;
+
     println!();
     println!(
         "Pull complete. Updated ref '{}' -> {}",
@@ -262,9 +302,13 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_local_ref_path, sanitize_archive_relative_path};
+    use super::{
+        reconcile_staged_endpoints_after_pull, resolve_local_ref_path,
+        sanitize_archive_relative_path,
+    };
     use ozzy_core::registry::protocol::{ListRefsResponse, RefInfo};
     use std::path::Path;
+    use tempfile::tempdir;
 
     #[test]
     fn sanitize_archive_path_rejects_traversal() {
@@ -297,5 +341,29 @@ mod tests {
 
         let resolved = resolve_local_ref_path("v1.0.0", Some(&refs), "refs/heads/main");
         assert_eq!(resolved, "refs/tags/v1.0.0");
+    }
+
+    #[test]
+    fn reconcile_staged_endpoints_moves_to_backup() {
+        let dir = tempdir().unwrap();
+        let project = ozzy_core::Project::init(dir.path(), "test", "user").unwrap();
+
+        let staged_dir = project.ozzy_dir().join("staged_endpoints");
+        std::fs::create_dir_all(&staged_dir).unwrap();
+        std::fs::write(staged_dir.join("ep.deleted"), b"deleted\n").unwrap();
+
+        reconcile_staged_endpoints_after_pull(&project).unwrap();
+        assert!(!staged_dir.exists());
+
+        let backup_count = std::fs::read_dir(project.ozzy_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("staged_endpoints.backup.")
+            })
+            .count();
+        assert_eq!(backup_count, 1);
     }
 }

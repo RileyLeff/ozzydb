@@ -311,6 +311,16 @@ fn parse_transform_decorator(decorator: &str) -> TransformDecoratorMeta {
         let rest = &decorator[inputs_start + 7..];
         if let Some(inputs) = extract_python_list(rest) {
             meta.inputs = inputs;
+        } else if let Some(inputs_dict) = extract_python_dict_raw(rest) {
+            let parsed_inputs: Vec<String> = parse_simple_dict(&inputs_dict)
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
+            if !parsed_inputs.is_empty() {
+                meta.inputs = parsed_inputs;
+            } else {
+                eprintln!("Warning: could not parse 'inputs=' in @ozzy.transform decorator");
+            }
         } else {
             eprintln!("Warning: could not parse 'inputs=' in @ozzy.transform decorator");
         }
@@ -621,5 +631,41 @@ def nested_transform(inputs, params):
             .get("nested_transform")
             .expect("missing transform");
         assert_eq!(transform.source_path, "transforms/nested/deep.py");
+    }
+
+    #[test]
+    fn parses_inputs_dict_keys() {
+        let dir = tempdir().unwrap();
+        let project = Project::init(dir.path(), "test-project", "testuser").unwrap();
+        let transform_path = project.transforms_dir().join("multi.py");
+        fs::write(
+            &transform_path,
+            r#"
+class ozzy:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
+
+@ozzy.transform(inputs={"left": "raw", "right": "meta"})
+def join_transform(inputs, params):
+    return inputs["left"]
+"#,
+        )
+        .unwrap();
+
+        let transforms = collect_transforms(&project).unwrap();
+        let transform = transforms.get("join_transform").expect("missing transform");
+        let input_schema = transform
+            .input_schema
+            .as_ref()
+            .expect("missing input schema");
+        let inputs = input_schema
+            .get("inputs")
+            .and_then(|v| v.as_array())
+            .expect("missing inputs array");
+        let parsed: Vec<&str> = inputs.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(parsed, vec!["left", "right"]);
     }
 }

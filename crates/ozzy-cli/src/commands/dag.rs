@@ -1,6 +1,7 @@
 use anyhow::Result;
 use ozzy_core::project::{Endpoint, SourceType};
 use ozzy_core::{Project, commit};
+use std::collections::HashSet;
 use std::fs;
 
 pub async fn show(format: &str, endpoint_name: Option<&str>) -> Result<()> {
@@ -9,6 +10,9 @@ pub async fn show(format: &str, endpoint_name: Option<&str>) -> Result<()> {
     let endpoints = collect_all_endpoints(&project)?;
 
     if endpoints.is_empty() {
+        if let Some(name) = endpoint_name {
+            anyhow::bail!("Endpoint '{}' not found", name);
+        }
         println!("No endpoints defined.");
         return Ok(());
     }
@@ -41,6 +45,7 @@ pub async fn show(format: &str, endpoint_name: Option<&str>) -> Result<()> {
 
 fn collect_all_endpoints(project: &Project) -> Result<Vec<Endpoint>> {
     let mut endpoints = Vec::new();
+    let mut staged_deletions = load_staged_endpoint_deletions(project)?;
 
     // Check staged endpoints
     let staged_dir = project.ozzy_dir().join("staged_endpoints");
@@ -51,6 +56,7 @@ fn collect_all_endpoints(project: &Project) -> Result<Vec<Endpoint>> {
             if path.extension().map(|e| e == "json").unwrap_or(false) {
                 let content = fs::read_to_string(&path)?;
                 let endpoint: Endpoint = serde_json::from_str(&content)?;
+                staged_deletions.remove(&endpoint.name);
                 endpoints.push(endpoint);
             }
         }
@@ -59,6 +65,9 @@ fn collect_all_endpoints(project: &Project) -> Result<Vec<Endpoint>> {
     // Check committed endpoints
     if let Some(commit) = project.latest_commit()? {
         for (_, endpoint) in commit.endpoints {
+            if staged_deletions.contains(&endpoint.name) {
+                continue;
+            }
             // Don't duplicate if already in staged
             if !endpoints.iter().any(|e| e.name == endpoint.name) {
                 endpoints.push(endpoint);
@@ -67,6 +76,26 @@ fn collect_all_endpoints(project: &Project) -> Result<Vec<Endpoint>> {
     }
 
     Ok(endpoints)
+}
+
+fn load_staged_endpoint_deletions(project: &Project) -> Result<HashSet<String>> {
+    let staged_dir = project.ozzy_dir().join("staged_endpoints");
+    let mut deleted = HashSet::new();
+    if !staged_dir.exists() {
+        return Ok(deleted);
+    }
+
+    for entry in fs::read_dir(&staged_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map(|e| e == "deleted").unwrap_or(false) {
+            if let Some(stem) = path.file_stem() {
+                deleted.insert(stem.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    Ok(deleted)
 }
 
 fn print_ascii_dag(project: &Project, endpoints: &[Endpoint]) -> Result<()> {

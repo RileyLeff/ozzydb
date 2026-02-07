@@ -297,6 +297,15 @@ fn find_endpoint(project: &Project, name: &str) -> Result<Endpoint> {
         return Ok(endpoint);
     }
 
+    // If the endpoint is staged for deletion, treat it as absent.
+    let deletion_marker = project
+        .ozzy_dir()
+        .join("staged_endpoints")
+        .join(format!("{}.deleted", name));
+    if deletion_marker.exists() {
+        anyhow::bail!("Endpoint '{}' is staged for deletion", name);
+    }
+
     // Check committed endpoints
     if let Some(commit) = project.latest_commit()? {
         if let Some(endpoint) = commit.endpoints.get(name) {

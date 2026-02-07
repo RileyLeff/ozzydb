@@ -102,11 +102,14 @@ Client: GET /owner/project/endpoint@main  (or click "Download" in web UI)
      d. Stream result to client
 ```
 
-**`reproducible=false` propagation:** If a transform is marked non-reproducible
-(e.g., uses random seeds, external timestamps), this flag propagates to all
-downstream transforms and the endpoint. Non-reproducible endpoints are still
-cached, but the cache is advisory — re-execution may produce different results.
-This affects DOI eligibility when DOIs are implemented.
+**Determinism enforcement:** Between `PYTHONHASHSEED=0`, `OMP_NUM_THREADS=1`,
+`MKL_NUM_THREADS=1`, and `--network=none`, most sources of non-determinism are
+eliminated. For stochastic algorithms (random forests, sampling), the correct
+approach is a seed parameter: `params={"seed": 42}`. Different seed = different
+cache key = different cache entry. At commit time, warn if we detect unseeded
+randomness (e.g., `np.random` calls without a prior `np.random.seed`). No
+`reproducible=false` flag, no propagation logic — enforce determinism, don't
+build infrastructure around non-determinism.
 
 **Why gVisor:**
 - Same Dockerfiles, same `docker run` as plain Docker. Zero extra cost.
@@ -269,6 +272,82 @@ POST   /api/v1/curations/{owner}/{slug}/maintainers { username, role }
 DELETE /api/v1/curations/{owner}/{slug}/maintainers/{username}
 ```
 
+### Deprecation and Yanking
+
+Tags and endpoints can be marked deprecated or yanked. This communicates
+lifecycle state to downstream consumers without breaking content-addressing.
+
+**Deprecation** is a warning — the data still works, but consumers are nudged
+to update:
+```
+ozzy tag deprecate v1.0 --successor v2.0 --reason "Bug in outlier detection"
+ozzy endpoint deprecate old_cleaned --successor cleaned
+```
+
+**Yanking** is a hard block — the tag can't be fetched by name (you'd need the
+raw commit hash). For when the data is actively wrong:
+```
+ozzy tag yank v1.0 --reason "Critical calibration error, values are wrong"
+```
+
+**Data model** (additions to existing `refs` table):
+```sql
+ALTER TABLE refs ADD COLUMN deprecated_at TIMESTAMPTZ;
+ALTER TABLE refs ADD COLUMN deprecation_message TEXT;
+ALTER TABLE refs ADD COLUMN successor_ref VARCHAR(255);
+ALTER TABLE refs ADD COLUMN yanked BOOLEAN NOT NULL DEFAULT FALSE;
+```
+
+Endpoints get similar columns in the `endpoints` table for endpoint-level
+deprecation (separate from ref-level).
+
+**CLI behavior:**
+- `ozzy fetch ...@deprecated-tag` prints warning, proceeds
+- `ozzy fetch ...@yanked-tag` prints error, refuses (use `--force` or raw hash)
+- `ozzy run` with deprecated dependencies prints warning summary
+- `ozzy dep ls` shows deprecation/yank status
+- Web UI shows a banner on deprecated/yanked endpoint pages
+
+### Cross-Project Dependencies
+
+When a project consumes another project's endpoint as an input, the dependency
+should be explicit and pinned by default.
+
+**In `ozzy.toml`:**
+```toml
+[dependencies]
+cleaned_flux = {
+  remote = "rileyleff/sap-flux/cleaned",
+  ref = "v1.0",
+  commit = "abc123...",    # recorded at add time
+}
+```
+
+Dependencies are always pinned to a specific commit hash. The ref is a
+human-readable label recorded for convenience, but `ozzy run` uses the commit
+hash. To update a dependency, run `ozzy dep update` explicitly — no floating
+dependencies, no silent changes between runs.
+
+**CLI:**
+```
+ozzy dep add rileyleff/sap-flux/cleaned@v1.0    # records ref + commit hash
+ozzy dep update cleaned_flux                      # re-resolves ref, updates hash
+ozzy dep update cleaned_flux --ref v2.0          # switch to new ref
+ozzy dep ls                                       # show deps, pin state, warnings
+ozzy dep rm cleaned_flux
+```
+
+**Runtime behavior:**
+- On `ozzy run`, check each dependency's deprecation/yank status
+- If deprecated: warn with successor info
+- If yanked: error, require `ozzy dep update` to a non-yanked ref
+
+**API routes:**
+```
+GET  /api/v1/{owner}/{project}/{endpoint}@{ref}/status
+  -> { deprecated, yanked, successor, deprecation_message }
+```
+
 ---
 
 ## Web UI
@@ -378,6 +457,32 @@ Polite, chatty, playful.
 ---
 
 ## Implementation Plan
+
+### 0. Remove dead code from Phase 2
+
+The Phase 2 tiered cache (local L1 + S3 L2) is obsoleted by the server's R2
+materialized cache. Remove the remote cache subsystem and its CLI commands.
+
+**Delete:**
+- `crates/ozzy-core/src/cache/backend.rs` — CacheBackend trait
+- `crates/ozzy-core/src/cache/config.rs` — RemoteCacheConfig, TieredCacheConfig
+- `crates/ozzy-core/src/cache/remote.rs` — RemoteCache (S3 L2)
+- `crates/ozzy-core/src/cache/tiered.rs` — TieredCache (L1/L2 composition)
+
+**Remove CLI commands:**
+- `ozzy cache push` / `ozzy cache pull` / `ozzy cache sync` / `ozzy cache status`
+
+**Keep:**
+- Local SQLite cache for `ozzy run` (the L1 layer)
+- `ozzy cache ls` / `ozzy cache size` / `ozzy cache clear`
+
+**Remove from `ozzy.toml` schema:**
+- `[cache.remote]` section and `[cache.remote.policy]`
+
+**Also remove from `Cargo.toml` if no longer needed elsewhere:**
+- `async-trait` (check if still used)
+
+**Scope:** Net deletion. ~400 lines removed.
 
 ### 1. R2-only storage
 
@@ -500,18 +605,49 @@ ozzy collab ls
 
 **Scope:** ~400 lines server (orgs + collab API), ~250 lines CLI.
 
-### 8. Python client improvements
+### 8. Deprecation, yanking, and dependencies
+
+Lifecycle metadata and cross-project dependency management.
+
+**Database changes:**
+- Migration adding `deprecated_at`, `deprecation_message`, `successor_ref`,
+  `yanked` columns to `refs` table
+- Similar columns on `endpoints` table for endpoint-level deprecation
+- New `project_dependencies` table linking projects to remote endpoints with
+  pinned commit hashes
+
+**New CLI commands:**
+- `ozzy tag deprecate/yank` — lifecycle management
+- `ozzy endpoint deprecate` — endpoint-level deprecation
+- `ozzy dep add/update/ls/rm` — dependency management
+
+**Server changes:**
+- Deprecation/yank status included in fetch and resolve responses
+- `/status` endpoint for checking lifecycle state
+- Yank enforcement: yanked refs return 410 Gone unless `?force=true`
+
+**Scope:** ~300 lines server, ~200 lines CLI.
+
+### 9. Python client improvements
 
 - `fetch()` for remote endpoints
 - Better error messages when CLI not found
 - Publish to PyPI (`ozzydb`)
 - Later: PyO3 native bindings
 
-### 9. LLM skills
+### 10. LLM skills
 
 A `.md` skill file documenting how to use the CLI and Python client. Written
 for LLM consumption — structured, example-heavy, covering every command.
 Comes last, after the interfaces stabilize.
+
+### Git integration note
+
+`ozzy init` should generate a `.gitignore` that excludes `data/*.parquet` and
+`.ozzy/`. Transforms, `ozzy.toml`, and requirements files stay in git. Git
+versions your development history (how did this code evolve?). OzzyDB versions
+your pipeline state (what exact computation produced this output?). Both are
+useful, neither replaces the other.
 
 ---
 
@@ -528,7 +664,6 @@ publishing infrastructure.
 - `ozzy release create v1.0 --title "..." --description "..."`
 - A release is a named, immutable snapshot (commit hash + metadata)
 - DataCite API integration mints a DOI pointing to the release
-- Non-reproducible endpoints are flagged and excluded from DOI eligibility
 
 This is deferred until the core platform is running and integrated into real
 workflows, but it's a first-class goal.
@@ -558,6 +693,7 @@ From `codex_review_2.md`:
 
 ## Priority Order
 
+0. **Remove Phase 2 tiered cache** — delete dead code first
 1. **R2-only storage** — small change, big simplification
 2. **Server-side compute** — core value prop of the hosted registry
 3. **E2E tests** — confidence before deploying
@@ -565,5 +701,6 @@ From `codex_review_2.md`:
 5. **Web UI** — the front door for scientists
 6. **Curations** — the key differentiator from "just another data store"
 7. **Orgs + Collaborator CLI** — enable team usage
-8. **Python client** — better DX
-9. **LLM skills** — last, after interfaces stabilize
+8. **Deprecation, yanking, and dependencies** — lifecycle management
+9. **Python client** — better DX
+10. **LLM skills** — last, after interfaces stabilize

@@ -62,6 +62,36 @@ head = "refs/heads/main"
     return project_dir
 
 
+def create_committed_endpoint(project_dir: Path, endpoint_name: str = "ep") -> str:
+    """Create a minimal committed endpoint and point HEAD to it."""
+    import json
+
+    commit_hash = "a" * 64
+    commit = {
+        "hash": commit_hash,
+        "parent_hashes": [],
+        "author": "test-user",
+        "message": "seed",
+        "timestamp": "2026-02-07T00:00:00Z",
+        "data_sources": {},
+        "transforms": {},
+        "endpoints": {
+            endpoint_name: {
+                "name": endpoint_name,
+                "nodes": [],
+                "edges": [],
+                "description": None,
+            }
+        },
+    }
+
+    commits_dir = project_dir / ".ozzy" / "commits"
+    commits_dir.mkdir(parents=True, exist_ok=True)
+    (commits_dir / f"{commit_hash}.json").write_text(json.dumps(commit))
+    (project_dir / ".ozzy" / "refs" / "heads" / "main").write_text(f"{commit_hash}\n")
+    return commit_hash
+
+
 class TestProject:
     """Tests for Project class."""
 
@@ -97,6 +127,20 @@ class TestProject:
         path = project.get_data_path("raw")
         assert path.exists()
         assert path.name == "raw.parquet"
+
+    def test_staged_endpoint_deletion_hidden(self, tmp_path):
+        """Committed endpoints staged for deletion should be hidden."""
+        project_dir = create_test_project(tmp_path)
+        create_committed_endpoint(project_dir, "deleted_ep")
+
+        staged_dir = project_dir / ".ozzy" / "staged_endpoints"
+        (staged_dir / "deleted_ep.deleted").write_text("deleted\n")
+
+        project = ozzy.Project(project_dir)
+        assert "deleted_ep" not in project.endpoints
+
+        with pytest.raises(KeyError, match="staged for deletion"):
+            project.get_endpoint("deleted_ep")
 
 
 class TestInspect:

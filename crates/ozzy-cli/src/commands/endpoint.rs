@@ -112,11 +112,9 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
     // Validate schema compatibility for all inputs
     // The first transform gets all input schemas; subsequent transforms get chained output
     // For the initial validation, use "main" or the first input for pipeline propagation
-    let primary_schema = input_schemas
-        .get("main")
-        .or_else(|| input_schemas.values().next());
-    if let Some(schema) = primary_schema {
-        let validation_result = validate_pipeline_schema(schema, transforms, &available_transforms);
+    if !input_schemas.is_empty() {
+        let validation_result =
+            validate_pipeline_schema(&input_schemas, transforms, &available_transforms);
 
         // Also validate that all named inputs match transform requirements
         if !transforms.is_empty() {
@@ -310,18 +308,25 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
 
 /// Validate schema compatibility through the pipeline.
 fn validate_pipeline_schema(
-    input_schema: &schema::SchemaInfo,
+    input_schemas: &HashMap<String, schema::SchemaInfo>,
     transforms: &[String],
     available_transforms: &std::collections::BTreeMap<String, ozzy_core::project::Transform>,
 ) -> schema::ValidationResult {
     let mut result = schema::ValidationResult::ok();
 
-    // Track current schema (starts with input data source schema)
-    let mut current_columns: Vec<String> = input_schema
-        .column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    // Track current schema as the union of all available named inputs.
+    let mut current_columns: Vec<String> = Vec::new();
+    let mut current_types: HashMap<String, String> = HashMap::new();
+    for input_schema in input_schemas.values() {
+        for field in &input_schema.fields {
+            if !current_columns.iter().any(|c| c == &field.name) {
+                current_columns.push(field.name.clone());
+            }
+            current_types
+                .entry(field.name.clone())
+                .or_insert_with(|| field.dtype.clone());
+        }
+    }
 
     for (i, transform_name) in transforms.iter().enumerate() {
         let transform = match available_transforms.get(transform_name) {
@@ -369,18 +374,16 @@ fn validate_pipeline_schema(
                                 current_columns
                             ));
                         } else if let Some(expected_type_str) = expected_type.as_str() {
-                            // Check type compatibility against input schema fields
-                            if let Some(field) =
-                                input_schema.fields.iter().find(|f| f.name == *col_name)
-                            {
-                                if !types_compatible(&field.dtype, expected_type_str) {
+                            // Check type compatibility against known input/derived types
+                            if let Some(actual_type) = current_types.get(col_name) {
+                                if !types_compatible(actual_type, expected_type_str) {
                                     result.warnings.push(format!(
                                         "Step {}: Transform '{}' expects column '{}' to be '{}' but found '{}'",
                                         i + 1,
                                         transform_name,
                                         col_name,
                                         expected_type_str,
-                                        field.dtype
+                                        actual_type
                                     ));
                                 }
                             }
@@ -399,6 +402,9 @@ fn validate_pipeline_schema(
                             if !current_columns.iter().any(|c| c == col_name) {
                                 current_columns.push(col_name.to_string());
                             }
+                            current_types
+                                .entry(col_name.to_string())
+                                .or_insert_with(|| "unknown".to_string());
                             result.warnings.push(format!(
                                 "Step {}: Transform '{}' adds column '{}'",
                                 i + 1,
@@ -415,6 +421,7 @@ fn validate_pipeline_schema(
                     for col in dropped_cols {
                         if let Some(col_name) = col.as_str() {
                             current_columns.retain(|c| c != col_name);
+                            current_types.remove(col_name);
                         }
                     }
                 }
