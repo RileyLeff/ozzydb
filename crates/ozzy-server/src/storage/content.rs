@@ -25,6 +25,16 @@ pub struct ContentStorage {
 }
 
 impl ContentStorage {
+    fn validate_content_hash(content_hash: &str) -> Result<()> {
+        if content_hash.len() != 64 || !content_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            anyhow::bail!(
+                "Invalid content hash '{}': expected 64 hexadecimal characters",
+                content_hash
+            );
+        }
+        Ok(())
+    }
+
     fn build_remote_store(config: &R2Config) -> Result<Arc<dyn ObjectStore>> {
         let store = AmazonS3Builder::new()
             .with_endpoint(&config.endpoint)
@@ -81,23 +91,26 @@ impl ContentStorage {
         Self::new_with_root_and_remote(Self::default_local_root(), remote_store, prefix)
     }
 
-    fn object_path(&self, content_hash: &str, extension: &str) -> ObjectPath {
+    fn object_path(&self, content_hash: &str, extension: &str) -> Result<ObjectPath> {
+        Self::validate_content_hash(content_hash)?;
         let dir1 = &content_hash[0..2];
         let dir2 = &content_hash[2..4];
-        ObjectPath::from(format!(
+        Ok(ObjectPath::from(format!(
             "{}/{}/{}/{}.{}",
             self.prefix, dir1, dir2, content_hash, extension
-        ))
+        )))
     }
 
-    fn local_path(&self, content_hash: &str, extension: &str) -> PathBuf {
+    fn local_path(&self, content_hash: &str, extension: &str) -> Result<PathBuf> {
+        Self::validate_content_hash(content_hash)?;
         let dir1 = &content_hash[0..2];
         let dir2 = &content_hash[2..4];
-        self.local_root
+        Ok(self
+            .local_root
             .join(&self.prefix)
             .join(dir1)
             .join(dir2)
-            .join(format!("{}.{}", content_hash, extension))
+            .join(format!("{}.{}", content_hash, extension)))
     }
 
     fn ensure_parent(path: &Path) -> Result<()> {
@@ -116,7 +129,7 @@ impl ContentStorage {
         let Some(remote) = &self.remote_store else {
             return Ok(());
         };
-        let path = self.object_path(content_hash, extension);
+        let path = self.object_path(content_hash, extension)?;
         if let Err(e) = remote
             .put(&path, Bytes::copy_from_slice(content).into())
             .await
@@ -128,13 +141,13 @@ impl ContentStorage {
 
     /// Check if content with the given hash exists.
     pub async fn exists(&self, content_hash: &str, extension: &str) -> Result<bool> {
-        let local_path = self.local_path(content_hash, extension);
+        let local_path = self.local_path(content_hash, extension)?;
         if local_path.exists() {
             return Ok(true);
         }
 
         if let Some(remote) = &self.remote_store {
-            let remote_path = self.object_path(content_hash, extension);
+            let remote_path = self.object_path(content_hash, extension)?;
             match remote.head(&remote_path).await {
                 Ok(_) => return Ok(true),
                 Err(object_store::Error::NotFound { .. }) => {}
@@ -159,7 +172,7 @@ impl ContentStorage {
     /// Store content and return its hash.
     pub async fn store(&self, content: &[u8], extension: &str) -> Result<String> {
         let content_hash = hash::blake3_hash(content);
-        let local_path = self.local_path(&content_hash, extension);
+        let local_path = self.local_path(&content_hash, extension)?;
 
         if !local_path.exists() {
             Self::ensure_parent(&local_path)?;
@@ -179,7 +192,7 @@ impl ContentStorage {
     /// Retrieve content by hash.
     /// If local copy is missing and remote is configured, attempts remote hydrate.
     pub async fn get(&self, content_hash: &str, extension: &str) -> Result<Bytes> {
-        let local_path = self.local_path(content_hash, extension);
+        let local_path = self.local_path(content_hash, extension)?;
         if local_path.exists() {
             let content = std::fs::read(&local_path)?;
             let actual_hash = hash::blake3_hash(&content);
@@ -197,7 +210,7 @@ impl ContentStorage {
             anyhow::bail!("Content not found: {}", content_hash);
         };
 
-        let remote_path = self.object_path(content_hash, extension);
+        let remote_path = self.object_path(content_hash, extension)?;
         let result = remote
             .get(&remote_path)
             .await
@@ -229,7 +242,7 @@ impl ContentStorage {
         content_hash: &str,
         extension: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, object_store::Error>> + Send>>> {
-        let local_path = self.local_path(content_hash, extension);
+        let local_path = self.local_path(content_hash, extension)?;
         if local_path.exists() {
             let bytes = std::fs::read(&local_path).map(Bytes::from).map_err(|e| {
                 object_store::Error::Generic {
@@ -244,7 +257,7 @@ impl ContentStorage {
             .remote_store
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Content not found: {}", content_hash))?;
-        let path = self.object_path(content_hash, extension);
+        let path = self.object_path(content_hash, extension)?;
         let result = remote
             .get(&path)
             .await
@@ -254,13 +267,13 @@ impl ContentStorage {
 
     /// Delete content by hash.
     pub async fn delete(&self, content_hash: &str, extension: &str) -> Result<()> {
-        let local_path = self.local_path(content_hash, extension);
+        let local_path = self.local_path(content_hash, extension)?;
         if local_path.exists() {
             std::fs::remove_file(&local_path)?;
         }
 
         if let Some(remote) = &self.remote_store {
-            let path = self.object_path(content_hash, extension);
+            let path = self.object_path(content_hash, extension)?;
             match remote.delete(&path).await {
                 Ok(()) => {}
                 Err(object_store::Error::NotFound { .. }) => {}
@@ -307,7 +320,7 @@ impl ContentStorage {
         content_hash: &str,
         extension: &str,
     ) -> Result<object_store::ObjectMeta> {
-        let local_path = self.local_path(content_hash, extension);
+        let local_path = self.local_path(content_hash, extension)?;
         if local_path.exists() {
             let metadata = std::fs::metadata(&local_path)?;
             let last_modified = metadata
@@ -317,7 +330,7 @@ impl ContentStorage {
                 .unwrap_or_else(chrono::Utc::now);
 
             return Ok(object_store::ObjectMeta {
-                location: self.object_path(content_hash, extension),
+                location: self.object_path(content_hash, extension)?,
                 last_modified,
                 size: metadata.len() as usize,
                 e_tag: None,
@@ -329,7 +342,7 @@ impl ContentStorage {
             .remote_store
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Content not found: {}", content_hash))?;
-        let path = self.object_path(content_hash, extension);
+        let path = self.object_path(content_hash, extension)?;
         let meta = remote
             .head(&path)
             .await
@@ -340,6 +353,8 @@ impl ContentStorage {
 
 #[cfg(test)]
 mod tests {
+    use super::ContentStorage;
+
     #[test]
     fn test_object_path() {
         let hash = "abcd1234567890abcd1234567890abcd1234567890abcd1234567890abcd1234";
@@ -350,5 +365,18 @@ mod tests {
         assert_eq!(dir1, "ab");
         assert_eq!(dir2, "cd");
         assert!(expected.contains("content/ab/cd/"));
+    }
+
+    #[test]
+    fn test_validate_content_hash_rejects_invalid_values() {
+        let valid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(ContentStorage::validate_content_hash(valid).is_ok());
+        assert!(ContentStorage::validate_content_hash("abc").is_err());
+        assert!(
+            ContentStorage::validate_content_hash(
+                "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+            )
+            .is_err()
+        );
     }
 }

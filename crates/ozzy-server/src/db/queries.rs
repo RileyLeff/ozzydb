@@ -1,7 +1,7 @@
 //! Database query implementations.
 
 use anyhow::Result;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::models::*;
@@ -258,17 +258,16 @@ impl Database {
     // Commit Operations
     // ========================================================================
 
-    /// Create a commit and all its related records (transaction).
+    /// Create a commit and all its related records using an existing transaction.
     /// `data_schemas` maps content_hash -> extracted Arrow schema JSON.
-    pub async fn create_commit(
+    pub async fn create_commit_in_tx(
         &self,
+        tx: &mut Transaction<'_, Postgres>,
         project_id: Uuid,
         commit: &Commit,
         author_id: Option<Uuid>,
         data_schemas: &std::collections::HashMap<String, serde_json::Value>,
     ) -> Result<Uuid> {
-        let mut tx = self.pool.begin().await?;
-
         // Insert commit
         let commit_id = Uuid::new_v4();
         sqlx::query(
@@ -284,7 +283,7 @@ impl Database {
         .bind(author_id)
         .bind(&commit.author)
         .bind(&commit.message)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         // Insert data sources
@@ -304,7 +303,7 @@ impl Database {
             .bind(data_schemas.get(&ds.hash).cloned().unwrap_or_else(|| serde_json::json!({})))
             .bind(ds.row_count.map(|n| n as i64))
             .bind(ds.byte_size.map(|n| n as i64))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
 
@@ -328,7 +327,7 @@ impl Database {
             .bind(&t.input_schema)
             .bind(&t.output_schema)
             .bind(t.reproducible)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
 
@@ -345,9 +344,26 @@ impl Database {
             .bind(name)
             .bind(&ep.description)
             .bind(serde_json::to_value(ep)?)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
+
+        Ok(commit_id)
+    }
+
+    /// Create a commit and all its related records (transaction).
+    /// `data_schemas` maps content_hash -> extracted Arrow schema JSON.
+    pub async fn create_commit(
+        &self,
+        project_id: Uuid,
+        commit: &Commit,
+        author_id: Option<Uuid>,
+        data_schemas: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<Uuid> {
+        let mut tx = self.pool.begin().await?;
+        let commit_id = self
+            .create_commit_in_tx(&mut tx, project_id, commit, author_id, data_schemas)
+            .await?;
 
         tx.commit().await?;
         Ok(commit_id)
@@ -481,8 +497,9 @@ impl Database {
     }
 
     /// Create or update a ref.
-    pub async fn upsert_ref(
+    pub async fn upsert_ref_in_tx(
         &self,
+        tx: &mut Transaction<'_, Postgres>,
         project_id: Uuid,
         name: &str,
         ref_type: &str,
@@ -503,8 +520,24 @@ impl Database {
         .bind(name)
         .bind(ref_type)
         .bind(commit_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut **tx)
         .await?;
+        Ok(r)
+    }
+
+    /// Create or update a ref.
+    pub async fn upsert_ref(
+        &self,
+        project_id: Uuid,
+        name: &str,
+        ref_type: &str,
+        commit_id: Uuid,
+    ) -> Result<DbRef> {
+        let mut tx = self.pool.begin().await?;
+        let r = self
+            .upsert_ref_in_tx(&mut tx, project_id, name, ref_type, commit_id)
+            .await?;
+        tx.commit().await?;
         Ok(r)
     }
 
@@ -654,8 +687,9 @@ impl Database {
     }
 
     /// Register content reference.
-    pub async fn register_content(
+    pub async fn register_content_in_tx(
         &self,
+        tx: &mut Transaction<'_, Postgres>,
         content_hash: &str,
         storage_key: &str,
         content_type: &str,
@@ -673,8 +707,23 @@ impl Database {
         .bind(storage_key)
         .bind(content_type)
         .bind(byte_size)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
+        Ok(())
+    }
+
+    /// Register content reference.
+    pub async fn register_content(
+        &self,
+        content_hash: &str,
+        storage_key: &str,
+        content_type: &str,
+        byte_size: i64,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        self.register_content_in_tx(&mut tx, content_hash, storage_key, content_type, byte_size)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 }

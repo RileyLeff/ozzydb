@@ -204,7 +204,10 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
 
     println!(
         "Pulling commit {} ({} data sources, {} transforms)",
-        &manifest.commit_hash[..8],
+        manifest
+            .commit_hash
+            .get(..8)
+            .unwrap_or(manifest.commit_hash.as_str()),
         manifest.data_hashes.len(),
         manifest.transform_hashes.len()
     );
@@ -294,7 +297,10 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
     println!(
         "Pull complete. Updated ref '{}' -> {}",
         normalized_ref,
-        &manifest.commit_hash[..8]
+        manifest
+            .commit_hash
+            .get(..8)
+            .unwrap_or(manifest.commit_hash.as_str())
     );
 
     Ok(())

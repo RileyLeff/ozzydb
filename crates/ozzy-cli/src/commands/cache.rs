@@ -21,7 +21,13 @@ pub async fn list() -> Result<()> {
             .unwrap_or_default();
         let accessed = entry.last_accessed.format("%Y-%m-%d %H:%M");
 
-        println!("  {}...", &entry.materialized_hash[..16]);
+        println!(
+            "  {}...",
+            entry
+                .materialized_hash
+                .get(..16)
+                .unwrap_or(entry.materialized_hash.as_str())
+        );
         println!("    Platform: {}", entry.platform);
         println!("    Size: {} {}", size, rows);
         println!("    Accessed: {} ({} times)", accessed, entry.access_count);

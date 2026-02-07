@@ -10,35 +10,18 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::error::{Error, Result};
 
 /// Validate that a name is safe for use in paths (no path traversal).
 /// Names should be simple identifiers without slashes, dots at the start, or other special chars.
 pub fn validate_safe_name(name: &str) -> Result<()> {
-    // Check for empty name
     if name.is_empty() {
         return Err(Error::InvalidPath("Name cannot be empty".to_string()));
     }
 
-    // Check for path separators
-    if name.contains('/') || name.contains('\\') {
-        return Err(Error::InvalidPath(format!(
-            "Name cannot contain path separators: {}",
-            name
-        )));
-    }
-
-    // Check for parent directory references
-    if name == ".." || name == "." || name.starts_with("..") {
-        return Err(Error::InvalidPath(format!(
-            "Name cannot reference parent directories: {}",
-            name
-        )));
-    }
-
-    // Check for hidden files (starting with .)
+    // Block leading dots (hidden files / parent traversal)
     if name.starts_with('.') {
         return Err(Error::InvalidPath(format!(
             "Name cannot start with a dot: {}",
@@ -46,11 +29,15 @@ pub fn validate_safe_name(name: &str) -> Result<()> {
         )));
     }
 
-    // Check for null bytes
-    if name.contains('\0') {
-        return Err(Error::InvalidPath(
-            "Name cannot contain null bytes".to_string(),
-        ));
+    // Allow alphanumeric, underscore, hyphen, and dot (for semver tags like v1.0.0)
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return Err(Error::InvalidPath(format!(
+            "Name must contain only [a-zA-Z0-9._-]: {}",
+            name
+        )));
     }
 
     Ok(())
@@ -413,6 +400,119 @@ impl Project {
         self.root.join("transforms")
     }
 
+    fn normalize_ref_relative_path(ref_name: &str) -> Result<PathBuf> {
+        let relative = ref_name.strip_prefix("refs/").unwrap_or(ref_name);
+        if relative.is_empty() {
+            return Err(Error::InvalidPath("Ref name cannot be empty".to_string()));
+        }
+
+        let relative_path = Path::new(relative);
+        if relative_path.is_absolute() {
+            return Err(Error::InvalidPath(format!(
+                "Ref path must be relative: {}",
+                ref_name
+            )));
+        }
+
+        let mut sanitized = PathBuf::new();
+        for component in relative_path.components() {
+            match component {
+                Component::Normal(part) => {
+                    let part_str = part.to_str().ok_or_else(|| {
+                        Error::InvalidPath(format!(
+                            "Ref contains non-UTF-8 path component: {}",
+                            ref_name
+                        ))
+                    })?;
+                    validate_safe_name(part_str)?;
+                    sanitized.push(part);
+                }
+                _ => {
+                    return Err(Error::InvalidPath(format!(
+                        "Invalid ref path '{}': path traversal or absolute components are not allowed",
+                        ref_name
+                    )));
+                }
+            }
+        }
+
+        if sanitized.as_os_str().is_empty() {
+            return Err(Error::InvalidPath("Ref name cannot be empty".to_string()));
+        }
+
+        Ok(sanitized)
+    }
+
+    fn assert_ref_path_within_refs_dir(&self, ref_path: &Path) -> Result<()> {
+        let refs_dir = self.refs_dir();
+        let canonical_refs = refs_dir.canonicalize().map_err(|e| {
+            Error::InvalidPath(format!(
+                "Cannot canonicalize refs directory {}: {}",
+                refs_dir.display(),
+                e
+            ))
+        })?;
+
+        if ref_path.exists() {
+            let canonical_ref_path = ref_path.canonicalize().map_err(|e| {
+                Error::InvalidPath(format!(
+                    "Cannot canonicalize ref path {}: {}",
+                    ref_path.display(),
+                    e
+                ))
+            })?;
+            if !canonical_ref_path.starts_with(&canonical_refs) {
+                return Err(Error::InvalidPath(format!(
+                    "Ref path {} escapes refs directory {}",
+                    ref_path.display(),
+                    refs_dir.display()
+                )));
+            }
+            return Ok(());
+        }
+
+        let mut current = ref_path.parent().ok_or_else(|| {
+            Error::InvalidPath(format!(
+                "Ref path has no parent directory: {}",
+                ref_path.display()
+            ))
+        })?;
+
+        loop {
+            if current.exists() {
+                let canonical_current = current.canonicalize().map_err(|e| {
+                    Error::InvalidPath(format!(
+                        "Cannot canonicalize ancestor path {}: {}",
+                        current.display(),
+                        e
+                    ))
+                })?;
+                if !canonical_current.starts_with(&canonical_refs) {
+                    return Err(Error::InvalidPath(format!(
+                        "Ref path {} escapes refs directory {}",
+                        ref_path.display(),
+                        refs_dir.display()
+                    )));
+                }
+                return Ok(());
+            }
+
+            current = current.parent().ok_or_else(|| {
+                Error::InvalidPath(format!(
+                    "Ref path {} does not have an ancestor within refs directory",
+                    ref_path.display()
+                ))
+            })?;
+        }
+    }
+
+    fn checked_ref_path(&self, ref_name: &str) -> Result<PathBuf> {
+        let relative = Self::normalize_ref_relative_path(ref_name)?;
+        let ref_path = self.refs_dir().join(relative);
+        self.assert_ref_path_within_refs_dir(&ref_path)?;
+        Ok(ref_path)
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Ref operations
     // ─────────────────────────────────────────────────────────────────────
@@ -433,11 +533,7 @@ impl Project {
         // Handle @latest → default branch
         if ref_name == "@latest" {
             let default_branch = &self.config.refs.head;
-            let ref_path = self.refs_dir().join(
-                default_branch
-                    .strip_prefix("refs/")
-                    .unwrap_or(default_branch),
-            );
+            let ref_path = self.checked_ref_path(default_branch)?;
             if ref_path.exists() {
                 let hash = fs::read_to_string(&ref_path)?.trim().to_string();
                 return Ok(Some(hash));
@@ -447,7 +543,7 @@ impl Project {
 
         // Handle @tag_name → refs/tags/tag_name
         if let Some(tag_name) = ref_name.strip_prefix('@') {
-            let tag_path = self.refs_dir().join("tags").join(tag_name);
+            let tag_path = self.checked_ref_path(&format!("refs/tags/{}", tag_name))?;
             if tag_path.exists() {
                 let hash = fs::read_to_string(&tag_path)?.trim().to_string();
                 return Ok(Some(hash));
@@ -465,9 +561,7 @@ impl Project {
         }
 
         // Standard ref path lookup
-        let ref_path = self
-            .refs_dir()
-            .join(ref_name.strip_prefix("refs/").unwrap_or(ref_name));
+        let ref_path = self.checked_ref_path(ref_name)?;
         if ref_path.exists() {
             let hash = fs::read_to_string(&ref_path)?.trim().to_string();
             Ok(Some(hash))
@@ -478,12 +572,14 @@ impl Project {
 
     /// Update a ref to point to a commit.
     pub fn update_ref(&self, ref_name: &str, commit_hash: &str) -> Result<()> {
-        let ref_path = self
-            .refs_dir()
-            .join(ref_name.strip_prefix("refs/").unwrap_or(ref_name));
+        let refs_dir = self.refs_dir();
+        fs::create_dir_all(&refs_dir)?;
+
+        let ref_path = self.checked_ref_path(ref_name)?;
         if let Some(parent) = ref_path.parent() {
             fs::create_dir_all(parent)?;
         }
+        self.assert_ref_path_within_refs_dir(&ref_path)?;
         fs::write(ref_path, format!("{}\n", commit_hash))?;
         Ok(())
     }
@@ -591,5 +687,31 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = Project::find_in(dir.path());
         assert!(matches!(result, Err(Error::NotInProject)));
+    }
+
+    #[test]
+    fn test_validate_safe_name_strict_ascii_pattern() {
+        assert!(validate_safe_name("main").is_ok());
+        assert!(validate_safe_name("branch_1-test").is_ok());
+        assert!(validate_safe_name("v1.0.0").is_ok());
+        assert!(validate_safe_name(".hidden").is_err());
+        assert!(validate_safe_name("has space").is_err());
+        assert!(validate_safe_name("../escape").is_err());
+    }
+
+    #[test]
+    fn test_update_ref_rejects_path_traversal() {
+        let dir = tempdir().unwrap();
+        let project = Project::init(dir.path(), "test-project", "testuser").unwrap();
+        let result = project.update_ref("../../outside", "abc123");
+        assert!(matches!(result, Err(Error::InvalidPath(_))));
+    }
+
+    #[test]
+    fn test_resolve_ref_rejects_path_traversal() {
+        let dir = tempdir().unwrap();
+        let project = Project::init(dir.path(), "test-project", "testuser").unwrap();
+        let result = project.resolve_ref("../../outside");
+        assert!(matches!(result, Err(Error::InvalidPath(_))));
     }
 }

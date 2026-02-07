@@ -436,21 +436,29 @@ async fn push(
     if ref_name.is_empty() {
         return Err(ApiError::bad_request("Ref name cannot be empty"));
     }
+    ozzy_core::validate_safe_name(&ref_name).map_err(|e| ApiError::bad_request(e.to_string()))?;
     let ref_type = if raw_ref_name.starts_with("refs/tags/") {
         "tag"
     } else {
         "branch"
     };
 
-    // Create commit in database.
+    // Persist commit/ref/content metadata atomically.
+    let mut tx = state
+        .db
+        .pool()
+        .begin()
+        .await
+        .map_err(anyhow::Error::from)
+        .map_err(ApiError::from)?;
     let commit_id = match state
         .db
-        .create_commit(project.id, &commit, Some(user.id), &data_schemas)
+        .create_commit_in_tx(&mut tx, project.id, &commit, Some(user.id), &data_schemas)
         .await
     {
         Ok(id) => id,
         Err(e) => {
-            // Commit failed to persist, so rollback newly uploaded blobs.
+            // Persistence failed, so rollback newly uploaded blobs.
             for (hash, ext) in &stored_hashes {
                 let _ = state.storage.delete(hash, ext).await;
             }
@@ -458,13 +466,37 @@ async fn push(
         }
     };
 
-    // Update the pushed ref.
+    // Update the pushed ref inside the same transaction.
     if let Err(e) = state
         .db
-        .upsert_ref(project.id, &ref_name, ref_type, commit_id)
+        .upsert_ref_in_tx(&mut tx, project.id, &ref_name, ref_type, commit_id)
         .await
     {
+        for (hash, ext) in &stored_hashes {
+            let _ = state.storage.delete(hash, ext).await;
+        }
         return Err(e.into());
+    }
+
+    // Register content references in the same transaction.
+    for (hash, storage_key, content_type, byte_size) in &content_registrations {
+        if let Err(e) = state
+            .db
+            .register_content_in_tx(&mut tx, hash, storage_key, content_type, *byte_size)
+            .await
+        {
+            for (hash, ext) in &stored_hashes {
+                let _ = state.storage.delete(hash, ext).await;
+            }
+            return Err(e.into());
+        }
+    }
+
+    if let Err(e) = tx.commit().await {
+        for (hash, ext) in &stored_hashes {
+            let _ = state.storage.delete(hash, ext).await;
+        }
+        return Err(anyhow::Error::from(e).into());
     }
 
     // Update tags sent by client (best-effort: skip tags whose commits are not present yet).
@@ -490,17 +522,6 @@ async fn push(
                 .db
                 .upsert_ref(project.id, tag_name, "tag", tag_commit_id)
                 .await?;
-        }
-    }
-
-    // Register content references only after commit/ref persistence succeeded.
-    for (hash, storage_key, content_type, byte_size) in &content_registrations {
-        if let Err(e) = state
-            .db
-            .register_content(hash, storage_key, content_type, *byte_size)
-            .await
-        {
-            return Err(e.into());
         }
     }
 
