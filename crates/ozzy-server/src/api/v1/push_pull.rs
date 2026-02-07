@@ -340,6 +340,7 @@ async fn push(
 
     // Ensure transform source blobs exist before persisting commit metadata.
     // This prevents dangling commits that reference unavailable transform hashes.
+    let empty_lock_sentinel = ozzy_core::hash::blake3_hash(b"");
     for t in commit.transforms.values() {
         if !state.storage.exists(&t.hash, "py").await? {
             return Err(ApiError::bad_request(format!(
@@ -348,7 +349,11 @@ async fn push(
             )));
         }
         // Verify lockfile hash matches uploaded content if declared.
-        if !t.lockfile_hash.is_empty() && !state.storage.exists(&t.lockfile_hash, "lock").await? {
+        // blake3_hash(b"") is the sentinel for "no lockfile" - skip verification for that.
+        if !t.lockfile_hash.is_empty()
+            && t.lockfile_hash != empty_lock_sentinel
+            && !state.storage.exists(&t.lockfile_hash, "lock").await?
+        {
             return Err(ApiError::bad_request(format!(
                 "Missing lockfile for transform '{}' (hash {}). Re-upload the lockfile.",
                 t.name, t.lockfile_hash
@@ -532,7 +537,7 @@ async fn pull_manifest(
         .db
         .get_project(&owner, &project_slug)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+        .ok_or_else(|| ApiError::not_found("Project not found"))?;
 
     enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
@@ -541,13 +546,13 @@ async fn pull_manifest(
         .db
         .get_ref_by_name(project.id, ref_name)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Ref not found: {}", ref_name))?;
+        .ok_or_else(|| ApiError::not_found(format!("Ref not found: {}", ref_name)))?;
 
     let commit = state
         .db
         .get_commit_by_id(db_ref.commit_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Commit not found"))?;
+        .ok_or_else(|| ApiError::not_found("Commit not found"))?;
 
     // Get data sources and transforms for this commit
     let data_sources = state.db.get_data_sources(commit.id).await?;
@@ -591,7 +596,7 @@ async fn pull(
         .db
         .get_project(&owner, &project_slug)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+        .ok_or_else(|| ApiError::not_found("Project not found"))?;
 
     enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
@@ -600,13 +605,13 @@ async fn pull(
         .db
         .get_ref_by_name(project.id, ref_name)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Ref not found: {}", ref_name))?;
+        .ok_or_else(|| ApiError::not_found(format!("Ref not found: {}", ref_name)))?;
 
     let commit = state
         .db
         .get_commit_by_id(db_ref.commit_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Commit not found"))?;
+        .ok_or_else(|| ApiError::not_found("Commit not found"))?;
 
     // Pre-check estimated content size before loading into memory
     let max_size = state.config.max_tar_size_bytes;
@@ -807,7 +812,7 @@ async fn fetch_endpoint_manifest(
         .db
         .get_project(&owner, &project_slug)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+        .ok_or_else(|| ApiError::not_found("Project not found"))?;
 
     enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
@@ -815,19 +820,19 @@ async fn fetch_endpoint_manifest(
         .db
         .get_ref_by_name(project.id, &ref_name)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Ref not found: {}", ref_name))?;
+        .ok_or_else(|| ApiError::not_found(format!("Ref not found: {}", ref_name)))?;
 
     let commit = state
         .db
         .get_commit_by_id(db_ref.commit_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Commit not found"))?;
+        .ok_or_else(|| ApiError::not_found("Commit not found"))?;
 
     let endpoint = state
         .db
         .get_endpoint(commit.id, &endpoint_name)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Endpoint not found: {}", endpoint_name))?;
+        .ok_or_else(|| ApiError::not_found(format!("Endpoint not found: {}", endpoint_name)))?;
 
     // Get all data sources and transforms needed for this endpoint
     let data_sources = state.db.get_data_sources(commit.id).await?;
@@ -870,7 +875,7 @@ async fn resolve_endpoint(
         .db
         .get_project(&owner, &project_slug)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+        .ok_or_else(|| ApiError::not_found("Project not found"))?;
 
     enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
@@ -878,19 +883,19 @@ async fn resolve_endpoint(
         .db
         .get_ref_by_name(project.id, &ref_name)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Ref not found: {}", ref_name))?;
+        .ok_or_else(|| ApiError::not_found(format!("Ref not found: {}", ref_name)))?;
 
     let commit = state
         .db
         .get_commit_by_id(db_ref.commit_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Commit not found"))?;
+        .ok_or_else(|| ApiError::not_found("Commit not found"))?;
 
     let endpoint = state
         .db
         .get_endpoint(commit.id, &endpoint_name)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Endpoint not found: {}", endpoint_name))?;
+        .ok_or_else(|| ApiError::not_found(format!("Endpoint not found: {}", endpoint_name)))?;
 
     Ok(Json(ResolveEndpointResponse {
         owner,
@@ -912,7 +917,7 @@ async fn fetch_endpoint(
         .db
         .get_project(&owner, &project_slug)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+        .ok_or_else(|| ApiError::not_found("Project not found"))?;
 
     enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
@@ -920,19 +925,19 @@ async fn fetch_endpoint(
         .db
         .get_ref_by_name(project.id, &ref_name)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Ref not found: {}", ref_name))?;
+        .ok_or_else(|| ApiError::not_found(format!("Ref not found: {}", ref_name)))?;
 
     let commit = state
         .db
         .get_commit_by_id(db_ref.commit_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Commit not found"))?;
+        .ok_or_else(|| ApiError::not_found("Commit not found"))?;
 
     let endpoint = state
         .db
         .get_endpoint(commit.id, &endpoint_name)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Endpoint not found: {}", endpoint_name))?;
+        .ok_or_else(|| ApiError::not_found(format!("Endpoint not found: {}", endpoint_name)))?;
 
     // Track total size for memory protection
     let max_size = state.config.max_tar_size_bytes;

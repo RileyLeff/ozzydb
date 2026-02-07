@@ -473,6 +473,7 @@ pub async fn run(
         let params_schema_hash = canon::hash_json(&transform.params_schema);
         let full_transform_hash = hash::transform_hash(
             &transform.hash,
+            &transform.function_name,
             &transform.lockfile_hash,
             &transform.runtime,
             &params_schema_hash,

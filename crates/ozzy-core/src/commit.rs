@@ -156,6 +156,12 @@ pub fn collect_transforms(project: &Project) -> Result<BTreeMap<String, Transfor
 
         // Look for @ozzy.transform decorated functions
         for transform in parse_python_transforms(&content, path, &source_path)? {
+            if transforms.contains_key(&transform.name) {
+                return Err(crate::error::Error::TransformAlreadyExists(format!(
+                    "'{}' defined in multiple files",
+                    transform.name
+                )));
+            }
             transforms.insert(transform.name.clone(), transform);
         }
     }

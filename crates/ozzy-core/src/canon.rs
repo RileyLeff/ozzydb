@@ -84,6 +84,34 @@ pub fn hash_source_file(path: &Path) -> std::io::Result<String> {
 /// - Keys sorted alphabetically (recursive)
 /// - No whitespace between tokens
 /// - Numbers in shortest decimal representation
+/// Escape a string for canonical JSON (handles quotes, backslashes, control chars, non-ASCII).
+fn canonicalize_json_string(s: &str) -> String {
+    let escaped: String = s
+        .chars()
+        .map(|c| match c {
+            '"' => "\\\"".to_string(),
+            '\\' => "\\\\".to_string(),
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            c if c.is_ascii_graphic() || c == ' ' => c.to_string(),
+            c => {
+                let cp = c as u32;
+                if cp > 0xFFFF {
+                    // Supplementary character: encode as UTF-16 surrogate pair
+                    let adjusted = cp - 0x10000;
+                    let high = 0xD800 + (adjusted >> 10);
+                    let low = 0xDC00 + (adjusted & 0x3FF);
+                    format!("\\u{:04x}\\u{:04x}", high, low)
+                } else {
+                    format!("\\u{:04x}", cp)
+                }
+            }
+        })
+        .collect();
+    format!("\"{}\"", escaped)
+}
+
 pub fn canonicalize_json(value: &Value) -> String {
     match value {
         Value::Object(map) => {
@@ -91,7 +119,7 @@ pub fn canonicalize_json(value: &Value) -> String {
             let sorted: BTreeMap<_, _> = map.iter().collect();
             let pairs: Vec<String> = sorted
                 .iter()
-                .map(|(k, v)| format!("\"{}\":{}", k, canonicalize_json(v)))
+                .map(|(k, v)| format!("{}:{}", canonicalize_json_string(k), canonicalize_json(v)))
                 .collect();
             format!("{{{}}}", pairs.join(","))
         }
@@ -99,33 +127,7 @@ pub fn canonicalize_json(value: &Value) -> String {
             let items: Vec<String> = arr.iter().map(canonicalize_json).collect();
             format!("[{}]", items.join(","))
         }
-        Value::String(s) => {
-            // Escape special characters and use \uXXXX for non-ASCII
-            let escaped: String = s
-                .chars()
-                .map(|c| match c {
-                    '"' => "\\\"".to_string(),
-                    '\\' => "\\\\".to_string(),
-                    '\n' => "\\n".to_string(),
-                    '\r' => "\\r".to_string(),
-                    '\t' => "\\t".to_string(),
-                    c if c.is_ascii_graphic() || c == ' ' => c.to_string(),
-                    c => {
-                        let cp = c as u32;
-                        if cp > 0xFFFF {
-                            // Supplementary character: encode as UTF-16 surrogate pair
-                            let adjusted = cp - 0x10000;
-                            let high = 0xD800 + (adjusted >> 10);
-                            let low = 0xDC00 + (adjusted & 0x3FF);
-                            format!("\\u{:04x}\\u{:04x}", high, low)
-                        } else {
-                            format!("\\u{:04x}", cp)
-                        }
-                    }
-                })
-                .collect();
-            format!("\"{}\"", escaped)
-        }
+        Value::String(s) => canonicalize_json_string(s),
         Value::Number(n) => {
             // Use shortest decimal representation
             if let Some(i) = n.as_i64() {

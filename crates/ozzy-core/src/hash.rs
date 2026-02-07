@@ -42,15 +42,17 @@ pub fn blake3_hash_components(components: &[&str]) -> String {
 
 /// Compute the hash of a transform.
 ///
-/// transform_hash = blake3(canonical_source + lockfile_hash + runtime_version + params_schema_hash)
+/// transform_hash = blake3(source_hash + function_name + lockfile_hash + runtime_version + params_schema_hash)
 pub fn transform_hash(
     source_hash: &str,
+    function_name: &str,
     lockfile_hash: &str,
     runtime_version: &str,
     params_schema_hash: &str,
 ) -> String {
     blake3_hash_components(&[
         source_hash,
+        function_name,
         lockfile_hash,
         runtime_version,
         params_schema_hash,
@@ -114,7 +116,13 @@ mod tests {
 
     #[test]
     fn test_transform_hash() {
-        let hash = transform_hash("source123", "lockfile456", "python-3.11", "params789");
+        let hash = transform_hash(
+            "source123",
+            "my_func",
+            "lockfile456",
+            "python-3.11",
+            "params789",
+        );
         assert!(!hash.is_empty());
         assert_eq!(hash.len(), 64); // BLAKE3 produces 256-bit (64 hex chars) hashes
     }
