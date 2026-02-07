@@ -320,7 +320,19 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>, force: bool) -> R
 
     let commit_json_data =
         commit_json_data.context("Pull archive is missing required file commit.json")?;
-    validate_pulled_commit_json(&commit_json_data, &manifest.commit_hash)?;
+    let pulled_commit = validate_pulled_commit_json(&commit_json_data, &manifest.commit_hash)?;
+
+    // Build expected hash maps for content verification
+    let expected_data: std::collections::HashMap<String, String> = pulled_commit
+        .data_sources
+        .values()
+        .map(|ds| (ds.path.clone(), ds.hash.clone()))
+        .collect();
+    let expected_transforms: std::collections::HashMap<String, String> = pulled_commit
+        .transforms
+        .values()
+        .map(|t| (t.source_path.clone(), t.hash.clone()))
+        .collect();
 
     // Create data and transforms directories
     std::fs::create_dir_all(project.root.join("data"))?;
@@ -328,6 +340,34 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>, force: bool) -> R
     let canonical_project_root = project.root.canonicalize()?;
 
     for (path, content) in extracted_files {
+        // Verify content hashes against the commit metadata
+        let rel = path.to_string_lossy().replace('\\', "/");
+        if let Some(expected) = expected_data.get(&rel) {
+            let actual = ozzy_core::hash::blake3_hash(&content);
+            if actual != *expected {
+                anyhow::bail!(
+                    "Data hash mismatch for {}: expected {}, got {}",
+                    rel,
+                    expected,
+                    actual
+                );
+            }
+        }
+        if let Some(expected) = expected_transforms.get(&rel) {
+            let text = std::str::from_utf8(&content)
+                .with_context(|| format!("Transform {} is not valid UTF-8", rel))?;
+            let canonical = ozzy_core::canon::canonicalize_source(text);
+            let actual = ozzy_core::hash::blake3_hash(canonical.as_bytes());
+            if actual != *expected {
+                anyhow::bail!(
+                    "Transform hash mismatch for {}: expected {}, got {}",
+                    rel,
+                    expected,
+                    actual
+                );
+            }
+        }
+
         let dest_path = checked_destination(&project.root, &canonical_project_root, &path)?;
 
         let mut file = std::fs::File::create(&dest_path)?;
@@ -365,8 +405,8 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>, force: bool) -> R
     let ref_full = resolve_local_ref_path(display_ref, refs.as_ref(), &project.config.refs.head);
     project.update_ref(&ref_full, &manifest.commit_hash)?;
 
-    // Also update HEAD if we're pulling the default branch
-    if ref_full == project.config.refs.head || display_ref == "main" {
+    // Also update HEAD if we're pulling the branch that HEAD points to
+    if ref_full == project.config.refs.head {
         project.update_ref(&project.config.refs.head, &manifest.commit_hash)?;
     }
 

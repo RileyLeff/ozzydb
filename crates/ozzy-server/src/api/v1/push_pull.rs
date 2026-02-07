@@ -256,16 +256,21 @@ async fn push(
             ));
         }
 
-        // Store transform files
+        // Store transform files (canonicalize before hashing to match client-side hashing)
         for (filename, content) in &transform_files {
             let ext = std::path::Path::new(filename)
                 .extension()
                 .and_then(|s| s.to_str())
                 .unwrap_or("py");
-            let content_hash = ozzy_core::hash::blake3_hash(content);
+            let source_text = std::str::from_utf8(content).map_err(|_| {
+                ApiError::bad_request(format!("Transform '{}' is not valid UTF-8", filename))
+            })?;
+            let canonical = ozzy_core::canon::canonicalize_source(source_text);
+            let canonical_bytes = canonical.as_bytes();
+            let content_hash = ozzy_core::hash::blake3_hash(canonical_bytes);
             let is_new = !state.storage.exists(&content_hash, ext).await?;
             if is_new {
-                state.storage.store(content, ext).await?;
+                state.storage.store(canonical_bytes, ext).await?;
                 new_transform_count += 1;
             }
             let storage_key = format!(
@@ -279,7 +284,7 @@ async fn push(
                 content_hash,
                 storage_key,
                 ext.to_string(),
-                content.len() as i64,
+                canonical_bytes.len() as i64,
             ));
         }
 

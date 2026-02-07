@@ -233,9 +233,11 @@ impl ContentStorage {
             );
         }
 
-        // Hydrate local cache for future reads.
+        // Hydrate local cache for future reads (atomic: write to temp, then rename).
         Self::ensure_parent(&local_path)?;
-        std::fs::write(&local_path, &content)?;
+        let tmp_path = local_path.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&tmp_path, &content)?;
+        std::fs::rename(&tmp_path, &local_path)?;
 
         Ok(content)
     }

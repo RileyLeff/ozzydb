@@ -29,14 +29,24 @@ fn load_credentials() -> Result<CredentialsFile> {
 fn save_credentials(creds: &CredentialsFile) -> Result<()> {
     let path = credentials_path()?;
     let content = serde_json::to_string_pretty(creds)?;
-    std::fs::write(&path, content)?;
 
-    // Set file permissions to 0600 (owner read/write only) on Unix
+    // On Unix, create with 0600 mode atomically to avoid a race window
+    // where credentials are world-readable before chmod.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&path, perms)?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(content.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, content)?;
     }
 
     Ok(())

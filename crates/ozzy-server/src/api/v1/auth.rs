@@ -85,23 +85,33 @@ async fn github_poll(
     let (plaintext_token, token_hash) = tokens::generate_api_token();
     let token_prefix = &plaintext_token[..12.min(plaintext_token.len())];
 
-    // Replace any existing cli-session token so repeated logins don't hit UNIQUE(user_id, name).
-    state
-        .db
-        .delete_token_by_name(user.id, "cli-session")
-        .await?;
-
-    state
-        .db
-        .create_token(
-            user.id,
-            "cli-session",
-            &token_hash,
-            token_prefix,
-            &["owner".to_string()],
-            Some(chrono::Utc::now() + chrono::Duration::days(90)),
+    // Replace any existing cli-session token atomically within a transaction
+    // to avoid race conditions from concurrent login attempts.
+    {
+        let mut tx = state.db.pool().begin().await.map_err(anyhow::Error::from)?;
+        sqlx::query("DELETE FROM api_tokens WHERE user_id = $1 AND name = $2")
+            .bind(user.id)
+            .bind("cli-session")
+            .execute(&mut *tx)
+            .await
+            .map_err(anyhow::Error::from)?;
+        let token_id = uuid::Uuid::new_v4();
+        let expires = chrono::Utc::now() + chrono::Duration::days(90);
+        sqlx::query(
+            "INSERT INTO api_tokens (id, user_id, name, token_hash, token_prefix, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
-        .await?;
+        .bind(token_id)
+        .bind(user.id)
+        .bind("cli-session")
+        .bind(&token_hash)
+        .bind(token_prefix)
+        .bind(&vec!["owner".to_string()])
+        .bind(expires)
+        .execute(&mut *tx)
+        .await
+        .map_err(anyhow::Error::from)?;
+        tx.commit().await.map_err(anyhow::Error::from)?;
+    }
 
     Ok(Json(AuthResponse {
         access_token: Some(plaintext_token),

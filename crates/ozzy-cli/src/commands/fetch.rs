@@ -347,15 +347,56 @@ pub async fn run(
     let cursor = std::io::Cursor::new(tar_data);
     let mut archive = tar::Archive::new(cursor);
 
+    // Build expected hash maps from manifest for content verification
+    let expected_data: std::collections::HashMap<String, String> = manifest
+        .data_hashes
+        .iter()
+        .map(|(name, hash)| (format!("data/{}.parquet", name), hash.clone()))
+        .collect();
+    let expected_transforms: std::collections::HashMap<String, String> = manifest
+        .transform_hashes
+        .iter()
+        .map(|(name, hash)| (format!("transforms/{}.py", name), hash.clone()))
+        .collect();
+
     let canonical_temp_path = temp_path.canonicalize()?;
     for entry in archive.entries()? {
         let mut entry = entry?;
         let raw_path = entry.path()?.to_path_buf();
         let path = sanitize_archive_relative_path(&raw_path)?;
-        let dest_path = checked_destination(temp_path, &canonical_temp_path, &path)?;
 
         let mut content = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut content)?;
+
+        // Verify content hashes against manifest
+        let rel = path.to_string_lossy().replace('\\', "/");
+        if let Some(expected) = expected_data.get(&rel) {
+            let actual = ozzy_core::hash::blake3_hash(&content);
+            if actual != *expected {
+                anyhow::bail!(
+                    "Data hash mismatch for {}: expected {}, got {}",
+                    rel,
+                    expected,
+                    actual
+                );
+            }
+        }
+        if let Some(expected) = expected_transforms.get(&rel) {
+            let text = std::str::from_utf8(&content)
+                .with_context(|| format!("Transform {} is not valid UTF-8", rel))?;
+            let canonical = ozzy_core::canon::canonicalize_source(text);
+            let actual = ozzy_core::hash::blake3_hash(canonical.as_bytes());
+            if actual != *expected {
+                anyhow::bail!(
+                    "Transform hash mismatch for {}: expected {}, got {}",
+                    rel,
+                    expected,
+                    actual
+                );
+            }
+        }
+
+        let dest_path = checked_destination(temp_path, &canonical_temp_path, &path)?;
 
         let mut file = std::fs::File::create(&dest_path)?;
         file.write_all(&content)?;
