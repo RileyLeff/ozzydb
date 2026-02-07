@@ -146,6 +146,10 @@ enum Commands {
         /// Ref to pull (branch or tag, defaults to 'main')
         #[arg(long, default_value = "main")]
         r#ref: String,
+
+        /// Overwrite local uncommitted data/transforms changes
+        #[arg(long)]
+        force: bool,
     },
 
     /// Fetch and execute a remote endpoint
@@ -495,7 +499,11 @@ async fn main() -> Result<()> {
         Commands::Push { message, remote } => {
             commands::push::run(message.as_deref(), &remote).await
         }
-        Commands::Pull { remote, r#ref } => commands::pull::run(Some(&remote), Some(&r#ref)).await,
+        Commands::Pull {
+            remote,
+            r#ref,
+            force,
+        } => commands::pull::run(Some(&remote), Some(&r#ref), force).await,
         Commands::Fetch {
             endpoint,
             output,

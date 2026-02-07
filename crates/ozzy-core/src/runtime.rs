@@ -21,6 +21,23 @@ fn escape_python_string(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
+fn build_sorted_input_load_code(inputs: &HashMap<String, PathBuf>) -> String {
+    let mut sorted_inputs: Vec<_> = inputs.iter().collect();
+    sorted_inputs.sort_by(|(name_a, _), (name_b, _)| name_a.cmp(name_b));
+
+    sorted_inputs
+        .into_iter()
+        .map(|(name, path)| {
+            format!(
+                "inputs[\"{}\"] = pl.read_parquet(\"{}\")",
+                escape_python_string(name),
+                escape_python_string(&path.display().to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Deterministic environment variables for transform execution.
 pub const DETERMINISTIC_ENV: &[(&str, &str)] = &[
     ("PYTHONHASHSEED", "0"),
@@ -275,17 +292,7 @@ impl PythonRuntime {
         let (transform_dir, module_name) = extract_transform_info(transform_source)?;
 
         // Build input loading code with proper escaping
-        let input_code: String = inputs
-            .iter()
-            .map(|(name, path)| {
-                format!(
-                    "inputs[\"{}\"] = pl.read_parquet(\"{}\")",
-                    escape_python_string(name),
-                    escape_python_string(&path.display().to_string())
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let input_code = build_sorted_input_load_code(inputs);
 
         // Escape paths and identifiers for safe script generation
         let escaped_transform_dir = escape_python_string(&transform_dir);
@@ -380,17 +387,7 @@ print("SUCCESS")
         let (transform_dir, module_name) = extract_transform_info(transform_source)?;
 
         // Build input loading code with proper escaping
-        let input_code: String = inputs
-            .iter()
-            .map(|(name, path)| {
-                format!(
-                    "inputs[\"{}\"] = pl.read_parquet(\"{}\")",
-                    escape_python_string(name),
-                    escape_python_string(&path.display().to_string())
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let input_code = build_sorted_input_load_code(inputs);
 
         // Escape paths and identifiers for safe script generation
         let escaped_transform_dir = escape_python_string(&transform_dir);
@@ -679,17 +676,7 @@ pub fn execute_transform_multi(
     let (transform_dir, module_name) = extract_transform_info(transform_source)?;
 
     // Build input loading code for all inputs with proper escaping
-    let input_code: String = inputs
-        .iter()
-        .map(|(name, path)| {
-            format!(
-                "inputs[\"{}\"] = pl.read_parquet(\"{}\")",
-                escape_python_string(name),
-                escape_python_string(&path.display().to_string())
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let input_code = build_sorted_input_load_code(inputs);
 
     // Escape paths and identifiers for safe script generation
     let escaped_transform_dir = escape_python_string(&transform_dir);
@@ -814,5 +801,18 @@ mod tests {
 
         let path = runtime.env_path("abcdef123456789", "3.11");
         assert!(path.to_string_lossy().contains("py311-abcdef123456"));
+    }
+
+    #[test]
+    fn test_build_sorted_input_load_code_orders_by_key() {
+        let mut inputs = HashMap::new();
+        inputs.insert("right".to_string(), PathBuf::from("/tmp/right.parquet"));
+        inputs.insert("left".to_string(), PathBuf::from("/tmp/left.parquet"));
+
+        let code = build_sorted_input_load_code(&inputs);
+        let left_idx = code.find("inputs[\"left\"]").unwrap();
+        let right_idx = code.find("inputs[\"right\"]").unwrap();
+
+        assert!(left_idx < right_idx);
     }
 }

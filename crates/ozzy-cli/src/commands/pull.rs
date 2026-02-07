@@ -2,9 +2,12 @@
 
 use anyhow::{Context, Result};
 use ozzy_core::Project;
+use ozzy_core::commit;
+use ozzy_core::error::Error as CoreError;
+use ozzy_core::project::Commit;
 use ozzy_core::registry::protocol::ListRefsResponse;
 use ozzy_core::registry::{CredentialsFile, RegistryClient};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -128,6 +131,56 @@ fn resolve_local_ref_path(
     }
 }
 
+fn is_workspace_dirty_since_last_commit(project: &Project) -> Result<bool> {
+    let current_data_hashes: BTreeMap<String, String> = commit::collect_data_sources(project)?
+        .into_values()
+        .map(|ds| (ds.path, ds.hash))
+        .collect();
+    let current_transform_hashes: BTreeMap<String, String> = commit::collect_transforms(project)?
+        .into_values()
+        .map(|transform| (transform.source_path, transform.hash))
+        .collect();
+
+    let last_commit = match project.latest_commit() {
+        Ok(commit) => commit,
+        Err(CoreError::CommitNotFound(_)) => None,
+        Err(err) => return Err(err.into()),
+    };
+
+    if let Some(last_commit) = last_commit {
+        let committed_data_hashes: BTreeMap<String, String> = last_commit
+            .data_sources
+            .into_values()
+            .map(|ds| (ds.path, ds.hash))
+            .collect();
+        let committed_transform_hashes: BTreeMap<String, String> = last_commit
+            .transforms
+            .into_values()
+            .map(|transform| (transform.source_path, transform.hash))
+            .collect();
+
+        Ok(current_data_hashes != committed_data_hashes
+            || current_transform_hashes != committed_transform_hashes)
+    } else {
+        Ok(!current_data_hashes.is_empty() || !current_transform_hashes.is_empty())
+    }
+}
+
+fn validate_pulled_commit_json(commit_json: &[u8], expected_hash: &str) -> Result<Commit> {
+    let commit: Commit =
+        serde_json::from_slice(commit_json).context("Failed to parse commit.json from archive")?;
+
+    if commit.hash != expected_hash {
+        anyhow::bail!(
+            "Pull archive commit hash mismatch: manifest={}, commit.json={}",
+            expected_hash,
+            commit.hash
+        );
+    }
+
+    Ok(commit)
+}
+
 fn reconcile_staged_endpoints_after_pull(project: &Project) -> Result<()> {
     let staged_dir = project.ozzy_dir().join("staged_endpoints");
     if !staged_dir.exists() {
@@ -164,7 +217,7 @@ fn reconcile_staged_endpoints_after_pull(project: &Project) -> Result<()> {
 }
 
 /// Pull from a remote registry.
-pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
+pub async fn run(remote: Option<&str>, ref_name: Option<&str>, force: bool) -> Result<()> {
     let project = Project::find_current()?;
 
     // Get remote URL
@@ -197,6 +250,18 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
             .unwrap_or(s),
     };
 
+    let workspace_dirty = is_workspace_dirty_since_last_commit(&project)?;
+    if workspace_dirty && !force {
+        anyhow::bail!(
+            "Refusing to pull: local data/ and transforms/ contain uncommitted changes. Commit them first or re-run with --force."
+        );
+    }
+    if workspace_dirty && force {
+        println!(
+            "  Warning: --force set, local uncommitted data/transforms changes will be overwritten"
+        );
+    }
+
     // Get manifest first to show what will be downloaded
     let manifest = client
         .pull_manifest(owner, project_slug, Some(normalized_ref))
@@ -221,12 +286,8 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
     let cursor = std::io::Cursor::new(tar_data);
     let mut archive = tar::Archive::new(cursor);
 
-    // Create data and transforms directories
-    std::fs::create_dir_all(project.root.join("data"))?;
-    std::fs::create_dir_all(project.root.join("transforms"))?;
-    let canonical_project_root = project.root.canonicalize()?;
-
     let mut commit_json_data: Option<Vec<u8>> = None;
+    let mut extracted_files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     let mut keep_data_files: HashSet<PathBuf> = HashSet::new();
     let mut keep_transform_files: HashSet<PathBuf> = HashSet::new();
 
@@ -239,12 +300,25 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
         let mut content = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut content)?;
 
-        // Capture commit.json for storing locally
+        // Capture commit.json for integrity verification and local storage
         if path.to_string_lossy() == "commit.json" {
-            commit_json_data = Some(content.clone());
+            commit_json_data = Some(content);
             continue;
         }
 
+        extracted_files.push((path, content));
+    }
+
+    let commit_json_data =
+        commit_json_data.context("Pull archive is missing required file commit.json")?;
+    validate_pulled_commit_json(&commit_json_data, &manifest.commit_hash)?;
+
+    // Create data and transforms directories
+    std::fs::create_dir_all(project.root.join("data"))?;
+    std::fs::create_dir_all(project.root.join("transforms"))?;
+    let canonical_project_root = project.root.canonicalize()?;
+
+    for (path, content) in extracted_files {
         let dest_path = checked_destination(&project.root, &canonical_project_root, &path)?;
 
         let mut file = std::fs::File::create(&dest_path)?;
@@ -271,13 +345,11 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
     )?;
 
     // Store commit in .ozzy/commits/{hash}.json
-    if let Some(commit_data) = &commit_json_data {
-        let commits_dir = project.commits_dir();
-        std::fs::create_dir_all(&commits_dir)?;
-        let commit_path = commits_dir.join(format!("{}.json", manifest.commit_hash));
-        let mut file = std::fs::File::create(&commit_path)?;
-        file.write_all(commit_data)?;
-    }
+    let commits_dir = project.commits_dir();
+    std::fs::create_dir_all(&commits_dir)?;
+    let commit_path = commits_dir.join(format!("{}.json", manifest.commit_hash));
+    let mut file = std::fs::File::create(&commit_path)?;
+    file.write_all(&commit_json_data)?;
 
     // Resolve whether this is a branch or tag ref so local refs stay consistent.
     let refs = client.list_refs(owner, project_slug).await.ok();
@@ -309,9 +381,10 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        reconcile_staged_endpoints_after_pull, resolve_local_ref_path,
-        sanitize_archive_relative_path,
+        is_workspace_dirty_since_last_commit, reconcile_staged_endpoints_after_pull,
+        resolve_local_ref_path, sanitize_archive_relative_path, validate_pulled_commit_json,
     };
+    use ozzy_core::commit as commit_lib;
     use ozzy_core::registry::protocol::{ListRefsResponse, RefInfo};
     use std::path::Path;
     use tempfile::tempdir;
@@ -371,5 +444,93 @@ mod tests {
             })
             .count();
         assert_eq!(backup_count, 1);
+    }
+
+    #[test]
+    fn workspace_dirty_true_without_commit() {
+        let dir = tempdir().unwrap();
+        let project = ozzy_core::Project::init(dir.path(), "test", "user").unwrap();
+
+        std::fs::write(
+            project.transforms_dir().join("t.py"),
+            r#"
+class ozzy:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
+
+@ozzy.transform()
+def t(inputs, params):
+    return inputs["main"]
+"#,
+        )
+        .unwrap();
+
+        assert!(is_workspace_dirty_since_last_commit(&project).unwrap());
+    }
+
+    #[test]
+    fn workspace_dirty_detects_transform_hash_changes() {
+        let dir = tempdir().unwrap();
+        let project = ozzy_core::Project::init(dir.path(), "test", "user").unwrap();
+        let transform_path = project.transforms_dir().join("t.py");
+
+        std::fs::write(
+            &transform_path,
+            r#"
+class ozzy:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
+
+@ozzy.transform()
+def t(inputs, params):
+    return inputs["main"]
+"#,
+        )
+        .unwrap();
+
+        let commit = commit_lib::create_commit(&project, "initial", "tester").unwrap();
+        project.save_commit(&commit).unwrap();
+        project
+            .update_ref(&project.config.refs.head, &commit.hash)
+            .unwrap();
+
+        assert!(!is_workspace_dirty_since_last_commit(&project).unwrap());
+
+        std::fs::write(
+            &transform_path,
+            r#"
+class ozzy:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
+
+@ozzy.transform()
+def t(inputs, params):
+    return inputs["main"].head(1)
+"#,
+        )
+        .unwrap();
+
+        assert!(is_workspace_dirty_since_last_commit(&project).unwrap());
+    }
+
+    #[test]
+    fn validate_pulled_commit_json_requires_matching_hash() {
+        let dir = tempdir().unwrap();
+        let project = ozzy_core::Project::init(dir.path(), "test", "user").unwrap();
+
+        let commit = commit_lib::create_commit(&project, "initial", "tester").unwrap();
+        let commit_json = serde_json::to_vec(&commit).unwrap();
+
+        assert!(validate_pulled_commit_json(&commit_json, &commit.hash).is_ok());
+        assert!(validate_pulled_commit_json(&commit_json, "different-hash").is_err());
     }
 }

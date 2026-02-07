@@ -5,7 +5,7 @@ use ozzy_core::cache::LocalCache;
 use ozzy_core::project::{Endpoint, SourceType};
 use ozzy_core::registry::{CredentialsFile, RegistryClient};
 use ozzy_core::{canon, commit, hash, platform, runtime};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
@@ -100,6 +100,50 @@ fn build_param_overrides(
     }
 
     (global, scoped)
+}
+
+#[derive(Default)]
+struct NocacheCleanup {
+    paths: HashSet<PathBuf>,
+}
+
+impl NocacheCleanup {
+    fn track(&mut self, path: &Path) {
+        if is_nocache_output(path) {
+            self.paths.insert(path.to_path_buf());
+        }
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        let paths: Vec<PathBuf> = self.paths.drain().collect();
+        for path in paths {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to remove temporary nocache file {}: {}",
+                        path.display(),
+                        e
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for NocacheCleanup {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+fn is_nocache_output(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.starts_with("nocache_") && name.ends_with(".parquet"))
+        .unwrap_or(false)
 }
 
 fn sanitize_archive_relative_path(path: &Path) -> Result<PathBuf> {
@@ -329,6 +373,7 @@ pub async fn run(
     let mut node_outputs: HashMap<String, PathBuf> = HashMap::new();
     let mut non_reproducible_nodes: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    let mut nocache_cleanup = NocacheCleanup::default();
 
     for node_name in &execution_order {
         let node = endpoint_def
@@ -484,6 +529,7 @@ pub async fn run(
         if effectively_non_reproducible {
             non_reproducible_nodes.insert(node_name.clone());
         }
+        nocache_cleanup.track(&output_path);
 
         node_outputs.insert(node_name.clone(), output_path);
     }
@@ -504,6 +550,8 @@ pub async fn run(
     std::fs::copy(final_output, &output_path)?;
     println!();
     println!("Output written to: {}", output_path.display());
+
+    nocache_cleanup.cleanup()?;
 
     Ok(())
 }

@@ -2,9 +2,10 @@ use anyhow::Result;
 use ozzy_core::cache::LocalCache;
 use ozzy_core::project::{Endpoint, SourceType};
 use ozzy_core::{Project, canon, commit, hash, platform, runtime};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn parse_param_value(value: &str) -> serde_json::Value {
     serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
@@ -32,6 +33,58 @@ fn build_param_overrides(
     }
 
     (global, scoped)
+}
+
+#[derive(Default)]
+struct NocacheCleanup {
+    paths: HashSet<PathBuf>,
+}
+
+impl NocacheCleanup {
+    fn track(&mut self, path: &Path) {
+        if is_nocache_output(path) {
+            self.paths.insert(path.to_path_buf());
+        }
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        let paths: Vec<PathBuf> = self.paths.drain().collect();
+        for path in paths {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to remove temporary nocache file {}: {}",
+                        path.display(),
+                        e
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for NocacheCleanup {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+fn is_nocache_output(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.starts_with("nocache_") && name.ends_with(".parquet"))
+        .unwrap_or(false)
+}
+
+fn default_non_cached_output_path(endpoint_name: &str) -> PathBuf {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    PathBuf::from(format!("{}-{}.parquet", endpoint_name, ts))
 }
 
 pub async fn execute(
@@ -84,6 +137,7 @@ pub async fn execute(
     // Track nodes whose output is non-reproducible (directly or inherited from upstream)
     let mut non_reproducible_nodes: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    let mut nocache_cleanup = NocacheCleanup::default();
 
     for node_name in &execution_order {
         let node = endpoint
@@ -251,6 +305,7 @@ pub async fn execute(
         if effectively_non_reproducible {
             non_reproducible_nodes.insert(node_name.clone());
         }
+        nocache_cleanup.track(&output_path);
 
         node_outputs.insert(node_name.clone(), output_path);
     }
@@ -263,15 +318,24 @@ pub async fn execute(
         .get(final_node)
         .ok_or_else(|| anyhow::anyhow!("Final node '{}' output not found", final_node))?;
 
+    let final_is_nocache = is_nocache_output(final_output);
+
     // Copy to output location if specified
     if let Some(output_path) = output {
         fs::copy(final_output, output_path)?;
         println!();
         println!("Output written to: {}", output_path);
+    } else if final_is_nocache {
+        let output_path = default_non_cached_output_path(endpoint_name);
+        fs::copy(final_output, &output_path)?;
+        println!();
+        println!("Output written to: {}", output_path.display());
     } else {
         println!();
         println!("Output cached at: {}", final_output.display());
     }
+
+    nocache_cleanup.cleanup()?;
 
     Ok(())
 }
