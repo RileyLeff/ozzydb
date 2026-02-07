@@ -188,7 +188,10 @@ async fn delete_token(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Result<Json<()>, ApiError> {
-    state.db.delete_token_by_name(user.id, &name).await?;
+    let deleted = state.db.delete_token_by_name(user.id, &name).await?;
+    if !deleted {
+        return Err(ApiError::NotFound("Token not found".to_string()));
+    }
     Ok(Json(()))
 }
 

@@ -14,6 +14,27 @@ pub struct RegistryClient {
     client: reqwest::Client,
 }
 
+/// Validate a URL path segment to prevent path traversal or injection.
+fn validate_path_segment(value: &str, context: &str) -> Result<()> {
+    if value.is_empty() {
+        anyhow::bail!("{} cannot be empty", context);
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        anyhow::bail!(
+            "{} '{}' contains invalid characters (only alphanumeric, hyphens, underscores, and dots allowed)",
+            context,
+            value
+        );
+    }
+    if value == "." || value == ".." {
+        anyhow::bail!("{} cannot be '.' or '..'", context);
+    }
+    Ok(())
+}
+
 impl RegistryClient {
     /// Create a new registry client.
     pub fn new(base_url: &str) -> Self {
@@ -40,6 +61,13 @@ impl RegistryClient {
 
     fn auth_header(&self) -> Option<String> {
         self.access_token.as_ref().map(|t| format!("Bearer {}", t))
+    }
+
+    /// Build a project API URL with validated path segments.
+    fn project_url(&self, owner: &str, slug: &str) -> Result<String> {
+        validate_path_segment(owner, "Owner")?;
+        validate_path_segment(slug, "Project slug")?;
+        Ok(format!("{}/api/v1/{}/{}", self.base_url, owner, slug))
     }
 
     // ========================================================================
@@ -204,9 +232,7 @@ impl RegistryClient {
 
     /// Get project info.
     pub async fn get_project(&self, owner: &str, slug: &str) -> Result<ProjectInfo> {
-        let mut request = self
-            .client
-            .get(format!("{}/api/v1/{}/{}", self.base_url, owner, slug));
+        let mut request = self.client.get(self.project_url(owner, slug)?);
 
         if let Some(auth) = self.auth_header() {
             request = request.header("Authorization", auth);
@@ -230,7 +256,7 @@ impl RegistryClient {
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<CommitInfo>> {
-        let mut url = format!("{}/api/v1/{}/{}/commits", self.base_url, owner, project);
+        let mut url = format!("{}/commits", self.project_url(owner, project)?);
         let mut query = Vec::new();
         if let Some(l) = limit {
             query.push(format!("limit={}", l));
@@ -262,10 +288,9 @@ impl RegistryClient {
 
     /// List project refs (branches and tags).
     pub async fn list_refs(&self, owner: &str, project: &str) -> Result<ListRefsResponse> {
-        let mut request = self.client.get(format!(
-            "{}/api/v1/{}/{}/refs",
-            self.base_url, owner, project
-        ));
+        let mut request = self
+            .client
+            .get(format!("{}/refs", self.project_url(owner, project)?));
 
         if let Some(auth) = self.auth_header() {
             request = request.header("Authorization", auth);
@@ -296,8 +321,8 @@ impl RegistryClient {
         transform_hashes: &HashMap<String, String>,
     ) -> Result<ContentCheckResponse> {
         let mut request = self.client.post(format!(
-            "{}/api/v1/{}/{}/content/check",
-            self.base_url, owner, project
+            "{}/content/check",
+            self.project_url(owner, project)?
         ));
 
         if let Some(auth) = self.auth_header() {
@@ -369,10 +394,7 @@ impl RegistryClient {
 
         let mut request = self
             .client
-            .post(format!(
-                "{}/api/v1/{}/{}/push",
-                self.base_url, owner, project
-            ))
+            .post(format!("{}/push", self.project_url(owner, project)?))
             .multipart(form);
 
         if let Some(auth) = self.auth_header() {
@@ -399,10 +421,7 @@ impl RegistryClient {
         project: &str,
         ref_name: Option<&str>,
     ) -> Result<PullManifest> {
-        let mut url = format!(
-            "{}/api/v1/{}/{}/pull/manifest",
-            self.base_url, owner, project
-        );
+        let mut url = format!("{}/pull/manifest", self.project_url(owner, project)?);
         if let Some(r) = ref_name {
             url = format!("{}?ref={}", url, r);
         }
@@ -435,7 +454,7 @@ impl RegistryClient {
         project: &str,
         ref_name: Option<&str>,
     ) -> Result<Vec<u8>> {
-        let mut url = format!("{}/api/v1/{}/{}/pull", self.base_url, owner, project);
+        let mut url = format!("{}/pull", self.project_url(owner, project)?);
         if let Some(r) = ref_name {
             url = format!("{}?ref={}", url, r);
         }
@@ -471,9 +490,13 @@ impl RegistryClient {
         endpoint: &str,
         ref_name: &str,
     ) -> Result<EndpointManifest> {
+        validate_path_segment(endpoint, "Endpoint name")?;
+        validate_path_segment(ref_name, "Ref name")?;
         let url = format!(
-            "{}/api/v1/{}/{}/{}@{}/manifest",
-            self.base_url, owner, project, endpoint, ref_name
+            "{}/{}@{}/manifest",
+            self.project_url(owner, project)?,
+            endpoint,
+            ref_name
         );
 
         let mut request = self.client.get(&url);
@@ -505,9 +528,13 @@ impl RegistryClient {
         endpoint: &str,
         ref_name: &str,
     ) -> Result<Vec<u8>> {
+        validate_path_segment(endpoint, "Endpoint name")?;
+        validate_path_segment(ref_name, "Ref name")?;
         let url = format!(
-            "{}/api/v1/{}/{}/{}@{}",
-            self.base_url, owner, project, endpoint, ref_name
+            "{}/{}@{}",
+            self.project_url(owner, project)?,
+            endpoint,
+            ref_name
         );
 
         let mut request = self.client.get(&url);
@@ -537,6 +564,10 @@ impl RegistryClient {
         endpoint: &str,
         ref_name: &str,
     ) -> Result<ResolveEndpointResponse> {
+        validate_path_segment(owner, "Owner")?;
+        validate_path_segment(project, "Project slug")?;
+        validate_path_segment(endpoint, "Endpoint name")?;
+        validate_path_segment(ref_name, "Ref name")?;
         let url = format!(
             "{}/api/v1/resolve/{}/{}/{}@{}",
             self.base_url, owner, project, endpoint, ref_name

@@ -347,6 +347,13 @@ async fn push(
                 t.name, t.hash
             )));
         }
+        // Verify lockfile hash matches uploaded content if declared.
+        if !t.lockfile_hash.is_empty() && !state.storage.exists(&t.lockfile_hash, "lock").await? {
+            return Err(ApiError::bad_request(format!(
+                "Missing lockfile for transform '{}' (hash {}). Re-upload the lockfile.",
+                t.name, t.lockfile_hash
+            )));
+        }
     }
 
     // Get the ref name from commit data or default to main, then normalize it
@@ -418,11 +425,13 @@ async fn push(
         return Err(anyhow::Error::from(e).into());
     }
 
-    // Update tags sent by client (best-effort: skip tags whose commits are not present yet).
+    // Update tags sent by client (best-effort: skip invalid or missing tags).
     if let Some(tags) = commit_data.get("tags").and_then(|v| v.as_object()) {
         for (tag_name, tag_hash_value) in tags {
-            ozzy_core::validate_safe_name(tag_name)
-                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+            if let Err(e) = ozzy_core::validate_safe_name(tag_name) {
+                eprintln!("Warning: skipping invalid tag '{}': {}", tag_name, e);
+                continue;
+            }
             let Some(tag_hash) = tag_hash_value.as_str() else {
                 continue;
             };
@@ -437,10 +446,13 @@ async fn push(
                 continue;
             };
 
-            state
+            if let Err(e) = state
                 .db
                 .upsert_ref(project.id, tag_name, "tag", tag_commit_id)
-                .await?;
+                .await
+            {
+                eprintln!("Warning: failed to upsert tag '{}': {}", tag_name, e);
+            }
         }
     }
 

@@ -39,7 +39,7 @@ dev-server:
 # Run server with auto-reload (requires cargo-watch)
 dev-watch:
     @test -f docker/.env || cp docker/.env.example docker/.env
-    cargo watch -x 'run --package ozzy-server'
+    @set -a && source docker/.env && set +a && cargo watch -x 'run --package ozzy-server'
 
 # ============ Testing ============
 

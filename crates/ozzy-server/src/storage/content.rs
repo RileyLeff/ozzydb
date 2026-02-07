@@ -176,7 +176,11 @@ impl ContentStorage {
 
         if !local_path.exists() {
             Self::ensure_parent(&local_path)?;
-            std::fs::write(&local_path, content)?;
+            // Write to a temp file first, then atomically rename to prevent
+            // partial writes from leaving corrupted content on crash.
+            let tmp_path = local_path.with_extension(format!("{}.tmp", extension));
+            std::fs::write(&tmp_path, content)?;
+            std::fs::rename(&tmp_path, &local_path)?;
         }
 
         self.upload_remote_best_effort(&content_hash, extension, content)
