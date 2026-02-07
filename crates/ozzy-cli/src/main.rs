@@ -296,50 +296,6 @@ enum CacheCommands {
 
     /// Clear all cached entries
     Clear,
-
-    /// Push local cache entries to remote
-    Push {
-        /// Push all entries (default: only entries for current project)
-        #[arg(long)]
-        all: bool,
-
-        /// Push specific hash only
-        #[arg(long)]
-        hash: Option<String>,
-
-        /// Show what would be pushed without actually pushing
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Pull cache entries from remote
-    Pull {
-        /// Pull all entries (default: only entries for current platform)
-        #[arg(long)]
-        all: bool,
-
-        /// Pull specific hash only
-        #[arg(long)]
-        hash: Option<String>,
-
-        /// Show what would be pulled without actually pulling
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Sync local and remote cache
-    Sync {
-        /// Sync direction
-        #[arg(long, default_value = "both")]
-        direction: String,
-
-        /// Show what would be synced without actually syncing
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Show cache status (local and remote)
-    Status,
 }
 
 #[derive(Subcommand)]
@@ -507,16 +463,6 @@ async fn main() -> Result<()> {
             CacheCommands::Ls => commands::cache::list().await,
             CacheCommands::Size => commands::cache::size().await,
             CacheCommands::Clear => commands::cache::clear().await,
-            CacheCommands::Push { all, hash, dry_run } => {
-                commands::cache::push(all, hash.as_deref(), dry_run).await
-            }
-            CacheCommands::Pull { all, hash, dry_run } => {
-                commands::cache::pull(all, hash.as_deref(), dry_run).await
-            }
-            CacheCommands::Sync { direction, dry_run } => {
-                commands::cache::sync(&direction, dry_run).await
-            }
-            CacheCommands::Status => commands::cache::status().await,
         },
         Commands::Auth { command } => match command {
             AuthCommands::Login { registry } => commands::auth::login(registry.as_deref()).await,

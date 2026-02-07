@@ -1,0 +1,29 @@
+# Build artifacts
+target/
+dist/
+build/
+
+# Dependencies
+node_modules/
+.next/
+
+# Lock files
+*.lock
+package-lock.json
+
+# Generated/minified
+*.min.js
+*.generated.*
+
+# Documentation & planning (not code)
+*.md
+planning/
+
+# Python client (separate project)
+clients/
+
+# Dirgrab output
+dirgrab.txt
+
+# Data files
+*.parquet

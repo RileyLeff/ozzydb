@@ -47,12 +47,6 @@ pub enum Error {
     #[error("Cache error: {0}")]
     CacheError(String),
 
-    #[error("Remote cache error: {0}")]
-    RemoteCache(String),
-
-    #[error("Remote cache not configured")]
-    RemoteCacheNotConfigured,
-
     #[error("Runtime error: {0}")]
     RuntimeError(String),
 

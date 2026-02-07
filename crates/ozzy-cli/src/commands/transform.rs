@@ -3,6 +3,14 @@ use ozzy_core::{Project, commit, validate_safe_name};
 use std::fs;
 use std::path::Path;
 
+#[derive(Debug, Clone)]
+struct TransformBlock {
+    name: String,
+    decorator_start: usize,
+    decorator_end: usize,
+    def_line: usize,
+}
+
 pub async fn add(file: &str, name: Option<&str>) -> Result<()> {
     let project = Project::find_current()?;
 
@@ -37,17 +45,11 @@ pub async fn add(file: &str, name: Option<&str>) -> Result<()> {
 
     // If function name specified, verify it exists
     if let Some(ref fn_name) = function_name {
-        if !functions.contains(&fn_name.as_str()) {
+        if !functions.iter().any(|f| f == fn_name) {
             anyhow::bail!(
                 "Function '{}' not found. Available transforms: {}",
                 fn_name,
                 functions.join(", ")
-            );
-        }
-        if functions.len() > 1 {
-            anyhow::bail!(
-                "Selecting a single transform from a file with multiple @ozzy.transform \
-                 functions is not supported. Split transforms into separate files."
             );
         }
     }
@@ -75,8 +77,24 @@ pub async fn add(file: &str, name: Option<&str>) -> Result<()> {
                     "Could not determine source transform. Use <file.py:function> with --name."
                 )
             })?;
-            let renamed = rename_transform_function(&content, source_function, alias)?;
+            let renamed =
+                rewrite_selected_transform_source(&content, source_function, Some(alias))?;
             (format!("{}.py", alias), renamed, vec![alias.to_string()])
+        } else if let Some(source_function) = selected_function.as_ref() {
+            let rewritten = if functions.len() > 1 {
+                rewrite_selected_transform_source(&content, source_function, None)?
+            } else {
+                content.clone()
+            };
+            (
+                source_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+                rewritten,
+                functions.clone(),
+            )
         } else {
             (
                 source_path
@@ -85,7 +103,7 @@ pub async fn add(file: &str, name: Option<&str>) -> Result<()> {
                     .to_string_lossy()
                     .to_string(),
                 content.clone(),
-                functions.iter().map(|f| (*f).to_string()).collect(),
+                functions.clone(),
             )
         };
 
@@ -274,8 +292,15 @@ pub async fn test(name: &str, _sample: usize) -> Result<()> {
     Ok(())
 }
 
-fn find_transform_functions(content: &str) -> Vec<&str> {
-    let mut functions = Vec::new();
+fn find_transform_functions(content: &str) -> Vec<String> {
+    find_transform_blocks(content)
+        .into_iter()
+        .map(|b| b.name)
+        .collect()
+}
+
+fn find_transform_blocks(content: &str) -> Vec<TransformBlock> {
+    let mut blocks = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
 
     let mut i = 0;
@@ -306,54 +331,89 @@ fn find_transform_functions(content: &str) -> Vec<&str> {
             j += 1;
         }
 
+        let mut next_i = i + 1;
         // Look for the function definition after the decorator block.
         for k in (j + 1)..lines.len() {
             let l = lines[k].trim();
             if l.starts_with("def ") {
                 if let Some(paren_pos) = l.find('(') {
                     let name = l[4..paren_pos].trim();
-                    functions.push(name);
+                    blocks.push(TransformBlock {
+                        name: name.to_string(),
+                        decorator_start: i,
+                        decorator_end: j,
+                        def_line: k,
+                    });
                 }
-                i = k;
+                next_i = k + 1;
                 break;
             }
         }
-        i += 1;
+        i = next_i;
     }
 
-    functions
+    blocks
 }
 
-fn rename_transform_function(content: &str, from: &str, to: &str) -> Result<String> {
-    if from == to {
-        return Ok(content.to_string());
+fn rewrite_selected_transform_source(
+    content: &str,
+    selected_name: &str,
+    rename_to: Option<&str>,
+) -> Result<String> {
+    let blocks = find_transform_blocks(content);
+    if blocks.is_empty() {
+        anyhow::bail!("No @ozzy.transform decorated functions found");
     }
 
-    let mut renamed = false;
-    let mut out = Vec::new();
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if !renamed && trimmed.starts_with("def ") {
-            if let Some(paren_pos) = trimmed.find('(') {
-                let current_name = trimmed[4..paren_pos].trim();
-                if current_name == from {
-                    let indent_len = line.len() - trimmed.len();
-                    let indent = &line[..indent_len];
-                    let suffix = &trimmed[paren_pos..];
-                    out.push(format!("{indent}def {to}{suffix}"));
-                    renamed = true;
-                    continue;
-                }
-            }
+    let mut selected = false;
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    for block in &blocks {
+        if block.name == selected_name {
+            selected = true;
+            continue;
         }
-        out.push(line.to_string());
+
+        // Disable non-selected transform decorators so only the chosen transform
+        // is registered from this file.
+        for idx in block.decorator_start..=block.decorator_end {
+            let original = &lines[idx];
+            if original.trim_start().starts_with('#') {
+                continue;
+            }
+            lines[idx] = format!("# {}", original);
+        }
     }
 
-    if !renamed {
-        anyhow::bail!("Could not rename function '{}' in transform source", from);
+    if !selected {
+        anyhow::bail!("Transform '{}' not found", selected_name);
     }
 
-    let mut rewritten = out.join("\n");
+    if let Some(new_name) = rename_to {
+        let block = blocks
+            .iter()
+            .find(|b| b.name == selected_name)
+            .ok_or_else(|| anyhow::anyhow!("Transform '{}' not found", selected_name))?;
+        let def_line = &lines[block.def_line];
+        let trimmed = def_line.trim_start();
+        if !trimmed.starts_with("def ") {
+            anyhow::bail!(
+                "Could not rename function '{}' in transform source",
+                selected_name
+            );
+        }
+        let Some(paren_pos) = trimmed.find('(') else {
+            anyhow::bail!(
+                "Could not rename function '{}' in transform source",
+                selected_name
+            );
+        };
+        let indent_len = def_line.len() - trimmed.len();
+        let indent = &def_line[..indent_len];
+        let suffix = &trimmed[paren_pos..];
+        lines[block.def_line] = format!("{indent}def {new_name}{suffix}");
+    }
+
+    let mut rewritten = lines.join("\n");
     if content.ends_with('\n') {
         rewritten.push('\n');
     }

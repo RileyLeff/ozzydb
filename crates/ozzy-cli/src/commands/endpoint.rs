@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ozzy_core::project::{Endpoint, PipelineEdge, PipelineNode, SourceType};
 use ozzy_core::{Project, commit, schema, validate_safe_name};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -446,7 +446,7 @@ pub async fn list() -> Result<()> {
 
     // Check staged endpoints
     let staged_dir = project.ozzy_dir().join("staged_endpoints");
-    let mut endpoints = Vec::new();
+    let mut endpoints_by_name: BTreeMap<String, (Endpoint, bool)> = BTreeMap::new();
     let mut staged_deletions = load_staged_endpoint_deletions(&project)?;
 
     if staged_dir.exists() {
@@ -457,7 +457,7 @@ pub async fn list() -> Result<()> {
                 let content = fs::read_to_string(&path)?;
                 let endpoint: Endpoint = serde_json::from_str(&content)?;
                 staged_deletions.remove(&endpoint.name);
-                endpoints.push((endpoint, false)); // false = not committed
+                endpoints_by_name.insert(endpoint.name.clone(), (endpoint, false)); // false = staged override
             }
         }
     }
@@ -468,11 +468,13 @@ pub async fn list() -> Result<()> {
             if staged_deletions.contains(&endpoint.name) {
                 continue;
             }
-            endpoints.push((endpoint, true)); // true = committed
+            endpoints_by_name
+                .entry(endpoint.name.clone())
+                .or_insert((endpoint, true)); // true = committed
         }
     }
 
-    if endpoints.is_empty() && staged_deletions.is_empty() {
+    if endpoints_by_name.is_empty() && staged_deletions.is_empty() {
         println!("No endpoints found.");
         println!();
         println!("Create an endpoint with:");
@@ -481,7 +483,7 @@ pub async fn list() -> Result<()> {
     }
 
     println!("Endpoints:");
-    for (endpoint, committed) in &endpoints {
+    for (endpoint, committed) in endpoints_by_name.values() {
         let status = if *committed { "" } else { " (staged)" };
         let transforms: Vec<_> = endpoint
             .nodes

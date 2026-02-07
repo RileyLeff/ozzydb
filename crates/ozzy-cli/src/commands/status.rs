@@ -57,8 +57,15 @@ pub async fn show() -> Result<()> {
     for (name, tf) in &current_transforms {
         if let Some(ref commit) = last_commit {
             if let Some(old_tf) = commit.transforms.get(name) {
-                if tf.hash != old_tf.hash {
-                    transform_changes.push(format!("  modified: {}", tf.source_path));
+                if tf != old_tf {
+                    if tf.source_path != old_tf.source_path {
+                        transform_changes.push(format!(
+                            "  moved:    {} -> {}",
+                            old_tf.source_path, tf.source_path
+                        ));
+                    } else {
+                        transform_changes.push(format!("  modified: {}", tf.source_path));
+                    }
                 }
             } else {
                 transform_changes.push(format!("  new:      {}", tf.source_path));

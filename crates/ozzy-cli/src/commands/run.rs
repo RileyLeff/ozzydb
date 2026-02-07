@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ozzy_core::cache::TieredCache;
+use ozzy_core::cache::LocalCache;
 use ozzy_core::project::{Endpoint, SourceType};
 use ozzy_core::{Project, canon, commit, hash, platform, runtime};
 use std::collections::HashMap;
@@ -54,13 +54,8 @@ pub async fn execute(
     let platform = platform::PlatformFingerprint::detect();
     println!("Platform: {}", platform.short_string());
 
-    // Open tiered cache (local + optional remote)
-    let tiered_config = project.config.cache.to_tiered_config();
-    let tiered_cache = TieredCache::new(&tiered_config).await?;
-
-    if tiered_cache.has_remote() {
-        println!("Remote cache: enabled (auto_pull)");
-    }
+    // Open local cache
+    let local_cache = LocalCache::open()?;
     println!();
 
     // Build execution plan (topological order)
@@ -201,7 +196,7 @@ pub async fn execute(
             .filter(|e| e.target_node == *node_name && e.source_type == SourceType::Node)
             .any(|e| non_reproducible_nodes.contains(&e.source_ref));
 
-        // Check cache (tiered: L1 local, L2 remote with auto_pull)
+        // Check local cache
         // Non-reproducible transforms (direct or inherited) always re-execute and don't cache
         let effectively_non_reproducible = !transform.reproducible || has_non_reproducible_upstream;
         let output_path = if effectively_non_reproducible {
@@ -219,17 +214,13 @@ pub async fn execute(
                 &input_paths,
                 &effective_params,
                 &materialized_hash,
-                &tiered_cache,
+                &local_cache,
                 &platform,
             )
             .await?
-        } else if let Some(cached_path) = tiered_cache.get_path(&materialized_hash).await? {
+        } else if let Some(cached_path) = local_cache.get_path(&materialized_hash)? {
             if cached_path.exists() {
-                if tiered_cache.contains_local(&materialized_hash)? {
-                    println!("  Cache: HIT (local)");
-                } else {
-                    println!("  Cache: HIT (remote)");
-                }
+                println!("  Cache: HIT");
                 cached_path
             } else {
                 execute_node_multi(
@@ -238,7 +229,7 @@ pub async fn execute(
                     &input_paths,
                     &effective_params,
                     &materialized_hash,
-                    &tiered_cache,
+                    &local_cache,
                     &platform,
                 )
                 .await?
@@ -250,7 +241,7 @@ pub async fn execute(
                 &input_paths,
                 &effective_params,
                 &materialized_hash,
-                &tiered_cache,
+                &local_cache,
                 &platform,
             )
             .await?
@@ -436,7 +427,7 @@ async fn execute_node_multi(
     input_paths: &HashMap<String, PathBuf>,
     params: &serde_json::Value,
     materialized_hash: &str,
-    cache: &TieredCache,
+    cache: &LocalCache,
     platform: &platform::PlatformFingerprint,
 ) -> Result<PathBuf> {
     println!("  Cache: MISS - executing transform");
@@ -459,20 +450,15 @@ async fn execute_node_multi(
     // Validate output against declared schema
     validate_output_schema(&temp_output, transform)?;
 
-    // Store in tiered cache (L1 local, L2 remote with auto_push)
-    let cached_path = cache
-        .put(
-            materialized_hash,
-            &platform.short_string(),
-            &temp_output,
-            None, // row count
-        )
-        .await?;
+    // Store in local cache
+    let cached_path = cache.put(
+        materialized_hash,
+        &platform.short_string(),
+        &temp_output,
+        None,
+    )?; // row count
 
     println!("  Cached at: {}", cached_path.display());
-    if cache.has_remote() {
-        println!("  Pushed to remote: {}", cache.has_remote());
-    }
 
     Ok(cached_path)
 }

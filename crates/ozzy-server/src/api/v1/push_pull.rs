@@ -419,6 +419,17 @@ async fn push(
         }
     }
 
+    // Ensure transform source blobs exist before persisting commit metadata.
+    // This prevents dangling commits that reference unavailable transform hashes.
+    for t in commit.transforms.values() {
+        if !state.storage.exists(&t.hash, "py").await? {
+            return Err(ApiError::bad_request(format!(
+                "Missing transform source for '{}' (hash {}). Re-upload the transform file.",
+                t.name, t.hash
+            )));
+        }
+    }
+
     // Get the ref name from commit data or default to main, then normalize it
     let raw_ref_name = commit_data["ref"].as_str().unwrap_or("refs/heads/main");
     let ref_name = normalize_ref_name(raw_ref_name).to_string();
@@ -509,12 +520,31 @@ async fn check_content(
     Path((owner, project_slug)): Path<(String, String)>,
     Json(req): Json<ContentCheckRequest>,
 ) -> Result<Json<ContentCheckResponse>, ApiError> {
-    let project = state
-        .db
-        .get_project(&owner, &project_slug)
-        .await?
-        .ok_or_else(|| ApiError::not_found("Project not found"))?;
-    enforce_write_access(&state, &project, &owner, &project_slug, &user, &scopes).await?;
+    let project = state.db.get_project(&owner, &project_slug).await?;
+    if let Some(project) = &project {
+        enforce_write_access(&state, project, &owner, &project_slug, &user, &scopes).await?;
+    } else {
+        // First push for a new project: treat all submitted hashes as missing.
+        if owner != user.username {
+            return Err(ApiError::forbidden(
+                "Cannot create a project for another user",
+            ));
+        }
+        if !has_project_scope(&scopes, ScopeAction::Write, &owner, &project_slug) {
+            return Err(ApiError::forbidden(
+                "Token lacks write scope for this project",
+            ));
+        }
+
+        let mut missing_data: Vec<String> = req.data_hashes.keys().cloned().collect();
+        let mut missing_transforms: Vec<String> = req.transform_hashes.keys().cloned().collect();
+        missing_data.sort();
+        missing_transforms.sort();
+        return Ok(Json(ContentCheckResponse {
+            missing_data,
+            missing_transforms,
+        }));
+    }
 
     let mut missing_data = Vec::new();
     let mut missing_transforms = Vec::new();

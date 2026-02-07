@@ -544,22 +544,10 @@ pub fn has_changes(project: &Project) -> Result<bool> {
             return Ok(true);
         }
 
-        // Compare transforms
-        for (name, transform) in &current_transforms {
-            if let Some(last_transform) = last_commit.transforms.get(name) {
-                if transform.hash != last_transform.hash {
-                    return Ok(true);
-                }
-            } else {
-                return Ok(true);
-            }
-        }
-
-        // Check for removed transforms
-        for name in last_commit.transforms.keys() {
-            if !current_transforms.contains_key(name) {
-                return Ok(true);
-            }
+        // Compare full transform metadata, not just source hash.
+        // This ensures path/runtime/function changes are tracked.
+        if current_transforms != last_commit.transforms {
+            return Ok(true);
         }
 
         Ok(false)

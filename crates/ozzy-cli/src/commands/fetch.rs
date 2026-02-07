@@ -1,7 +1,7 @@
 //! Fetch command for downloading and executing remote endpoints.
 
 use anyhow::{Context, Result};
-use ozzy_core::cache::TieredCache;
+use ozzy_core::cache::LocalCache;
 use ozzy_core::project::{Endpoint, SourceType};
 use ozzy_core::registry::{CredentialsFile, RegistryClient};
 use ozzy_core::{canon, commit, hash, platform, runtime};
@@ -310,8 +310,7 @@ pub async fn run(
     let plat = platform::PlatformFingerprint::detect();
     println!("Platform: {}", plat.short_string());
 
-    let tiered_config = temp_project.config.cache.to_tiered_config();
-    let tiered_cache = TieredCache::new(&tiered_config).await?;
+    let local_cache = LocalCache::open()?;
 
     // Build and display execution plan
     let execution_order = build_execution_order(&endpoint_def);
@@ -453,7 +452,7 @@ pub async fn run(
                 println!("  Cache: SKIP (non-reproducible upstream)");
             }
             execute_node_no_cache(&temp_project, transform, &input_paths, &effective_params).await?
-        } else if let Some(cached_path) = tiered_cache.get_path(&materialized_hash).await? {
+        } else if let Some(cached_path) = local_cache.get_path(&materialized_hash)? {
             if cached_path.exists() {
                 println!("  Cache: HIT");
                 cached_path
@@ -464,7 +463,7 @@ pub async fn run(
                     &input_paths,
                     &effective_params,
                     &materialized_hash,
-                    &tiered_cache,
+                    &local_cache,
                     &plat,
                 )
                 .await?
@@ -476,7 +475,7 @@ pub async fn run(
                 &input_paths,
                 &effective_params,
                 &materialized_hash,
-                &tiered_cache,
+                &local_cache,
                 &plat,
             )
             .await?
@@ -509,6 +508,54 @@ pub async fn run(
     Ok(())
 }
 
+/// Validate output schema against transform's declared output_schema.
+fn validate_output_schema(
+    output_path: &std::path::Path,
+    transform: &ozzy_core::project::Transform,
+) -> Result<()> {
+    let output_schema = match &transform.output_schema {
+        Some(schema) => schema,
+        None => return Ok(()),
+    };
+
+    let actual_schema = ozzy_core::schema::extract_parquet_schema(output_path)?;
+    let actual_columns: std::collections::HashSet<String> = actual_schema
+        .fields
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
+
+    if let Some(adds) = output_schema.get("adds").and_then(|v| v.as_array()) {
+        for col in adds {
+            if let Some(col_name) = col.as_str() {
+                if !actual_columns.contains(col_name) {
+                    anyhow::bail!(
+                        "Output schema violation: transform '{}' declares output column '{}' but it was not found in output",
+                        transform.name,
+                        col_name
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(fields) = output_schema.get("fields").and_then(|v| v.as_array()) {
+        for field in fields {
+            if let Some(name) = field.get("name").and_then(|v| v.as_str()) {
+                if !actual_columns.contains(name) {
+                    anyhow::bail!(
+                        "Output schema violation: transform '{}' declares output field '{}' but it was not found in output",
+                        transform.name,
+                        name
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Execute a single transform node.
 async fn execute_node(
     project: &ozzy_core::Project,
@@ -516,7 +563,7 @@ async fn execute_node(
     input_paths: &HashMap<String, PathBuf>,
     params: &serde_json::Value,
     materialized_hash: &str,
-    cache: &TieredCache,
+    cache: &LocalCache,
     platform: &platform::PlatformFingerprint,
 ) -> Result<PathBuf> {
     println!("  Cache: MISS - executing transform");
@@ -533,14 +580,14 @@ async fn execute_node(
         params,
     )?;
 
-    let cached_path = cache
-        .put(
-            materialized_hash,
-            &platform.short_string(),
-            &temp_output,
-            None,
-        )
-        .await?;
+    validate_output_schema(&temp_output, transform)?;
+
+    let cached_path = cache.put(
+        materialized_hash,
+        &platform.short_string(),
+        &temp_output,
+        None,
+    )?;
 
     println!("  Cached at: {}", cached_path.display());
     Ok(cached_path)
@@ -573,6 +620,8 @@ async fn execute_node_no_cache(
         &temp_output,
         params,
     )?;
+
+    validate_output_schema(&temp_output, transform)?;
 
     println!("  Output: {}", temp_output.display());
     Ok(temp_output)

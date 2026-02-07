@@ -5,11 +5,30 @@
 
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::backend::{CacheBackend, CacheEntry, CacheLocation};
 use crate::error::Result;
+
+/// Local cache entry metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheEntry {
+    pub materialized_hash: String,
+    pub platform: String,
+    pub row_count: Option<u64>,
+    pub byte_size: Option<u64>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_accessed: chrono::DateTime<chrono::Utc>,
+    pub access_count: u64,
+    pub file_path: PathBuf,
+}
+
+impl CacheEntry {
+    pub fn file_path(&self) -> &PathBuf {
+        &self.file_path
+    }
+}
 
 /// Local cache manager.
 pub struct LocalCache {
@@ -82,7 +101,7 @@ impl LocalCache {
     /// Get the file path for a cached entry.
     pub fn get_path(&self, hash: &str) -> Result<Option<PathBuf>> {
         self.get(hash)
-            .map(|e| e.and_then(|e| e.file_path().cloned()))
+            .map(|e| e.map(|entry| entry.file_path().clone()))
     }
 
     /// List all cache entries.
@@ -112,7 +131,7 @@ impl LocalCache {
                         .parse()
                         .unwrap_or_else(|_| Utc::now()),
                     access_count: row.get(7)?,
-                    location: CacheLocation::Local(PathBuf::from(row.get::<_, String>(2)?)),
+                    file_path: PathBuf::from(row.get::<_, String>(2)?),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -145,46 +164,6 @@ impl LocalCache {
         Ok(())
     }
 
-    /// Get the expected cache file path for a hash (doesn't check existence).
-    pub fn cache_path_for(&self, hash: &str) -> PathBuf {
-        self.cache_dir
-            .join("data")
-            .join(format!("{}.parquet", hash))
-    }
-
-    /// Register a file that was downloaded from remote cache.
-    /// The file must already exist at cache_path_for(hash).
-    pub fn register_downloaded(&self, hash: &str, platform: &str) -> Result<()> {
-        let dest_path = self.cache_path_for(hash);
-
-        if !dest_path.exists() {
-            return Err(crate::error::Error::CacheError(format!(
-                "Downloaded file does not exist: {}",
-                dest_path.display()
-            )));
-        }
-
-        let byte_size = std::fs::metadata(&dest_path)?.len();
-        let now = Utc::now();
-
-        let conn = self.connect()?;
-        conn.execute(
-            "INSERT OR REPLACE INTO cache_entries
-             (materialized_hash, platform, file_path, row_count, byte_size, created_at, last_accessed, access_count)
-             VALUES (?, ?, ?, NULL, ?, ?, ?, 1)",
-            params![
-                hash,
-                platform,
-                dest_path.to_string_lossy(),
-                byte_size as i64,
-                now.to_rfc3339(),
-                now.to_rfc3339(),
-            ],
-        )?;
-
-        Ok(())
-    }
-
     /// Evict oldest entries to reach target size.
     pub fn evict_to_size(&self, target_bytes: u64) -> Result<usize> {
         let mut evicted = 0;
@@ -213,9 +192,9 @@ impl LocalCache {
     }
 }
 
-impl CacheBackend for LocalCache {
+impl LocalCache {
     /// Get a cache entry by materialized hash.
-    fn get(&self, hash: &str) -> Result<Option<CacheEntry>> {
+    pub fn get(&self, hash: &str) -> Result<Option<CacheEntry>> {
         let conn = self.connect()?;
 
         let entry: Option<CacheEntry> = conn
@@ -239,7 +218,7 @@ impl CacheBackend for LocalCache {
                             .parse()
                             .unwrap_or_else(|_| Utc::now()),
                         access_count: row.get(7)?,
-                        location: CacheLocation::Local(PathBuf::from(row.get::<_, String>(2)?)),
+                        file_path: PathBuf::from(row.get::<_, String>(2)?),
                     })
                 },
             )
@@ -259,7 +238,7 @@ impl CacheBackend for LocalCache {
     }
 
     /// Check if a hash is in the cache.
-    fn contains(&self, hash: &str) -> Result<bool> {
+    pub fn contains(&self, hash: &str) -> Result<bool> {
         let conn = self.connect()?;
 
         let count: i64 = conn.query_row(
@@ -272,7 +251,7 @@ impl CacheBackend for LocalCache {
     }
 
     /// Store a cache entry.
-    fn put(
+    pub fn put(
         &self,
         hash: &str,
         platform: &str,
@@ -310,14 +289,12 @@ impl CacheBackend for LocalCache {
     }
 
     /// Remove a cache entry.
-    fn remove(&self, hash: &str) -> Result<()> {
+    pub fn remove(&self, hash: &str) -> Result<()> {
         // Get the file path first
         if let Some(entry) = self.get(hash)? {
             // Remove the file
-            if let Some(path) = entry.file_path() {
-                if path.exists() {
-                    fs::remove_file(path)?;
-                }
+            if entry.file_path().exists() {
+                fs::remove_file(entry.file_path())?;
             }
         }
 
@@ -332,7 +309,7 @@ impl CacheBackend for LocalCache {
     }
 
     /// Get total cache size in bytes.
-    fn total_size(&self) -> Result<u64> {
+    pub fn total_size(&self) -> Result<u64> {
         let conn = self.connect()?;
 
         let size: i64 = conn
@@ -347,7 +324,7 @@ impl CacheBackend for LocalCache {
     }
 
     /// Get number of cache entries.
-    fn count(&self) -> Result<usize> {
+    pub fn count(&self) -> Result<usize> {
         let conn = self.connect()?;
 
         let count: i64 =

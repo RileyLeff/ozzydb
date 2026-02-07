@@ -3,13 +3,17 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
+    http::header,
+    response::IntoResponse,
     routing::{delete, get, post},
 };
+use ozzy_core::project::{Endpoint, SourceType};
 use ozzy_core::registry::protocol::{
     AddCollaboratorRequest, CollaboratorInfo, CommitInfo, CreateProjectRequest, ListRefsResponse,
     ProjectInfo, RefInfo,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 
 use super::auth::ApiError;
 use crate::{
@@ -30,12 +34,26 @@ fn default_limit() -> i64 {
     50
 }
 
+#[derive(Debug, Deserialize)]
+struct RefParams {
+    #[serde(rename = "ref")]
+    ref_name: Option<String>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/projects", get(list_projects))
         .route("/projects", post(create_project))
         .route("/{owner}/{project}", get(get_project))
         .route("/{owner}/{project}/commits", get(list_commits))
+        .route("/{owner}/{project}/dag", get(get_dag))
+        .route("/{owner}/{project}/dag.svg", get(get_dag_svg))
+        .route("/{owner}/{project}/endpoints", get(list_endpoints_at_ref))
+        .route("/{owner}/{project}/transforms", get(list_transforms_at_ref))
+        .route(
+            "/{owner}/{project}/schemas/{name}",
+            get(get_schema_definition),
+        )
         .route("/{owner}/{project}/refs", get(list_refs))
         .route("/{owner}/{project}/collaborators", get(list_collaborators))
         .route("/{owner}/{project}/collaborators", post(add_collaborator))
@@ -255,6 +273,406 @@ async fn list_commits(
         .collect();
 
     Ok(Json(infos))
+}
+
+async fn resolve_project_ref_commit(
+    state: &AppState,
+    auth: &MaybeAuthUser,
+    owner: &str,
+    project_slug: &str,
+    ref_name: Option<&str>,
+) -> Result<(crate::db::Project, crate::db::DbCommit, String), ApiError> {
+    let project = state
+        .db
+        .get_project(owner, project_slug)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("Project not found".to_string()))?;
+
+    enforce_read_access(state, &project, owner, project_slug, auth).await?;
+
+    let resolved_ref = ref_name.unwrap_or("main").to_string();
+    let db_ref = state
+        .db
+        .get_ref_by_name(project.id, &resolved_ref)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("Ref not found: {}", resolved_ref)))?;
+
+    let commit = state
+        .db
+        .get_commit_by_id(db_ref.commit_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("Commit not found".to_string()))?;
+
+    Ok((project, commit, resolved_ref))
+}
+
+/// Get DAG metadata at a ref.
+async fn get_dag(
+    auth: MaybeAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug)): Path<(String, String)>,
+    Query(ref_params): Query<RefParams>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (_, commit, resolved_ref) = resolve_project_ref_commit(
+        &state,
+        &auth,
+        &owner,
+        &project_slug,
+        ref_params.ref_name.as_deref(),
+    )
+    .await?;
+
+    let data_sources = state.db.get_data_sources(commit.id).await?;
+    let transforms = state.db.get_transforms(commit.id).await?;
+    let endpoints = state.db.get_endpoints(commit.id).await?;
+
+    let data_json: Vec<serde_json::Value> = data_sources
+        .iter()
+        .map(|ds| {
+            serde_json::json!({
+                "name": ds.name,
+                "hash": ds.content_hash,
+                "schema_hash": ds.schema_hash,
+                "schema": ds.schema_json,
+                "row_count": ds.row_count,
+                "byte_size": ds.byte_size,
+            })
+        })
+        .collect();
+    let transform_json: Vec<serde_json::Value> = transforms
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "hash": t.content_hash,
+                "runtime": t.runtime,
+                "source_path": t.source_storage_key,
+                "function_name": t.function_name,
+                "lockfile_hash": t.lockfile_hash,
+                "params_schema": t.params_schema,
+                "input_schema": t.input_schema,
+                "output_schema": t.output_schema,
+                "reproducible": t.reproducible,
+            })
+        })
+        .collect();
+    let endpoint_json: Vec<serde_json::Value> = endpoints
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "description": e.description,
+                "definition": e.definition,
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "owner": owner,
+        "project": project_slug,
+        "ref_name": resolved_ref,
+        "commit_hash": commit.hash,
+        "data_sources": data_json,
+        "transforms": transform_json,
+        "endpoints": endpoint_json,
+    })))
+}
+
+/// Render DAG as SVG.
+async fn get_dag_svg(
+    auth: MaybeAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug)): Path<(String, String)>,
+    Query(ref_params): Query<RefParams>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (_, commit, _) = resolve_project_ref_commit(
+        &state,
+        &auth,
+        &owner,
+        &project_slug,
+        ref_params.ref_name.as_deref(),
+    )
+    .await?;
+
+    let data_sources = state.db.get_data_sources(commit.id).await?;
+    let transforms = state.db.get_transforms(commit.id).await?;
+    let endpoints = state.db.get_endpoints(commit.id).await?;
+
+    let endpoint_defs: Vec<Endpoint> = endpoints
+        .iter()
+        .map(|e| {
+            serde_json::from_value::<Endpoint>(e.definition.clone()).unwrap_or_else(|_| Endpoint {
+                name: e.name.clone(),
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                description: e.description.clone(),
+            })
+        })
+        .collect();
+
+    let svg = render_dag_svg(&data_sources, &transforms, &endpoint_defs);
+    Ok((
+        [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
+        svg,
+    ))
+}
+
+/// List endpoints at a ref.
+async fn list_endpoints_at_ref(
+    auth: MaybeAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug)): Path<(String, String)>,
+    Query(ref_params): Query<RefParams>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (_, commit, resolved_ref) = resolve_project_ref_commit(
+        &state,
+        &auth,
+        &owner,
+        &project_slug,
+        ref_params.ref_name.as_deref(),
+    )
+    .await?;
+
+    let mut endpoints = state.db.get_endpoints(commit.id).await?;
+    endpoints.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let items: Vec<serde_json::Value> = endpoints
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "description": e.description,
+                "definition": e.definition,
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "ref_name": resolved_ref,
+        "commit_hash": commit.hash,
+        "endpoints": items,
+    })))
+}
+
+/// List transforms at a ref.
+async fn list_transforms_at_ref(
+    auth: MaybeAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug)): Path<(String, String)>,
+    Query(ref_params): Query<RefParams>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (_, commit, resolved_ref) = resolve_project_ref_commit(
+        &state,
+        &auth,
+        &owner,
+        &project_slug,
+        ref_params.ref_name.as_deref(),
+    )
+    .await?;
+
+    let mut transforms = state.db.get_transforms(commit.id).await?;
+    transforms.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let items: Vec<serde_json::Value> = transforms
+        .into_iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "hash": t.content_hash,
+                "runtime": t.runtime,
+                "source_path": t.source_storage_key,
+                "function_name": t.function_name,
+                "lockfile_hash": t.lockfile_hash,
+                "params_schema": t.params_schema,
+                "input_schema": t.input_schema,
+                "output_schema": t.output_schema,
+                "reproducible": t.reproducible,
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "ref_name": resolved_ref,
+        "commit_hash": commit.hash,
+        "transforms": items,
+    })))
+}
+
+/// Get a schema definition by name at a ref.
+async fn get_schema_definition(
+    auth: MaybeAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug, name)): Path<(String, String, String)>,
+    Query(ref_params): Query<RefParams>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (_, commit, resolved_ref) = resolve_project_ref_commit(
+        &state,
+        &auth,
+        &owner,
+        &project_slug,
+        ref_params.ref_name.as_deref(),
+    )
+    .await?;
+
+    let data_sources = state.db.get_data_sources(commit.id).await?;
+    if let Some(ds) = data_sources.into_iter().find(|ds| ds.name == name) {
+        return Ok(Json(serde_json::json!({
+            "name": ds.name,
+            "schema_type": "data_source",
+            "ref_name": resolved_ref,
+            "commit_hash": commit.hash,
+            "schema_hash": ds.schema_hash,
+            "schema": ds.schema_json,
+        })));
+    }
+
+    let transforms = state.db.get_transforms(commit.id).await?;
+    if let Some(t) = transforms.into_iter().find(|t| t.name == name) {
+        if t.input_schema.is_none() && t.output_schema.is_none() {
+            return Err(ApiError::NotFound(format!(
+                "Transform '{}' has no declared schema",
+                name
+            )));
+        }
+        return Ok(Json(serde_json::json!({
+            "name": t.name,
+            "schema_type": "transform",
+            "ref_name": resolved_ref,
+            "commit_hash": commit.hash,
+            "input_schema": t.input_schema,
+            "output_schema": t.output_schema,
+        })));
+    }
+
+    Err(ApiError::NotFound(format!("Schema '{}' not found", name)))
+}
+
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn render_dag_svg(
+    data_sources: &[crate::db::DbDataSource],
+    transforms: &[crate::db::DbTransform],
+    endpoints: &[Endpoint],
+) -> String {
+    if endpoints.is_empty() {
+        return "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"480\" height=\"120\"><rect width=\"100%\" height=\"100%\" fill=\"#f8fafc\"/><text x=\"24\" y=\"64\" font-family=\"monospace\" font-size=\"16\" fill=\"#0f172a\">No endpoints</text></svg>".to_string();
+    }
+
+    let data_by_name: HashMap<String, String> = data_sources
+        .iter()
+        .map(|ds| (ds.name.clone(), ds.name.clone()))
+        .collect();
+    let transform_runtime: HashMap<String, String> = transforms
+        .iter()
+        .map(|t| (t.name.clone(), t.runtime.clone()))
+        .collect();
+
+    let mut total_height = 40usize;
+    for endpoint in endpoints {
+        let rows = endpoint.edges.len().max(1);
+        total_height += 60 + rows * 90 + 40;
+    }
+
+    let width = 920usize;
+    let mut out = String::new();
+    out.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">",
+        width, total_height, width, total_height
+    ));
+    out.push_str("<defs>");
+    out.push_str(
+        "<marker id=\"arrow\" markerWidth=\"10\" markerHeight=\"7\" refX=\"9\" refY=\"3.5\" orient=\"auto\">",
+    );
+    out.push_str("<polygon points=\"0 0, 10 3.5, 0 7\" fill=\"#334155\" />");
+    out.push_str("</marker>");
+    out.push_str("</defs>");
+    out.push_str("<rect width=\"100%\" height=\"100%\" fill=\"#f8fafc\" />");
+
+    let mut y_offset = 30i32;
+    for endpoint in endpoints {
+        let rows = endpoint.edges.len().max(1) as i32;
+        let block_height = 60 + rows * 90;
+        out.push_str(&format!(
+            "<rect x=\"16\" y=\"{}\" width=\"888\" height=\"{}\" rx=\"10\" fill=\"#ffffff\" stroke=\"#cbd5e1\" />",
+            y_offset - 18,
+            block_height + 22
+        ));
+        out.push_str(&format!(
+            "<text x=\"30\" y=\"{}\" font-family=\"monospace\" font-size=\"16\" fill=\"#0f172a\">Endpoint: {}</text>",
+            y_offset + 6,
+            escape_xml(&endpoint.name)
+        ));
+
+        let mut row = 0i32;
+        for edge in &endpoint.edges {
+            let y = y_offset + 28 + row * 90;
+            row += 1;
+
+            let source_label = match edge.source_type {
+                SourceType::DataSource => data_by_name
+                    .get(&edge.source_ref)
+                    .cloned()
+                    .unwrap_or_else(|| edge.source_ref.clone()),
+                SourceType::Node => edge.source_ref.clone(),
+                SourceType::External => format!(
+                    "{}/{}/{}",
+                    edge.external_owner.as_deref().unwrap_or("?"),
+                    edge.external_project.as_deref().unwrap_or("?"),
+                    edge.external_endpoint.as_deref().unwrap_or("?")
+                ),
+            };
+
+            let target_label = endpoint
+                .nodes
+                .iter()
+                .find(|n| n.node_name == edge.target_node)
+                .map(|n| {
+                    let runtime_suffix = transform_runtime
+                        .get(&n.transform_name)
+                        .map(|r| format!(" [{}]", r))
+                        .unwrap_or_default();
+                    format!("{}{}", n.transform_name, runtime_suffix)
+                })
+                .unwrap_or_else(|| edge.target_node.clone());
+
+            out.push_str(&format!(
+                "<rect x=\"40\" y=\"{}\" width=\"260\" height=\"44\" rx=\"6\" fill=\"#e2e8f0\" stroke=\"#94a3b8\" />",
+                y - 22
+            ));
+            out.push_str(&format!(
+                "<text x=\"52\" y=\"{}\" font-family=\"monospace\" font-size=\"13\" fill=\"#0f172a\">{}</text>",
+                y + 4,
+                escape_xml(&source_label)
+            ));
+
+            out.push_str(&format!(
+                "<rect x=\"400\" y=\"{}\" width=\"430\" height=\"44\" rx=\"6\" fill=\"#dbeafe\" stroke=\"#60a5fa\" />",
+                y - 22
+            ));
+            out.push_str(&format!(
+                "<text x=\"412\" y=\"{}\" font-family=\"monospace\" font-size=\"13\" fill=\"#0f172a\">{}</text>",
+                y + 4,
+                escape_xml(&target_label)
+            ));
+
+            out.push_str(&format!(
+                "<line x1=\"300\" y1=\"{}\" x2=\"400\" y2=\"{}\" stroke=\"#334155\" stroke-width=\"2\" marker-end=\"url(#arrow)\" />",
+                y, y
+            ));
+        }
+
+        y_offset += block_height + 46;
+    }
+
+    out.push_str("</svg>");
+    out
 }
 
 /// List refs (branches and tags) for a project.

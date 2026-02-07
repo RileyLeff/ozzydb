@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -102,34 +102,6 @@ pub struct ProjectConfig {
 
     #[serde(default)]
     pub workspace: WorkspaceConfig,
-
-    /// Cache configuration (local and remote)
-    #[serde(default)]
-    pub cache: CacheConfig,
-}
-
-/// Cache configuration in ozzy.toml
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CacheConfig {
-    /// Remote cache configuration
-    #[serde(default)]
-    pub remote: crate::cache::RemoteCacheConfig,
-}
-
-impl CacheConfig {
-    /// Convert to TieredCacheConfig for runtime use.
-    pub fn to_tiered_config(&self) -> crate::cache::TieredCacheConfig {
-        let remote_config = self.remote.clone().with_env_overrides();
-        crate::cache::TieredCacheConfig {
-            remote: if remote_config.is_configured() {
-                Some(remote_config)
-            } else {
-                None
-            },
-            max_local_size_bytes: None,
-            auto_evict: true,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +118,48 @@ pub struct ProjectMetadata {
 
 fn default_version() -> String {
     "0.1.0".to_string()
+}
+
+fn ensure_root_gitignore(root: &Path) -> Result<()> {
+    let gitignore_path = root.join(".gitignore");
+    let required_entries = [".ozzy/", "data/*.parquet"];
+
+    let mut content = if gitignore_path.exists() {
+        fs::read_to_string(&gitignore_path)?
+    } else {
+        String::new()
+    };
+
+    let existing: HashSet<String> = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect();
+
+    let missing: Vec<&str> = required_entries
+        .iter()
+        .copied()
+        .filter(|entry| !existing.contains(*entry))
+        .collect();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    if content.is_empty() {
+        content.push_str("# OzzyDB generated\n");
+    }
+    for entry in missing {
+        content.push_str(entry);
+        content.push('\n');
+    }
+
+    fs::write(gitignore_path, content)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -349,15 +363,13 @@ impl Project {
             },
             remotes: BTreeMap::new(),
             workspace: WorkspaceConfig::default(),
-            cache: CacheConfig::default(),
         };
 
         let config_content = toml::to_string_pretty(&config)?;
         fs::write(&config_path, config_content)?;
 
-        // Create .gitignore for .ozzy directory internals
-        let gitignore_content = "# OzzyDB internals\n.ozzy/objects/\n.ozzy/commits/\n";
-        fs::write(root.join(".ozzy/.gitignore"), gitignore_content)?;
+        // Ensure git ignores local internals and raw parquet inputs.
+        ensure_root_gitignore(root)?;
 
         Ok(Self {
             root: root.to_path_buf(),
@@ -548,6 +560,9 @@ mod tests {
         assert!(dir.path().join(".ozzy/refs/heads").exists());
         assert!(dir.path().join("data").exists());
         assert!(dir.path().join("transforms").exists());
+        let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains(".ozzy/"));
+        assert!(gitignore.contains("data/*.parquet"));
     }
 
     #[test]

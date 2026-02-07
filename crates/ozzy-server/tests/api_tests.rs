@@ -239,6 +239,101 @@ async fn test_commits_route_exists() {
 }
 
 #[tokio::test]
+async fn test_dag_route_exists() {
+    let Some(app) = build_test_app().await else {
+        return;
+    };
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/nobody/nonexistent/dag")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_dag_svg_route_exists() {
+    let Some(app) = build_test_app().await else {
+        return;
+    };
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/nobody/nonexistent/dag.svg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_endpoints_route_exists() {
+    let Some(app) = build_test_app().await else {
+        return;
+    };
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/nobody/nonexistent/endpoints")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_transforms_route_exists() {
+    let Some(app) = build_test_app().await else {
+        return;
+    };
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/nobody/nonexistent/transforms")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_schemas_route_exists() {
+    let Some(app) = build_test_app().await else {
+        return;
+    };
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/nobody/nonexistent/schemas/raw")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn test_resolve_route_exists() {
     let Some(app) = build_test_app().await else {
         return;

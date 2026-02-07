@@ -97,6 +97,9 @@ fn test_init_project() {
     assert!(dir.path().join(".ozzy/commits").exists());
     assert!(dir.path().join("data").exists());
     assert!(dir.path().join("transforms").exists());
+    let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+    assert!(gitignore.contains(".ozzy/"));
+    assert!(gitignore.contains("data/*.parquet"));
 }
 
 #[test]
@@ -199,6 +202,37 @@ fn test_transform_operations() {
         .success()
         .stdout(predicate::str::contains("filter_by_value"))
         .stdout(predicate::str::contains("add_prefix"));
+}
+
+#[test]
+fn test_transform_add_selector_from_multi_transform_file() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "selector-project", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let transform_path = dir.path().join("transforms/qc.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    create_test_transform(&transform_path);
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/qc.py:add_prefix"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("add_prefix"))
+        .stdout(predicate::str::contains("filter_by_value (not selected)"));
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("add_prefix"))
+        .stdout(predicate::str::contains("filter_by_value").not());
 }
 
 #[test]
