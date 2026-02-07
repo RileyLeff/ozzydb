@@ -2,25 +2,11 @@
 
 use anyhow::{Context, Result};
 use ozzy_core::Project;
-use ozzy_core::registry::{CredentialsFile, RegistryClient};
+use ozzy_core::registry::RegistryClient;
 use std::collections::HashMap;
 
 use super::remote::get_remote_url;
-
-/// Load credentials from config.
-fn load_credentials() -> Result<CredentialsFile> {
-    let path = dirs::config_dir()
-        .context("Could not determine config directory")?
-        .join("ozzy")
-        .join("credentials.json");
-
-    if path.exists() {
-        let content = std::fs::read_to_string(&path)?;
-        Ok(serde_json::from_str(&content)?)
-    } else {
-        Ok(CredentialsFile::default())
-    }
-}
+use super::shared::load_credentials;
 
 /// Push current commit to a remote registry.
 pub async fn run(message: Option<&str>, remote: &str) -> Result<()> {

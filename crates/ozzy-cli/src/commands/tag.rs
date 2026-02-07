@@ -35,9 +35,8 @@ pub async fn create(name: &str, message: Option<&str>) -> Result<()> {
         &commit_hash[..8.min(commit_hash.len())]
     );
 
-    if let Some(msg) = message {
-        println!("  Message: {}", msg);
-        // In a full implementation, we'd store annotated tag info
+    if let Some(_msg) = message {
+        eprintln!("Warning: --message is not yet supported; annotated tags are not implemented. Tag created as lightweight.");
     }
 
     Ok(())

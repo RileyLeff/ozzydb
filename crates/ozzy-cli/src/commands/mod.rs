@@ -11,6 +11,7 @@ pub mod pull;
 pub mod push;
 pub mod remote;
 pub mod run;
+pub mod shared;
 pub mod status;
 pub mod tag;
 pub mod transform;

@@ -1,9 +1,11 @@
 use anyhow::Result;
 use ozzy_core::project::{Endpoint, PipelineEdge, PipelineNode, SourceType};
 use ozzy_core::{Project, commit, schema, validate_safe_name};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
+
+use super::shared::load_staged_endpoint_deletions;
 
 fn staged_endpoint_path(project: &Project, name: &str) -> PathBuf {
     project
@@ -17,26 +19,6 @@ fn staged_endpoint_delete_path(project: &Project, name: &str) -> PathBuf {
         .ozzy_dir()
         .join("staged_endpoints")
         .join(format!("{}.deleted", name))
-}
-
-fn load_staged_endpoint_deletions(project: &Project) -> Result<HashSet<String>> {
-    let staged_dir = project.ozzy_dir().join("staged_endpoints");
-    let mut deleted = HashSet::new();
-    if !staged_dir.exists() {
-        return Ok(deleted);
-    }
-
-    for entry in fs::read_dir(&staged_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().map(|e| e == "deleted").unwrap_or(false) {
-            if let Some(stem) = path.file_stem() {
-                deleted.insert(stem.to_string_lossy().to_string());
-            }
-        }
-    }
-
-    Ok(deleted)
 }
 
 fn expected_input_names(transform: &ozzy_core::project::Transform) -> Vec<String> {

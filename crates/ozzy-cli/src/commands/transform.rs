@@ -199,8 +199,12 @@ pub async fn remove(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn test(name: &str, _sample: usize) -> Result<()> {
+pub async fn test(name: &str, sample: usize) -> Result<()> {
     let project = Project::find_current()?;
+
+    if sample != 1000 {
+        eprintln!("Warning: --sample is not yet implemented; using full dataset.");
+    }
 
     // Validate name to prevent path traversal
     validate_safe_name(name)?;

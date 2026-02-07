@@ -6,91 +6,14 @@ use ozzy_core::commit;
 use ozzy_core::error::Error as CoreError;
 use ozzy_core::project::Commit;
 use ozzy_core::registry::protocol::ListRefsResponse;
-use ozzy_core::registry::{CredentialsFile, RegistryClient};
+use ozzy_core::registry::RegistryClient;
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::remote::get_remote_url;
-
-/// Load credentials from config.
-fn load_credentials() -> Result<CredentialsFile> {
-    let path = dirs::config_dir()
-        .context("Could not determine config directory")?
-        .join("ozzy")
-        .join("credentials.json");
-
-    if path.exists() {
-        let content = std::fs::read_to_string(&path)?;
-        Ok(serde_json::from_str(&content)?)
-    } else {
-        Ok(CredentialsFile::default())
-    }
-}
-
-fn sanitize_archive_relative_path(path: &Path) -> Result<PathBuf> {
-    let mut sanitized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => sanitized.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                anyhow::bail!("Refusing unsafe archive path: {}", path.display());
-            }
-        }
-    }
-
-    if sanitized.as_os_str().is_empty() {
-        anyhow::bail!("Refusing empty archive path");
-    }
-
-    Ok(sanitized)
-}
-
-fn checked_destination(base: &Path, canonical_base: &Path, rel: &Path) -> Result<PathBuf> {
-    let dest = base.join(rel);
-
-    if let Some(parent) = dest.parent() {
-        // Walk up to the nearest existing ancestor and validate it's within the
-        // base BEFORE creating any directories, to prevent symlink traversal.
-        let mut ancestor = parent.to_path_buf();
-        while !ancestor.exists() {
-            ancestor = ancestor
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("Invalid extraction path: {}", rel.display()))?
-                .to_path_buf();
-        }
-        let canonical_ancestor = ancestor.canonicalize()?;
-        if !canonical_ancestor.starts_with(canonical_base) {
-            anyhow::bail!(
-                "Archive extraction escaped destination root: {}",
-                rel.display()
-            );
-        }
-
-        std::fs::create_dir_all(parent)?;
-        let canonical_parent = parent.canonicalize()?;
-        if !canonical_parent.starts_with(canonical_base) {
-            anyhow::bail!(
-                "Archive extraction escaped destination root: {}",
-                rel.display()
-            );
-        }
-    }
-
-    if dest.exists() {
-        let canonical_dest = dest.canonicalize()?;
-        if !canonical_dest.starts_with(canonical_base) {
-            anyhow::bail!(
-                "Archive extraction escaped destination root: {}",
-                rel.display()
-            );
-        }
-    }
-
-    Ok(dest)
-}
+use super::shared::{checked_destination, load_credentials, sanitize_archive_relative_path};
 
 fn prune_unlisted_files(dir: &Path, project_root: &Path, keep: &HashSet<PathBuf>) -> Result<()> {
     if !dir.exists() {

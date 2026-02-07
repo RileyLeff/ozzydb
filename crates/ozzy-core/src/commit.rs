@@ -8,7 +8,7 @@ use std::path::Path;
 use crate::canon;
 use crate::canon::hash_source_file;
 use crate::error::Result;
-use crate::hash::{blake3_hash, blake3_hash_file};
+use crate::hash::{blake3_hash, blake3_hash_file, transform_hash};
 use crate::project::{Commit, DataSource, Project, Transform};
 use crate::schema::{extract_parquet_schema, get_parquet_row_count};
 use walkdir::WalkDir;
@@ -135,6 +135,9 @@ pub fn collect_transforms(project: &Project) -> Result<BTreeMap<String, Transfor
         return Ok(transforms);
     }
 
+    // Detect platform once for all transforms (avoids spawning subprocess per file)
+    let python_version = crate::platform::PlatformFingerprint::detect().python_version;
+
     for entry in WalkDir::new(&transforms_dir)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -155,7 +158,7 @@ pub fn collect_transforms(project: &Project) -> Result<BTreeMap<String, Transfor
             .replace('\\', "/");
 
         // Look for @ozzy.transform decorated functions
-        for transform in parse_python_transforms(&content, path, &source_path)? {
+        for transform in parse_python_transforms(&content, path, &source_path, &python_version)? {
             if transforms.contains_key(&transform.name) {
                 return Err(crate::error::Error::TransformAlreadyExists(format!(
                     "'{}' defined in multiple files",
@@ -174,6 +177,7 @@ fn parse_python_transforms(
     content: &str,
     path: &Path,
     source_path: &str,
+    python_version: &Option<String>,
 ) -> Result<Vec<Transform>> {
     let mut transforms = Vec::new();
     let source_hash = hash_source_file(path)?;
@@ -262,18 +266,26 @@ fn parse_python_transforms(
                             meta.input_schema
                         };
 
-                        // Detect Python version for runtime field
-                        // e.g., "python-3.11.8" instead of just "python"
-                        let python_version =
-                            crate::platform::PlatformFingerprint::detect().python_version;
+                        // Use cached python version for runtime field
                         let runtime = match python_version {
                             Some(ver) => format!("python-{}", ver),
                             None => "python".to_string(),
                         };
 
+                        // Compute the full composite transform hash:
+                        // blake3(source_hash + function_name + lockfile_hash + runtime + params_schema_hash)
+                        let params_schema_hash = canon::hash_json(&meta.params_schema);
+                        let full_hash = transform_hash(
+                            &source_hash,
+                            &function_name,
+                            &lockfile_hash,
+                            &runtime,
+                            &params_schema_hash,
+                        );
+
                         transforms.push(Transform {
                             name: function_name.clone(),
-                            hash: source_hash.clone(),
+                            hash: full_hash,
                             runtime,
                             source_path: source_path.to_string(),
                             function_name,

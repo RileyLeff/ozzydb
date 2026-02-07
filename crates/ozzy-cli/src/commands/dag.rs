@@ -1,8 +1,9 @@
 use anyhow::Result;
 use ozzy_core::project::{Endpoint, SourceType};
 use ozzy_core::{Project, commit};
-use std::collections::HashSet;
 use std::fs;
+
+use super::shared::load_staged_endpoint_deletions;
 
 pub async fn show(format: &str, endpoint_name: Option<&str>) -> Result<()> {
     let project = Project::find_current()?;
@@ -76,26 +77,6 @@ fn collect_all_endpoints(project: &Project) -> Result<Vec<Endpoint>> {
     }
 
     Ok(endpoints)
-}
-
-fn load_staged_endpoint_deletions(project: &Project) -> Result<HashSet<String>> {
-    let staged_dir = project.ozzy_dir().join("staged_endpoints");
-    let mut deleted = HashSet::new();
-    if !staged_dir.exists() {
-        return Ok(deleted);
-    }
-
-    for entry in fs::read_dir(&staged_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().map(|e| e == "deleted").unwrap_or(false) {
-            if let Some(stem) = path.file_stem() {
-                deleted.insert(stem.to_string_lossy().to_string());
-            }
-        }
-    }
-
-    Ok(deleted)
 }
 
 fn print_ascii_dag(project: &Project, endpoints: &[Endpoint]) -> Result<()> {

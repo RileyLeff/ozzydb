@@ -12,9 +12,9 @@ class DataSourceMeta:
     """Metadata about a data source."""
 
     name: str
-    hash: str
-    schema_hash: str
     path: str
+    hash: Optional[str] = None
+    schema_hash: Optional[str] = None
     row_count: Optional[int] = None
     byte_size: Optional[int] = None
     schema: Optional[pa.Schema] = None

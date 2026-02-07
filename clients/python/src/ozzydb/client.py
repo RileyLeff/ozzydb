@@ -2,6 +2,7 @@
 Main client functions for OzzyDB Python client.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -52,9 +53,17 @@ def _is_local_ref(ref: str) -> bool:
     if ref.startswith(("./", "../", "~/", "/")):
         return True
     # Remote refs follow "owner/project/endpoint[@ref]" format (exactly 2 slashes)
-    # Local paths should only be detected via explicit prefixes above
-    # Do NOT probe the filesystem, as "owner/project" could accidentally match a local dir
-    return False
+    # Strip @ref suffix before counting slashes
+    base = ref.split("@")[0]
+    slash_count = base.count("/")
+    if slash_count >= 2:
+        return False
+    # 0-1 slashes is ambiguous: not a valid remote ref (needs owner/project/endpoint)
+    # and not an explicit local ref (needs ./ prefix)
+    raise ValueError(
+        f"Ambiguous ref '{ref}'. Use './{ref}' for a local project path, "
+        f"or 'owner/project/endpoint' for a remote registry ref."
+    )
 
 
 def _parse_local_ref(ref: str) -> tuple[Path, str]:
@@ -171,7 +180,7 @@ def _fetch_local(
     if override_params:
         for transform_name, params in override_params.items():
             for key, value in params.items():
-                cmd.extend(["--param", f"{transform_name}.{key}={value}"])
+                cmd.extend(["--param", f"{transform_name}.{key}={json.dumps(value)}"])
 
     with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
         tmp_path = tmp.name
@@ -215,7 +224,7 @@ def _fetch_remote(
     if override_params:
         for transform_name, params in override_params.items():
             for key, value in params.items():
-                cmd.extend(["--param", f"{transform_name}.{key}={value}"])
+                cmd.extend(["--param", f"{transform_name}.{key}={json.dumps(value)}"])
 
     with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
         tmp_path = tmp.name
