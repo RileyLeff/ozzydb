@@ -335,9 +335,10 @@ fn find_transform_blocks(content: &str) -> Vec<TransformBlock> {
         // Look for the function definition after the decorator block.
         for k in (j + 1)..lines.len() {
             let l = lines[k].trim();
-            if l.starts_with("def ") {
+            if l.starts_with("def ") || l.starts_with("async def ") {
+                let name_start = if l.starts_with("async def ") { 10 } else { 4 };
                 if let Some(paren_pos) = l.find('(') {
-                    let name = l[4..paren_pos].trim();
+                    let name = l[name_start..paren_pos].trim();
                     blocks.push(TransformBlock {
                         name: name.to_string(),
                         decorator_start: i,
@@ -395,7 +396,8 @@ fn rewrite_selected_transform_source(
             .ok_or_else(|| anyhow::anyhow!("Transform '{}' not found", selected_name))?;
         let def_line = &lines[block.def_line];
         let trimmed = def_line.trim_start();
-        if !trimmed.starts_with("def ") {
+        let is_async = trimmed.starts_with("async def ");
+        if !trimmed.starts_with("def ") && !is_async {
             anyhow::bail!(
                 "Could not rename function '{}' in transform source",
                 selected_name
@@ -410,7 +412,11 @@ fn rewrite_selected_transform_source(
         let indent_len = def_line.len() - trimmed.len();
         let indent = &def_line[..indent_len];
         let suffix = &trimmed[paren_pos..];
-        lines[block.def_line] = format!("{indent}def {new_name}{suffix}");
+        if is_async {
+            lines[block.def_line] = format!("{indent}async def {new_name}{suffix}");
+        } else {
+            lines[block.def_line] = format!("{indent}def {new_name}{suffix}");
+        }
     }
 
     let mut rewritten = lines.join("\n");

@@ -37,7 +37,7 @@ services:
         condition: service_healthy
     environment:
       BIND_ADDRESS: "0.0.0.0:3000"
-      DATABASE_URL: "postgres://${POSTGRES_USER:-ozzy}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ozzy}"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-ozzy}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/${POSTGRES_DB:-ozzy}"
       DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-20}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?GITHUB_CLIENT_ID required}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?GITHUB_CLIENT_SECRET required}
