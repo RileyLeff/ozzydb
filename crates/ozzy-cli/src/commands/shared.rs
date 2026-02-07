@@ -502,11 +502,11 @@ pub async fn execute_pipeline(
 
         println!("Executing: {}", node_name);
         if input_hash_pairs.len() == 1 {
-            println!("  Input hash: {}...", &input_hash_pairs[0].1[..12]);
+            println!("  Input hash: {}...", input_hash_pairs[0].1.get(..12).unwrap_or(&input_hash_pairs[0].1));
         } else {
             println!("  Inputs: {}", input_hash_pairs.len());
         }
-        println!("  Materialized hash: {}...", &materialized_hash[..12]);
+        println!("  Materialized hash: {}...", materialized_hash.get(..12).unwrap_or(&materialized_hash));
 
         // Check non-reproducibility
         let has_non_reproducible_upstream = endpoint

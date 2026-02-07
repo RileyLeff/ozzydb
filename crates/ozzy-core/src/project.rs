@@ -190,12 +190,18 @@ pub struct DataSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Transform {
     pub name: String,
-    pub hash: String,
+    pub hash: String,          // Composite: blake3(source_hash + function_name + lockfile + runtime + params_schema)
     pub runtime: String,       // e.g., "python-3.11"
     pub source_path: String,   // Relative path in project
     pub function_name: String, // Function to call
     pub lockfile_hash: String,
     pub params_schema: serde_json::Value,
+
+    /// Content hash of the canonical source file: blake3(canonicalize_source(text)).
+    /// Used for content-addressed storage lookups and integrity verification.
+    /// Distinct from `hash` which is the composite identity hash for caching.
+    #[serde(default)]
+    pub source_hash: String,
 
     #[serde(default = "default_reproducible")]
     pub reproducible: bool,
@@ -588,7 +594,7 @@ impl Project {
     // Commit operations
     // ─────────────────────────────────────────────────────────────────────
 
-    /// Load a commit by hash.
+    /// Load a commit by hash, verifying its integrity.
     pub fn load_commit(&self, hash: &str) -> Result<Commit> {
         let commit_path = self.commits_dir().join(format!("{}.json", hash));
         if !commit_path.exists() {
@@ -596,6 +602,15 @@ impl Project {
         }
         let content = fs::read_to_string(&commit_path)?;
         let commit: Commit = serde_json::from_str(&content)?;
+
+        let expected = crate::commit::compute_commit_hash(&commit);
+        if expected != commit.hash {
+            return Err(Error::InvalidPath(format!(
+                "Commit hash mismatch: file says {}, computed {}. Commit may be corrupted.",
+                commit.hash, expected
+            )));
+        }
+
         Ok(commit)
     }
 
@@ -713,5 +728,34 @@ mod tests {
         let project = Project::init(dir.path(), "test-project", "testuser").unwrap();
         let result = project.resolve_ref("../../outside");
         assert!(matches!(result, Err(Error::InvalidPath(_))));
+    }
+
+    #[test]
+    fn test_load_commit_rejects_corrupted_hash() {
+        let dir = tempdir().unwrap();
+        let project = Project::init(dir.path(), "test-project", "testuser").unwrap();
+
+        // Create a commit via the normal path
+        let commit = crate::commit::create_commit(&project, "test commit", "testuser").unwrap();
+        project.save_commit(&commit).unwrap();
+
+        // Tamper with the commit file to corrupt it
+        let commit_path = project
+            .commits_dir()
+            .join(format!("{}.json", commit.hash));
+        let mut content: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&commit_path).unwrap()).unwrap();
+        content["message"] = serde_json::Value::String("tampered message".to_string());
+        fs::write(&commit_path, serde_json::to_string_pretty(&content).unwrap()).unwrap();
+
+        // Loading should fail with hash mismatch
+        let result = project.load_commit(&commit.hash);
+        assert!(result.is_err(), "load_commit should reject corrupted commit");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("hash mismatch"),
+            "Error should mention hash mismatch, got: {}",
+            err_msg
+        );
     }
 }

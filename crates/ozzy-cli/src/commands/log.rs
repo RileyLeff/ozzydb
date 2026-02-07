@@ -16,7 +16,7 @@ pub async fn show(num: usize) -> Result<()> {
 
     for commit in &commits {
         let local_time = commit.timestamp.with_timezone(&Local);
-        let short_hash = &commit.hash[..12];
+        let short_hash = commit.hash.get(..12).unwrap_or(&commit.hash);
 
         println!(
             "commit {} ({})",

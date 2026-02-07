@@ -510,11 +510,25 @@ pub async fn remove(name: &str) -> Result<()> {
     let staged_path = staged_endpoint_path(&project, name);
     if staged_path.exists() {
         fs::remove_file(&staged_path)?;
+        // If the endpoint also exists in the latest commit, ensure a .deleted marker
+        // so the committed version doesn't silently reappear on next commit.
         let deletion_marker = staged_endpoint_delete_path(&project, name);
-        if deletion_marker.exists() {
-            fs::remove_file(deletion_marker)?;
+        let committed = project
+            .latest_commit()?
+            .map(|c| c.endpoints.contains_key(name))
+            .unwrap_or(false);
+        if committed {
+            let staged_dir = project.ozzy_dir().join("staged_endpoints");
+            fs::create_dir_all(&staged_dir)?;
+            fs::write(&deletion_marker, b"deleted\n")?;
+            println!("Removed staged endpoint and marked committed version for deletion: {}", name);
+        } else {
+            // No committed version - clean up any stale deletion marker
+            if deletion_marker.exists() {
+                fs::remove_file(deletion_marker)?;
+            }
+            println!("Removed staged endpoint: {}", name);
         }
-        println!("Removed staged endpoint: {}", name);
         return Ok(());
     }
 
@@ -578,11 +592,12 @@ fn print_endpoint(project: &Project, endpoint: &Endpoint, committed: bool) -> Re
 
     println!();
     println!("Pipeline:");
+    // Collect data sources once outside the loop instead of per-edge
+    let data_sources = commit::collect_data_sources(project)?;
     for edge in &endpoint.edges {
         let source = match edge.source_type {
             SourceType::DataSource => {
                 // Show schema info for data sources
-                let data_sources = commit::collect_data_sources(project)?;
                 if let Some(ds) = data_sources.get(&edge.source_ref) {
                     let path = project.root.join(&ds.path);
                     if let Ok(schema_info) = schema::extract_parquet_schema(&path) {

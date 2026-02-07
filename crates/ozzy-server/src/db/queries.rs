@@ -56,6 +56,12 @@ impl Database {
     }
 
     /// Create or update user from GitHub OAuth.
+    ///
+    /// DESIGN NOTE: `username` is set to `github_login` on every login. If a user
+    /// renames their GitHub account, their ozzy username silently changes too, which
+    /// breaks existing `owner/project` references pointing at the old name. Before
+    /// public launch, consider either (a) pinning username on first login only, or
+    /// (b) adding a username-redirect / alias table so old references still resolve.
     pub async fn upsert_user_from_github(
         &self,
         github_id: i64,
@@ -320,7 +326,7 @@ impl Database {
             .bind(Uuid::new_v4())
             .bind(commit_id)
             .bind(name)
-            .bind(&t.hash)
+            .bind(&t.source_hash)
             .bind(&t.runtime)
             .bind(&t.source_path)
             .bind(&t.function_name)

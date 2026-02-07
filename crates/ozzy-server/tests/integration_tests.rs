@@ -335,7 +335,8 @@ fn build_commit(
         Transform {
             name: transform_name.to_string(),
             source_path: format!("transforms/{}.py", transform_name),
-            hash: transform_hash,
+            hash: transform_hash.clone(),
+            source_hash: transform_hash,
             function_name: format!("{}_fn", transform_name),
             input_schema: None,
             output_schema: None,

@@ -219,9 +219,12 @@ fn parse_python_transforms(
 
             // Find the function definition
             j += 1;
+            let decorator_line = i + 1; // 1-indexed line number for the decorator
+            let mut found_def = false;
             while j < lines.len() {
                 let l = lines[j].trim();
                 if l.starts_with("def ") {
+                    found_def = true;
                     // Extract function name
                     if let Some(name_end) = l.find('(') {
                         let function_name = l[4..name_end].trim().to_string();
@@ -291,6 +294,7 @@ fn parse_python_transforms(
                             function_name,
                             lockfile_hash,
                             params_schema: meta.params_schema,
+                            source_hash: source_hash.clone(),
                             reproducible: meta.reproducible,
                             input_schema,
                             output_schema: meta.output_schema,
@@ -299,6 +303,13 @@ fn parse_python_transforms(
                     break;
                 }
                 j += 1;
+            }
+            if !found_def {
+                eprintln!(
+                    "Warning: @ozzy.transform decorator at {}:{} is not followed by a function definition",
+                    path.display(),
+                    decorator_line
+                );
             }
             i = j;
         }
@@ -682,5 +693,68 @@ def join_transform(inputs, params):
             .expect("missing inputs array");
         let parsed: Vec<&str> = inputs.iter().filter_map(|v| v.as_str()).collect();
         assert_eq!(parsed, vec!["left", "right"]);
+    }
+
+    #[test]
+    fn source_hash_is_populated_and_distinct_from_composite_hash() {
+        let dir = tempdir().unwrap();
+        let project = Project::init(dir.path(), "test-project", "testuser").unwrap();
+        let transform_path = project.transforms_dir().join("basic.py");
+        fs::write(
+            &transform_path,
+            r#"
+class ozzy:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
+
+@ozzy.transform()
+def basic(inputs, params):
+    return inputs["main"]
+"#,
+        )
+        .unwrap();
+
+        let transforms = collect_transforms(&project).unwrap();
+        let t = transforms.get("basic").expect("missing transform");
+
+        // source_hash should be non-empty
+        assert!(!t.source_hash.is_empty(), "source_hash should be populated");
+        // source_hash should differ from composite hash (composite includes function_name, runtime, etc.)
+        assert_ne!(
+            t.source_hash, t.hash,
+            "source_hash should differ from composite hash"
+        );
+    }
+
+    #[test]
+    fn malformed_decorator_without_def_is_skipped() {
+        let dir = tempdir().unwrap();
+        let project = Project::init(dir.path(), "test-project", "testuser").unwrap();
+        let transform_path = project.transforms_dir().join("malformed.py");
+        fs::write(
+            &transform_path,
+            r#"
+class ozzy:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
+
+@ozzy.transform()
+# missing def here - this is malformed
+"#,
+        )
+        .unwrap();
+
+        let transforms = collect_transforms(&project).unwrap();
+        // Should not crash, and should not find any transforms
+        assert!(
+            transforms.is_empty(),
+            "malformed decorator should produce no transforms"
+        );
     }
 }

@@ -50,6 +50,10 @@ struct PollRequest {
 }
 
 /// Poll for device flow completion.
+///
+/// NOTE: This endpoint is unauthenticated and called in a tight loop by `ozzy auth login`.
+/// If we add public-facing deployment, consider adding rate limiting (e.g. tower-governor)
+/// keyed on device_code to prevent abuse.
 async fn github_poll(
     State(state): State<AppState>,
     Json(req): Json<PollRequest>,

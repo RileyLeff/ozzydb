@@ -254,7 +254,7 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>, force: bool) -> R
     let expected_transforms: std::collections::HashMap<String, String> = pulled_commit
         .transforms
         .values()
-        .map(|t| (t.source_path.clone(), t.hash.clone()))
+        .map(|t| (t.source_path.clone(), t.source_hash.clone()))
         .collect();
 
     // Create data and transforms directories
@@ -305,13 +305,20 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>, force: bool) -> R
         println!("  {}", path.display());
     }
 
+    // Canonicalize dirs to match canonical_project_root (prevents strip_prefix
+    // failures when the project path contains symlinks, e.g. /tmp -> /private/tmp on macOS).
+    let canonical_data_dir = project.data_dir().canonicalize().unwrap_or(project.data_dir());
+    let canonical_transforms_dir = project
+        .transforms_dir()
+        .canonicalize()
+        .unwrap_or(project.transforms_dir());
     prune_unlisted_files(
-        &project.data_dir(),
+        &canonical_data_dir,
         &canonical_project_root,
         &keep_data_files,
     )?;
     prune_unlisted_files(
-        &project.transforms_dir(),
+        &canonical_transforms_dir,
         &canonical_project_root,
         &keep_transform_files,
     )?;

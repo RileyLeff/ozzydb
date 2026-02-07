@@ -37,6 +37,7 @@ pub fn hash_source_directory(dir: &Path) -> std::io::Result<String> {
     let mut files: Vec<(String, String)> = Vec::new();
 
     for entry in WalkDir::new(dir)
+        .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
@@ -47,11 +48,12 @@ pub fn hash_source_directory(dir: &Path) -> std::io::Result<String> {
     {
         let path = entry.path();
 
+        // Normalize to forward slashes for cross-platform hash determinism
         let relative_path = path
             .strip_prefix(dir)
             .unwrap_or(path)
             .to_string_lossy()
-            .to_string();
+            .replace('\\', "/");
 
         let content = fs::read_to_string(path)?;
         let canonical_content = canonicalize_source(&content);

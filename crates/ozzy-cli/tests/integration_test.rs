@@ -1650,3 +1650,157 @@ fn test_tag_shorthand_create_works() {
         .success()
         .stdout(predicate::str::contains("Created tag 'v1.0.0'"));
 }
+
+#[test]
+fn test_commit_applies_staged_deletions_and_additions() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "staged-commit", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
+        .assert()
+        .success();
+
+    let transform_path = dir.path().join("transforms/qc.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    create_test_transform(&transform_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/qc.py"])
+        .assert()
+        .success();
+
+    // Create first endpoint and commit
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "endpoint",
+            "create",
+            "old_ep",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["commit", "-m", "initial with old_ep"])
+        .assert()
+        .success();
+
+    // Stage a deletion of old_ep AND create a new endpoint in the same commit
+    ozzy()
+        .current_dir(dir.path())
+        .args(["endpoint", "rm", "old_ep"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "endpoint",
+            "create",
+            "new_ep",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["commit", "-m", "swap endpoints"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Endpoints: 1"));
+
+    // Verify: new_ep exists, old_ep does not
+    ozzy()
+        .current_dir(dir.path())
+        .args(["endpoint", "ls"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("new_ep")
+                .and(predicate::str::contains("old_ep").not()),
+        );
+}
+
+#[test]
+fn test_endpoint_rm_of_staged_override_marks_committed_for_deletion() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "rm-test", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    create_test_parquet(&dir.path().join("data/raw.parquet"));
+    create_test_transform(&dir.path().join("transforms/qc.py"));
+
+    // Create and commit an endpoint
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "endpoint", "create", "ep1", "--input", "raw", "--transforms", "filter_by_value",
+        ])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["commit", "-m", "initial"])
+        .assert()
+        .success();
+
+    // Now create a staged override of the same endpoint
+    ozzy()
+        .current_dir(dir.path())
+        .args([
+            "endpoint", "create", "ep1", "--input", "raw", "--transforms", "filter_by_value",
+        ])
+        .assert()
+        .success();
+
+    // Remove the staged override -- should also mark the committed version for deletion
+    ozzy()
+        .current_dir(dir.path())
+        .args(["endpoint", "rm", "ep1"])
+        .assert()
+        .success();
+
+    // Commit should finalize the deletion
+    ozzy()
+        .current_dir(dir.path())
+        .args(["commit", "-m", "remove ep1"])
+        .assert()
+        .success();
+
+    // Endpoint should be gone
+    ozzy()
+        .current_dir(dir.path())
+        .args(["endpoint", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ep1").not());
+}

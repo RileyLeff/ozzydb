@@ -224,8 +224,17 @@ impl LocalCache {
             )
             .optional()?;
 
-        // Update access stats if found
-        if entry.is_some() {
+        // Verify the cached file still exists on disk
+        if let Some(ref e) = entry {
+            if !e.file_path.exists() {
+                // File was externally deleted; clean up the stale DB entry
+                conn.execute(
+                    "DELETE FROM cache_entries WHERE materialized_hash = ?",
+                    [hash],
+                )?;
+                return Ok(None);
+            }
+            // Update access stats
             conn.execute(
                 "UPDATE cache_entries
                  SET last_accessed = ?, access_count = access_count + 1
@@ -320,15 +329,13 @@ impl LocalCache {
     pub fn total_size(&self) -> Result<u64> {
         let conn = self.connect()?;
 
-        let size: i64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(byte_size), 0) FROM cache_entries",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
+        let size: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(byte_size), 0) FROM cache_entries",
+            [],
+            |row| row.get(0),
+        )?;
 
-        Ok(size as u64)
+        Ok(size.try_into().unwrap_or(0))
     }
 
     /// Get number of cache entries.
@@ -431,5 +438,33 @@ mod tests {
         assert_eq!(format_size(1500), "1.46 KB");
         assert_eq!(format_size(1_500_000), "1.43 MB");
         assert_eq!(format_size(1_500_000_000), "1.40 GB");
+    }
+
+    #[test]
+    fn test_get_returns_none_for_deleted_file() {
+        let dir = tempdir().unwrap();
+        let cache = LocalCache::open_at(&dir.path().join("cache.db")).unwrap();
+
+        // Create a test file and add to cache
+        let test_file = dir.path().join("test.parquet");
+        fs::write(&test_file, "test data").unwrap();
+        cache
+            .put("hash_deleted", "x86_64-linux", &test_file, None)
+            .unwrap();
+
+        // Verify it's in the cache
+        assert!(cache.get("hash_deleted").unwrap().is_some());
+
+        // Delete the file externally
+        let entry = cache.get("hash_deleted").unwrap().unwrap();
+        fs::remove_file(&entry.file_path).unwrap();
+
+        // Now get should return None and clean up the DB entry
+        assert!(
+            cache.get("hash_deleted").unwrap().is_none(),
+            "get() should return None when cached file is deleted"
+        );
+        // Verify DB entry was also cleaned up
+        assert_eq!(cache.count().unwrap(), 0);
     }
 }

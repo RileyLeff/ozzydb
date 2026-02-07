@@ -46,6 +46,7 @@ class Project:
 
         self._config = toml.load(self.root / "ozzy.toml")
         self._commit: Optional[dict[str, Any]] = None
+        self._commit_loaded: bool = False
 
     @property
     def name(self) -> str:
@@ -69,7 +70,7 @@ class Project:
 
     def _load_latest_commit(self) -> Optional[dict[str, Any]]:
         """Load the latest commit from the refs."""
-        if self._commit is not None:
+        if self._commit_loaded:
             return self._commit
 
         # Read the HEAD ref
@@ -80,15 +81,18 @@ class Project:
             ref_path = self.ozzy_dir / "refs" / "heads" / head
 
         if not ref_path.exists():
+            self._commit_loaded = True
             return None
 
         commit_hash = ref_path.read_text().strip()
         commit_path = self.ozzy_dir / "commits" / f"{commit_hash}.json"
 
         if not commit_path.exists():
+            self._commit_loaded = True
             return None
 
         self._commit = json.loads(commit_path.read_text())
+        self._commit_loaded = True
         return self._commit
 
     def _load_staged_data_sources(self) -> dict[str, DataSourceMeta]:
@@ -140,7 +144,13 @@ class Project:
                 content = py_file.read_text()
                 found_transforms = self._parse_transform_file(content, py_file, transforms_dir)
                 transforms.update(found_transforms)
-            except Exception:
+            except (OSError, UnicodeDecodeError, ValueError) as exc:
+                import warnings
+
+                warnings.warn(
+                    f"Could not parse transform file {py_file}: {exc}",
+                    stacklevel=2,
+                )
                 continue
 
         return transforms

@@ -222,12 +222,69 @@ fn parse_data_type(s: &str) -> DataType {
             );
             DataType::Utf8
         }
+        s if s.starts_with("struct<") => {
+            // struct<field1: type1, field2: type2>
+            let inner = &s[7..s.len() - 1];
+            let mut fields = Vec::new();
+            let mut depth = 0;
+            let mut current = String::new();
+            for c in inner.chars() {
+                match c {
+                    '<' => {
+                        depth += 1;
+                        current.push(c);
+                    }
+                    '>' => {
+                        depth -= 1;
+                        current.push(c);
+                    }
+                    ',' if depth == 0 => {
+                        if let Some(colon) = current.find(": ") {
+                            let name = current[..colon].trim().to_string();
+                            let dtype = parse_data_type(current[colon + 2..].trim());
+                            fields.push(Arc::new(Field::new(name, dtype, true)));
+                        }
+                        current.clear();
+                    }
+                    _ => current.push(c),
+                }
+            }
+            if !current.trim().is_empty() {
+                if let Some(colon) = current.find(": ") {
+                    let name = current[..colon].trim().to_string();
+                    let dtype = parse_data_type(current[colon + 2..].trim());
+                    fields.push(Arc::new(Field::new(name, dtype, true)));
+                }
+            }
+            if fields.is_empty() {
+                eprintln!(
+                    "Warning: Could not parse struct type '{}', falling back to Utf8",
+                    s
+                );
+                DataType::Utf8
+            } else {
+                DataType::Struct(fields.into())
+            }
+        }
         s if s.starts_with("dict<") => {
-            // dict<key_type, value_type>
+            // dict<key_type, value_type> -- use depth-aware split for nested types
             let inner = &s[5..s.len() - 1];
-            if let Some(comma_pos) = inner.find(", ") {
-                let key_str = &inner[..comma_pos];
-                let value_str = &inner[comma_pos + 2..];
+            let mut depth = 0;
+            let mut split_pos = None;
+            for (i, c) in inner.char_indices() {
+                match c {
+                    '<' | '[' => depth += 1,
+                    '>' | ']' => depth -= 1,
+                    ',' if depth == 0 => {
+                        split_pos = Some(i);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(pos) = split_pos {
+                let key_str = inner[..pos].trim();
+                let value_str = inner[pos + 1..].trim();
                 let key_type = parse_data_type(key_str);
                 let value_type = parse_data_type(value_str);
                 return DataType::Dictionary(Box::new(key_type), Box::new(value_type));
@@ -283,7 +340,7 @@ pub fn get_parquet_row_count(path: &Path) -> Result<u64> {
 
     let count: i64 = metadata.row_groups().iter().map(|rg| rg.num_rows()).sum();
 
-    Ok(count as u64)
+    Ok(count.try_into().unwrap_or(0))
 }
 
 /// Validate that a transform's output schema is compatible with the next transform's input.
@@ -507,6 +564,38 @@ mod tests {
     }
 
     #[test]
+    fn test_struct_roundtrip() {
+        let struct_type = DataType::Struct(
+            vec![
+                Arc::new(Field::new("name", DataType::Utf8, true)),
+                Arc::new(Field::new("age", DataType::Int32, true)),
+            ]
+            .into(),
+        );
+        let formatted = format_data_type(&struct_type);
+        assert_eq!(formatted, "struct<name: utf8, age: int32>");
+        let parsed = parse_data_type(&formatted);
+        assert_eq!(struct_type, parsed, "Struct roundtrip failed");
+    }
+
+    #[test]
+    fn test_nested_struct_roundtrip() {
+        let inner_struct = DataType::Struct(
+            vec![Arc::new(Field::new("x", DataType::Float64, true))].into(),
+        );
+        let outer_struct = DataType::Struct(
+            vec![
+                Arc::new(Field::new("id", DataType::Int64, true)),
+                Arc::new(Field::new("inner", inner_struct, true)),
+            ]
+            .into(),
+        );
+        let formatted = format_data_type(&outer_struct);
+        let parsed = parse_data_type(&formatted);
+        assert_eq!(outer_struct, parsed, "Nested struct roundtrip failed");
+    }
+
+    #[test]
     fn test_schema_contains_columns() {
         let schema = SchemaInfo {
             fields: vec![
@@ -531,5 +620,31 @@ mod tests {
         assert!(schema.contains_columns(&["a", "b"]));
         assert!(schema.contains_columns(&["a"]));
         assert!(!schema.contains_columns(&["a", "d"]));
+    }
+
+    #[test]
+    fn test_dict_roundtrip() {
+        let dict_type =
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+        let formatted = format_data_type(&dict_type);
+        assert_eq!(formatted, "dict<int32, utf8>");
+        let parsed = parse_data_type(&formatted);
+        assert_eq!(dict_type, parsed, "Dict roundtrip failed");
+    }
+
+    #[test]
+    fn test_dict_with_nested_struct_roundtrip() {
+        let struct_type = DataType::Struct(
+            vec![
+                Arc::new(Field::new("a", DataType::Int64, true)),
+                Arc::new(Field::new("b", DataType::Float64, true)),
+            ]
+            .into(),
+        );
+        let dict_type =
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(struct_type));
+        let formatted = format_data_type(&dict_type);
+        let parsed = parse_data_type(&formatted);
+        assert_eq!(dict_type, parsed, "Dict with nested struct roundtrip failed");
     }
 }

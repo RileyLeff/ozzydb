@@ -283,6 +283,7 @@ async fn test_commit_with_data() -> Result<()> {
             name: "clean".to_string(),
             source_path: "transforms/clean.py".to_string(),
             hash: "def456".to_string(),
+            source_hash: "src456".to_string(),
             function_name: "clean_data".to_string(),
             input_schema: None,
             output_schema: None,

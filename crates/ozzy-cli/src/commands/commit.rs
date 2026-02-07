@@ -74,7 +74,7 @@ pub async fn create(message: Option<&str>) -> Result<()> {
     project.config.workspace.staged_transforms.clear();
     project.save_config()?;
 
-    println!("Committed: {}", &commit.hash[..12]);
+    println!("Committed: {}", commit.hash.get(..12).unwrap_or(&commit.hash));
     println!();
     println!("  Author: {}", commit.author);
     println!("  Message: {}", commit.message);

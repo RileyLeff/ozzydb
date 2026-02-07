@@ -240,7 +240,7 @@ impl PythonRuntime {
         let env_name = format!(
             "py{}-{}",
             python_version.replace('.', ""),
-            &lockfile_hash[..12]
+            lockfile_hash.get(..12).unwrap_or(lockfile_hash)
         );
         self.envs_dir.join(env_name)
     }

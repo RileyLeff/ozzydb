@@ -91,7 +91,8 @@ pub async fn run(message: Option<&str>, remote: &str) -> Result<()> {
     }
     let mut transform_hashes: HashMap<String, String> = HashMap::new();
     for (name, t) in &commit.transforms {
-        transform_hashes.insert(name.clone(), t.hash.clone());
+        // Use source_hash (content hash) for dedup, not composite hash
+        transform_hashes.insert(name.clone(), t.source_hash.clone());
     }
 
     let check_response = client
@@ -127,6 +128,7 @@ pub async fn run(message: Option<&str>, remote: &str) -> Result<()> {
     let mut commit_json = serde_json::to_value(&commit)?;
     commit_json["ref"] = serde_json::Value::String(project.config.refs.head.clone());
 
+    // Only send tags that point to the commit being pushed (not all local tags).
     let mut tag_map = serde_json::Map::new();
     let tags_dir = project.ozzy_dir().join("refs").join("tags");
     if tags_dir.exists() {
@@ -134,9 +136,9 @@ pub async fn run(message: Option<&str>, remote: &str) -> Result<()> {
             let entry = entry?;
             if entry.file_type()?.is_file() {
                 let tag_name = entry.file_name().to_string_lossy().to_string();
-                let commit_hash = std::fs::read_to_string(entry.path())?.trim().to_string();
-                if !tag_name.is_empty() && !commit_hash.is_empty() {
-                    tag_map.insert(tag_name, serde_json::Value::String(commit_hash));
+                let tag_target = std::fs::read_to_string(entry.path())?.trim().to_string();
+                if !tag_name.is_empty() && tag_target == commit_hash {
+                    tag_map.insert(tag_name, serde_json::Value::String(tag_target));
                 }
             }
         }
@@ -158,7 +160,7 @@ pub async fn run(message: Option<&str>, remote: &str) -> Result<()> {
     println!();
     println!(
         "Pushed commit {} to {}",
-        &push_response.commit_hash[..8],
+        push_response.commit_hash.get(..8).unwrap_or(&push_response.commit_hash),
         push_response.ref_name
     );
     println!(

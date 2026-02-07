@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, Method};
 use ozzy_server::{AppState, api, config::Config, db::Database, storage::ContentStorage};
 use sqlx::postgres::PgPoolOptions;
@@ -58,6 +59,7 @@ async fn main() -> Result<()> {
     // Build router
     let app = Router::new()
         .merge(api::router())
+        .layer(DefaultBodyLimit::max(config.max_upload_size_bytes as usize))
         .layer(TraceLayer::new_for_http())
         .layer({
             let cors = CorsLayer::new()

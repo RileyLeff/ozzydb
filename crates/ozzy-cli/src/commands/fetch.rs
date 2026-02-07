@@ -54,6 +54,13 @@ fn parse_endpoint_ref(
         (endpoint_part, "main".to_string())
     };
 
+    if endpoint.is_empty() {
+        anyhow::bail!("Endpoint name cannot be empty. Expected format: owner/project/endpoint[@ref]");
+    }
+    if ref_name.is_empty() {
+        anyhow::bail!("Ref name cannot be empty. Expected format: owner/project/endpoint@ref");
+    }
+
     Ok((registry, owner, project, endpoint, ref_name))
 }
 
@@ -267,6 +274,7 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::super::shared::sanitize_archive_relative_path;
+    use super::parse_endpoint_ref;
     use std::path::Path;
 
     #[test]
@@ -279,5 +287,43 @@ mod tests {
     fn sanitize_archive_path_allows_relative_paths() {
         let path = sanitize_archive_relative_path(Path::new("transforms/qc.py")).unwrap();
         assert_eq!(path.to_string_lossy(), "transforms/qc.py");
+    }
+
+    #[test]
+    fn parse_endpoint_ref_valid() {
+        let (registry, owner, project, endpoint, ref_name) =
+            parse_endpoint_ref("alice/myproject/clean").unwrap();
+        assert!(registry.is_none());
+        assert_eq!(owner, "alice");
+        assert_eq!(project, "myproject");
+        assert_eq!(endpoint, "clean");
+        assert_eq!(ref_name, "main"); // default
+    }
+
+    #[test]
+    fn parse_endpoint_ref_with_ref() {
+        let (_, _, _, endpoint, ref_name) =
+            parse_endpoint_ref("alice/myproject/clean@v1.0").unwrap();
+        assert_eq!(endpoint, "clean");
+        assert_eq!(ref_name, "v1.0");
+    }
+
+    #[test]
+    fn parse_endpoint_ref_with_registry() {
+        let (registry, owner, _, _, _) =
+            parse_endpoint_ref("https://example.com/alice/myproject/clean").unwrap();
+        assert_eq!(registry.unwrap(), "https://example.com");
+        assert_eq!(owner, "alice");
+    }
+
+    #[test]
+    fn parse_endpoint_ref_too_few_parts() {
+        assert!(parse_endpoint_ref("alice/myproject").is_err());
+    }
+
+    #[test]
+    fn parse_endpoint_ref_empty_at_ref() {
+        // "alice/myproject/clean@" -> ref_name is empty
+        assert!(parse_endpoint_ref("alice/myproject/clean@").is_err());
     }
 }

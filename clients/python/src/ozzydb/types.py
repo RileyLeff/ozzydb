@@ -25,11 +25,11 @@ class TransformMeta:
     """Metadata about a transform."""
 
     name: str
-    hash: str
-    runtime: str
-    source_path: str
-    function_name: str
-    lockfile_hash: str
+    hash: Optional[str] = None
+    runtime: str = "python"
+    source_path: str = ""
+    function_name: str = ""
+    lockfile_hash: Optional[str] = None
     params_schema: dict[str, Any] = field(default_factory=dict)
     reproducible: bool = True
     input_schema: Optional[dict[str, Any]] = None

@@ -42,20 +42,24 @@ fn parse_content_disposition_name(headers: &axum::http::HeaderMap) -> Option<Str
 }
 
 /// Simple percent decoding (e.g., %2F → /).
+/// Correctly handles multi-byte UTF-8 sequences (e.g., %C3%A9 → e).
 fn percent_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+    let mut bytes = Vec::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex: String = chars.by_ref().take(2).collect();
             if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                result.push(byte as char);
+                bytes.push(byte);
             }
         } else {
-            result.push(c);
+            // ASCII characters are single-byte in UTF-8
+            let mut buf = [0u8; 4];
+            let encoded = c.encode_utf8(&mut buf);
+            bytes.extend_from_slice(encoded.as_bytes());
         }
     }
-    result
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 /// Parse an "endpoint@ref" combined path parameter into (endpoint, ref).
@@ -391,12 +395,13 @@ async fn push(
 
     // Ensure transform source blobs exist before persisting commit metadata.
     // This prevents dangling commits that reference unavailable transform hashes.
+    // Use source_hash (content hash) for storage lookups, not the composite hash.
     let empty_lock_sentinel = ozzy_core::hash::blake3_hash(b"");
     for t in commit.transforms.values() {
-        if !state.storage.exists(&t.hash, "py").await? {
+        if !state.storage.exists(&t.source_hash, "py").await? {
             return Err(ApiError::bad_request(format!(
                 "Missing transform source for '{}' (hash {}). Re-upload the transform file.",
-                t.name, t.hash
+                t.name, t.source_hash
             )));
         }
         // Verify lockfile hash matches uploaded content if declared.
@@ -808,8 +813,10 @@ async fn pull(
                 builder.append_data(&mut header, &source_path, &content[..])?;
             }
 
-            // Include lockfile if it exists and hasn't been included yet
-            if !t.lockfile_hash.is_empty() {
+            // Include lockfile if it exists and hasn't been included yet.
+            // Skip the empty-content sentinel (blake3 of empty bytes) which means "no lockfile".
+            let empty_lock_sentinel = ozzy_core::hash::blake3_hash(b"");
+            if !t.lockfile_hash.is_empty() && t.lockfile_hash != empty_lock_sentinel {
                 if let Ok(lockfile_content) = state.storage.get(&t.lockfile_hash, "lock").await {
                     let lockfile_path = FsPath::new(&source_path)
                         .parent()
@@ -1108,4 +1115,40 @@ async fn fetch_endpoint(
         )
         .body(Body::from(tar_data))
         .map_err(|e| ApiError::from(anyhow::anyhow!("Failed to build response: {}", e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_decode_ascii() {
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+        assert_eq!(percent_decode("data%2Fraw.parquet"), "data/raw.parquet");
+    }
+
+    #[test]
+    fn percent_decode_multibyte_utf8() {
+        // e-acute: U+00E9 is encoded as %C3%A9 in UTF-8
+        assert_eq!(percent_decode("caf%C3%A9"), "caf\u{00e9}");
+        // CJK char: U+4E16 -> %E4%B8%96
+        assert_eq!(percent_decode("%E4%B8%96"), "\u{4e16}");
+    }
+
+    #[test]
+    fn percent_decode_no_encoding() {
+        assert_eq!(percent_decode("plain_text"), "plain_text");
+    }
+
+    #[test]
+    fn parse_endpoint_ref_valid() {
+        let (endpoint, ref_name) = parse_endpoint_ref("my-endpoint@main").unwrap();
+        assert_eq!(endpoint, "my-endpoint");
+        assert_eq!(ref_name, "main");
+    }
+
+    #[test]
+    fn parse_endpoint_ref_missing_at() {
+        assert!(parse_endpoint_ref("no-at-sign").is_err());
+    }
 }

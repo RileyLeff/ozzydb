@@ -16,7 +16,7 @@ pub async fn show() -> Result<()> {
 
     // Show current HEAD
     if let Some(head) = project.head_commit()? {
-        println!("HEAD: {}", &head[..12]);
+        println!("HEAD: {}", head.get(..12).unwrap_or(&head));
     } else {
         println!("HEAD: (no commits)");
     }
@@ -94,7 +94,16 @@ pub async fn show() -> Result<()> {
                 Some("json") => {
                     if let Some(stem) = path.file_stem() {
                         let name = stem.to_string_lossy().to_string();
-                        staged_endpoints.push(format!("  new:      endpoint/{}", name));
+                        let label = if last_commit
+                            .as_ref()
+                            .map(|c| c.endpoints.contains_key(&name))
+                            .unwrap_or(false)
+                        {
+                            "modified:"
+                        } else {
+                            "new:     "
+                        };
+                        staged_endpoints.push(format!("  {} endpoint/{}", label, name));
                     }
                 }
                 Some("deleted") => {

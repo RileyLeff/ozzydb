@@ -178,7 +178,11 @@ impl ContentStorage {
             Self::ensure_parent(&local_path)?;
             // Write to a temp file first, then atomically rename to prevent
             // partial writes from leaving corrupted content on crash.
-            let tmp_path = local_path.with_extension(format!("{}.tmp", extension));
+            let tmp_path = local_path.with_extension(format!(
+                "{}.{}.tmp",
+                extension,
+                std::process::id()
+            ));
             std::fs::write(&tmp_path, content)?;
             std::fs::rename(&tmp_path, &local_path)?;
         }
@@ -250,12 +254,18 @@ impl ContentStorage {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, object_store::Error>> + Send>>> {
         let local_path = self.local_path(content_hash, extension)?;
         if local_path.exists() {
-            let bytes = std::fs::read(&local_path).map(Bytes::from).map_err(|e| {
-                object_store::Error::Generic {
-                    store: "local",
-                    source: Box::new(e),
-                }
+            let raw = std::fs::read(&local_path).map_err(|e| {
+                anyhow::anyhow!("Failed to read local file {}: {}", local_path.display(), e)
             })?;
+            let actual_hash = hash::blake3_hash(&raw);
+            if actual_hash != content_hash {
+                anyhow::bail!(
+                    "Content hash mismatch in get_stream: expected {}, got {}. Local storage may be corrupted.",
+                    content_hash,
+                    actual_hash
+                );
+            }
+            let bytes = Bytes::from(raw);
             return Ok(Box::pin(futures::stream::once(async move { Ok(bytes) })));
         }
 
@@ -292,6 +302,10 @@ impl ContentStorage {
 
     /// List all content hashes with a given prefix (first 2 chars).
     pub async fn list_by_prefix(&self, hash_prefix: &str) -> Result<Vec<String>> {
+        // Validate prefix is hex-only to prevent path traversal
+        if !hash_prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+            anyhow::bail!("Invalid hash prefix: must contain only hex characters");
+        }
         let root = self.local_root.join(&self.prefix).join(hash_prefix);
         let mut hashes = Vec::new();
 

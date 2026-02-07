@@ -158,6 +158,13 @@ def fetch(
     if _is_local_ref(ref):
         return _fetch_local(ref, as_pandas=as_pandas, override_params=override_params, force=force)
     else:
+        if force:
+            import warnings
+
+            warnings.warn(
+                "force=True is not supported for remote refs and will be ignored",
+                stacklevel=2,
+            )
         return _fetch_remote(ref, as_pandas=as_pandas, override_params=override_params)
 
 
@@ -318,7 +325,72 @@ def _ozzy_type_to_arrow(type_str: str) -> pa.DataType:
     if type_str.startswith("list<"):
         inner = type_str[5:-1]
         return pa.list_(_ozzy_type_to_arrow(inner))
-    # Fallback
+    if type_str.startswith("large_list<"):
+        inner = type_str[11:-1]
+        return pa.large_list(_ozzy_type_to_arrow(inner))
+    if type_str.startswith("time32["):
+        unit = type_str[7:-1]
+        return pa.time32(unit)
+    if type_str.startswith("time64["):
+        unit = type_str[7:-1]
+        return pa.time64(unit)
+    if type_str.startswith("duration["):
+        unit = type_str[9:-1]
+        return pa.duration(unit)
+    if type_str.startswith("struct<"):
+        # struct<field1: type1, field2: type2>
+        inner = type_str[7:-1]
+        fields = []
+        depth = 0
+        current = ""
+        for c in inner:
+            if c in "<[":
+                depth += 1
+                current += c
+            elif c in ">]":
+                depth -= 1
+                current += c
+            elif c == "," and depth == 0:
+                colon = current.find(": ")
+                if colon != -1:
+                    fname = current[:colon].strip()
+                    ftype = _ozzy_type_to_arrow(current[colon + 2 :].strip())
+                    fields.append(pa.field(fname, ftype))
+                current = ""
+            else:
+                current += c
+        if current.strip():
+            colon = current.find(": ")
+            if colon != -1:
+                fname = current[:colon].strip()
+                ftype = _ozzy_type_to_arrow(current[colon + 2 :].strip())
+                fields.append(pa.field(fname, ftype))
+        if fields:
+            return pa.struct_(fields)
+    if type_str.startswith("dict<"):
+        # dict<key_type, value_type> -- depth-aware split
+        inner = type_str[5:-1]
+        depth = 0
+        split_pos = None
+        for i, c in enumerate(inner):
+            if c in "<[":
+                depth += 1
+            elif c in ">]":
+                depth -= 1
+            elif c == "," and depth == 0:
+                split_pos = i
+                break
+        if split_pos is not None:
+            key_type = _ozzy_type_to_arrow(inner[:split_pos].strip())
+            val_type = _ozzy_type_to_arrow(inner[split_pos + 1 :].strip())
+            return pa.dictionary(key_type, val_type)
+    # Fallback with warning
+    import warnings
+
+    warnings.warn(
+        f"Unknown Arrow type '{type_str}', falling back to utf8",
+        stacklevel=2,
+    )
     return pa.utf8()
 
 
