@@ -330,7 +330,7 @@ fn validate_pipeline_schema(
             if let Some(existing_type) = current_types.get(&field.name) {
                 if existing_type != &field.dtype {
                     result.valid = false;
-                    result.warnings.push(format!(
+                    result.errors.push(format!(
                         "Column '{}' has conflicting types across inputs: '{}' vs '{}'",
                         field.name, existing_type, field.dtype
                     ));

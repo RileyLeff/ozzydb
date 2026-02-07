@@ -134,11 +134,11 @@ class Project:
             return {}
 
         transforms = {}
-        for py_file in transforms_dir.glob("*.py"):
+        for py_file in transforms_dir.rglob("*.py"):
             # Parse the file to find @ozzy.transform decorated functions
             try:
                 content = py_file.read_text()
-                found_transforms = self._parse_transform_file(content, py_file)
+                found_transforms = self._parse_transform_file(content, py_file, transforms_dir)
                 transforms.update(found_transforms)
             except Exception:
                 continue
@@ -146,7 +146,7 @@ class Project:
         return transforms
 
     def _parse_transform_file(
-        self, content: str, file_path: Path
+        self, content: str, file_path: Path, transforms_dir: Path
     ) -> dict[str, TransformMeta]:
         """Parse a Python file for @ozzy.transform decorated functions."""
         import re
@@ -164,7 +164,7 @@ class Project:
                 match = re.match(r"def\s+(\w+)\s*\(", stripped)
                 if match:
                     func_name = match.group(1)
-                    rel_path = f"transforms/{file_path.name}"
+                    rel_path = f"transforms/{file_path.relative_to(transforms_dir)}"
                     transforms[func_name] = TransformMeta(
                         name=func_name,
                         hash=None,  # Hash is computed at commit time

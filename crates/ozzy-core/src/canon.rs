@@ -38,16 +38,14 @@ pub fn hash_source_directory(dir: &Path) -> std::io::Result<String> {
 
     for entry in WalkDir::new(dir)
         .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !name.starts_with('.') && name != "__pycache__"
+        })
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
     {
         let path = entry.path();
-
-        // Skip hidden files and common non-source files
-        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-        if file_name.starts_with('.') || file_name == "__pycache__" {
-            continue;
-        }
 
         let relative_path = path
             .strip_prefix(dir)
@@ -132,6 +130,8 @@ pub fn canonicalize_json(value: &Value) -> String {
             // Use shortest decimal representation
             if let Some(i) = n.as_i64() {
                 i.to_string()
+            } else if let Some(u) = n.as_u64() {
+                u.to_string()
             } else if let Some(f) = n.as_f64() {
                 // Canonical float: trim fractional trailing zeros only when
                 // there's a decimal point and no exponent (e.g. 1.50 → 1.5,
