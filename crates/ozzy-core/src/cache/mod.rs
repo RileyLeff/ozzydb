@@ -12,6 +12,6 @@ mod tiered;
 // Re-export public types
 pub use backend::{CacheBackend, CacheEntry, CacheFilter, CacheLocation};
 pub use config::{RemoteCacheConfig, RemoteCachePolicy, TieredCacheConfig};
-pub use local::{default_cache_dir, format_size, LocalCache};
+pub use local::{LocalCache, default_cache_dir, format_size};
 pub use remote::{CacheEntryMeta, RemoteCache};
 pub use tiered::{CacheStatus, PushPullStats, TieredCache};

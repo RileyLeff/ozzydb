@@ -48,6 +48,20 @@ fn normalize_ref_name(ref_name: &str) -> &str {
         .unwrap_or(ref_name)
 }
 
+/// Recompute the canonical commit hash for integrity verification.
+fn expected_commit_hash(commit: &ozzy_core::project::Commit) -> String {
+    let commit_content = serde_json::json!({
+        "parent_hashes": commit.parent_hashes,
+        "data_sources": commit.data_sources,
+        "transforms": commit.transforms,
+        "endpoints": commit.endpoints,
+        "author": commit.author,
+        "message": commit.message,
+        "timestamp": commit.timestamp.to_rfc3339(),
+    });
+    ozzy_core::canon::hash_json(&commit_content)
+}
+
 /// Check if a user can access a project based on visibility.
 fn collaborator_allows(permission: &str, need: ScopeAction) -> bool {
     match need {
@@ -271,6 +285,14 @@ async fn push(
             )));
         }
         transform.source_path = safe_path;
+    }
+
+    let expected_hash = expected_commit_hash(&commit);
+    if expected_hash != commit.hash {
+        return Err(ApiError::bad_request(format!(
+            "Commit hash mismatch: expected {}, got {}",
+            expected_hash, commit.hash
+        )));
     }
 
     // Track newly stored hashes for cleanup on failure

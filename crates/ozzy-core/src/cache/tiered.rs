@@ -234,7 +234,7 @@ impl TieredCache {
                     pulled: 0,
                     skipped: 0,
                     errors: 0,
-                })
+                });
             }
         };
 
@@ -282,7 +282,7 @@ impl TieredCache {
                     pulled: 0,
                     skipped: 0,
                     errors: 0,
-                })
+                });
             }
         };
 

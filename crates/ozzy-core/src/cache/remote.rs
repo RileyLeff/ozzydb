@@ -50,8 +50,8 @@ impl RemoteCache {
             .with_region(&config.region);
 
         // Apply credentials from environment if available
-        if let Ok(key_id) = std::env::var("OZZY_S3_ACCESS_KEY_ID")
-            .or_else(|_| std::env::var("AWS_ACCESS_KEY_ID"))
+        if let Ok(key_id) =
+            std::env::var("OZZY_S3_ACCESS_KEY_ID").or_else(|_| std::env::var("AWS_ACCESS_KEY_ID"))
         {
             builder = builder.with_access_key_id(key_id);
         }
@@ -71,9 +71,9 @@ impl RemoteCache {
             }
         }
 
-        let store = builder.build().map_err(|e| {
-            Error::RemoteCache(format!("Failed to create S3 client: {}", e))
-        })?;
+        let store = builder
+            .build()
+            .map_err(|e| Error::RemoteCache(format!("Failed to create S3 client: {}", e)))?;
 
         let platform = PlatformFingerprint::detect().short_string();
         let prefix = config.effective_prefix().to_string();
@@ -87,12 +87,18 @@ impl RemoteCache {
 
     /// Get the S3 path for a parquet file.
     fn data_path(&self, hash: &str) -> ObjectPath {
-        ObjectPath::from(format!("{}/{}/{}.parquet", self.prefix, self.platform, hash))
+        ObjectPath::from(format!(
+            "{}/{}/{}.parquet",
+            self.prefix, self.platform, hash
+        ))
     }
 
     /// Get the S3 path for a metadata file.
     fn meta_path(&self, hash: &str) -> ObjectPath {
-        ObjectPath::from(format!("{}/{}/{}.meta.json", self.prefix, self.platform, hash))
+        ObjectPath::from(format!(
+            "{}/{}/{}.meta.json",
+            self.prefix, self.platform, hash
+        ))
     }
 
     /// Get the S3 path for a specific platform.
@@ -130,9 +136,10 @@ impl RemoteCache {
         let path = self.meta_path(hash);
         match self.store.get(&path).await {
             Ok(result) => {
-                let bytes = result.bytes().await.map_err(|e| {
-                    Error::RemoteCache(format!("Failed to read metadata: {}", e))
-                })?;
+                let bytes = result
+                    .bytes()
+                    .await
+                    .map_err(|e| Error::RemoteCache(format!("Failed to read metadata: {}", e)))?;
                 let meta: CacheEntryMeta = serde_json::from_slice(&bytes)?;
                 Ok(Some(meta))
             }
@@ -149,9 +156,10 @@ impl RemoteCache {
         match self.store.get(&path).await {
             Ok(result) => {
                 // Stream the data to the destination file
-                let bytes = result.bytes().await.map_err(|e| {
-                    Error::RemoteCache(format!("Failed to download file: {}", e))
-                })?;
+                let bytes = result
+                    .bytes()
+                    .await
+                    .map_err(|e| Error::RemoteCache(format!("Failed to download file: {}", e)))?;
 
                 tokio::fs::write(dest, &bytes).await.map_err(|e| {
                     Error::RemoteCache(format!("Failed to write downloaded file: {}", e))
@@ -175,9 +183,10 @@ impl RemoteCache {
 
         match self.store.get(&path).await {
             Ok(result) => {
-                let bytes = result.bytes().await.map_err(|e| {
-                    Error::RemoteCache(format!("Failed to download file: {}", e))
-                })?;
+                let bytes = result
+                    .bytes()
+                    .await
+                    .map_err(|e| Error::RemoteCache(format!("Failed to download file: {}", e)))?;
 
                 tokio::fs::write(dest, &bytes).await.map_err(|e| {
                     Error::RemoteCache(format!("Failed to write downloaded file: {}", e))
@@ -199,9 +208,9 @@ impl RemoteCache {
         row_count: Option<u64>,
     ) -> Result<()> {
         // Read the source file
-        let bytes = tokio::fs::read(source_path).await.map_err(|e| {
-            Error::RemoteCache(format!("Failed to read source file: {}", e))
-        })?;
+        let bytes = tokio::fs::read(source_path)
+            .await
+            .map_err(|e| Error::RemoteCache(format!("Failed to read source file: {}", e)))?;
         let byte_size = bytes.len() as u64;
 
         // Upload the parquet file
@@ -248,7 +257,7 @@ impl RemoteCache {
                 return Err(Error::RemoteCache(format!(
                     "Failed to delete metadata: {}",
                     e
-                )))
+                )));
             }
         }
 

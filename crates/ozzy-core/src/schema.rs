@@ -126,7 +126,11 @@ fn format_data_type(dt: &DataType) -> String {
             format!("large_list<{}>", format_data_type(inner.data_type()))
         }
         DataType::FixedSizeList(inner, size) => {
-            format!("fixed_list<{}, {}>", format_data_type(inner.data_type()), size)
+            format!(
+                "fixed_list<{}, {}>",
+                format_data_type(inner.data_type()),
+                size
+            )
         }
         DataType::Struct(fields) => {
             let field_strs: Vec<String> = fields
@@ -206,10 +210,16 @@ fn parse_data_type(s: &str) -> DataType {
                 let size_str = &inner[comma_pos + 2..];
                 if let Ok(size) = size_str.parse::<i32>() {
                     let inner_type = parse_data_type(type_str);
-                    return DataType::FixedSizeList(Arc::new(Field::new("item", inner_type, true)), size);
+                    return DataType::FixedSizeList(
+                        Arc::new(Field::new("item", inner_type, true)),
+                        size,
+                    );
                 }
             }
-            eprintln!("Warning: Could not parse fixed_list type '{}', falling back to Utf8", s);
+            eprintln!(
+                "Warning: Could not parse fixed_list type '{}', falling back to Utf8",
+                s
+            );
             DataType::Utf8
         }
         s if s.starts_with("dict<") => {
@@ -222,7 +232,10 @@ fn parse_data_type(s: &str) -> DataType {
                 let value_type = parse_data_type(value_str);
                 return DataType::Dictionary(Box::new(key_type), Box::new(value_type));
             }
-            eprintln!("Warning: Could not parse dict type '{}', falling back to Utf8", s);
+            eprintln!(
+                "Warning: Could not parse dict type '{}', falling back to Utf8",
+                s
+            );
             DataType::Utf8
         }
         _ => {
@@ -241,7 +254,10 @@ fn parse_time_unit(s: &str) -> TimeUnit {
         "us" => TimeUnit::Microsecond,
         "ns" => TimeUnit::Nanosecond,
         _ => {
-            eprintln!("Warning: Unknown time unit '{}', defaulting to Nanosecond", s);
+            eprintln!(
+                "Warning: Unknown time unit '{}', defaulting to Nanosecond",
+                s
+            );
             TimeUnit::Nanosecond
         }
     }
@@ -249,7 +265,8 @@ fn parse_time_unit(s: &str) -> TimeUnit {
 
 /// Extract schema from a Parquet file.
 pub fn extract_parquet_schema(path: &Path) -> Result<SchemaInfo> {
-    let file = File::open(path).map_err(|e| Error::FileNotFound(format!("{}: {}", path.display(), e)))?;
+    let file =
+        File::open(path).map_err(|e| Error::FileNotFound(format!("{}: {}", path.display(), e)))?;
 
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| Error::InvalidParquet(format!("{}: {}", path.display(), e)))?;
@@ -264,11 +281,7 @@ pub fn get_parquet_row_count(path: &Path) -> Result<u64> {
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
     let metadata = reader.metadata();
 
-    let count: i64 = metadata
-        .row_groups()
-        .iter()
-        .map(|rg| rg.num_rows())
-        .sum();
+    let count: i64 = metadata.row_groups().iter().map(|rg| rg.num_rows()).sum();
 
     Ok(count as u64)
 }
@@ -433,7 +446,11 @@ pub fn schema_diff(from: &SchemaInfo, to: &SchemaInfo) -> SchemaDiff {
         }
     }
 
-    SchemaDiff { added, removed, changed }
+    SchemaDiff {
+        added,
+        removed,
+        changed,
+    }
 }
 
 /// Represents the difference between two schemas.

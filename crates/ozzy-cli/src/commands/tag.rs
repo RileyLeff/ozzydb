@@ -29,7 +29,11 @@ pub async fn create(name: &str, message: Option<&str>) -> Result<()> {
     // Write tag file
     std::fs::write(&tag_path, format!("{}\n", commit_hash))?;
 
-    println!("Created tag '{}' at {}", name, &commit_hash[..8.min(commit_hash.len())]);
+    println!(
+        "Created tag '{}' at {}",
+        name,
+        &commit_hash[..8.min(commit_hash.len())]
+    );
 
     if let Some(msg) = message {
         println!("  Message: {}", msg);
@@ -56,9 +60,7 @@ pub async fn list() -> Result<()> {
         let entry = entry?;
         if entry.file_type()?.is_file() {
             let name = entry.file_name().to_string_lossy().to_string();
-            let hash = std::fs::read_to_string(entry.path())?
-                .trim()
-                .to_string();
+            let hash = std::fs::read_to_string(entry.path())?.trim().to_string();
             tags.push((name, hash));
         }
     }
@@ -105,9 +107,7 @@ pub async fn show(name: &str) -> Result<()> {
         anyhow::bail!("Tag '{}' not found", name);
     }
 
-    let commit_hash = std::fs::read_to_string(&tag_path)?
-        .trim()
-        .to_string();
+    let commit_hash = std::fs::read_to_string(&tag_path)?.trim().to_string();
 
     // Load the commit
     let commit_path = project

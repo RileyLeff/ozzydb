@@ -18,7 +18,11 @@ pub async fn show(num: usize) -> Result<()> {
         let local_time = commit.timestamp.with_timezone(&Local);
         let short_hash = &commit.hash[..12];
 
-        println!("commit {} ({})", short_hash, local_time.format("%Y-%m-%d %H:%M"));
+        println!(
+            "commit {} ({})",
+            short_hash,
+            local_time.format("%Y-%m-%d %H:%M")
+        );
         println!("Author: {}", commit.author);
         println!();
         println!("    {}", commit.message);
@@ -28,7 +32,10 @@ pub async fn show(num: usize) -> Result<()> {
         let ds_count = commit.data_sources.len();
         let tf_count = commit.transforms.len();
         let ep_count = commit.endpoints.len();
-        println!("    {} data source(s), {} transform(s), {} endpoint(s)", ds_count, tf_count, ep_count);
+        println!(
+            "    {} data source(s), {} transform(s), {} endpoint(s)",
+            ds_count, tf_count, ep_count
+        );
         println!();
     }
 

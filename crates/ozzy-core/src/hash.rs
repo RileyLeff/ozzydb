@@ -49,7 +49,12 @@ pub fn transform_hash(
     runtime_version: &str,
     params_schema_hash: &str,
 ) -> String {
-    blake3_hash_components(&[source_hash, lockfile_hash, runtime_version, params_schema_hash])
+    blake3_hash_components(&[
+        source_hash,
+        lockfile_hash,
+        runtime_version,
+        params_schema_hash,
+    ])
 }
 
 /// Compute the materialized hash for a transform execution.

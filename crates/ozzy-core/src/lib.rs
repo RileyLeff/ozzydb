@@ -15,4 +15,4 @@ pub mod runtime;
 pub mod schema;
 
 pub use error::{Error, Result};
-pub use project::{validate_path_within, validate_safe_name, Project};
+pub use project::{Project, validate_path_within, validate_safe_name};

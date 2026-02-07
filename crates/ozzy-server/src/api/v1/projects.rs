@@ -162,9 +162,14 @@ async fn create_project(
     Json(req): Json<CreateProjectRequest>,
 ) -> Result<Json<ProjectInfo>, ApiError> {
     let visibility = req.visibility.as_deref().unwrap_or("private");
-    if !matches!(visibility, "private" | "public" | "org") {
+    if visibility == "org" {
         return Err(ApiError::bad_request(
-            "visibility must be one of: private, public, org",
+            "visibility='org' is not supported yet",
+        ));
+    }
+    if !matches!(visibility, "private" | "public") {
+        return Err(ApiError::bad_request(
+            "visibility must be one of: private, public",
         ));
     }
 

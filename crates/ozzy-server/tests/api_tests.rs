@@ -195,13 +195,7 @@ async fn test_get_nonexistent_project() {
         .await
         .unwrap();
 
-    // Could be 404 or 500 depending on how error is mapped
-    assert!(
-        response.status() == StatusCode::NOT_FOUND
-            || response.status() == StatusCode::INTERNAL_SERVER_ERROR,
-        "Expected 404 or 500, got {}",
-        response.status()
-    );
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -241,12 +235,7 @@ async fn test_commits_route_exists() {
         .await
         .unwrap();
 
-    assert!(
-        response.status() == StatusCode::NOT_FOUND
-            || response.status() == StatusCode::INTERNAL_SERVER_ERROR,
-        "Expected 404 or 500, got {}",
-        response.status()
-    );
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -265,12 +254,7 @@ async fn test_resolve_route_exists() {
         .await
         .unwrap();
 
-    assert!(
-        response.status() == StatusCode::NOT_FOUND
-            || response.status() == StatusCode::INTERNAL_SERVER_ERROR,
-        "Expected 404 or 500, got {}",
-        response.status()
-    );
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -289,11 +273,5 @@ async fn test_collaborators_route_exists() {
         .await
         .unwrap();
 
-    assert!(
-        response.status() == StatusCode::NOT_FOUND
-            || response.status() == StatusCode::UNAUTHORIZED
-            || response.status() == StatusCode::INTERNAL_SERVER_ERROR,
-        "Expected 404, 401, or 500, got {}",
-        response.status()
-    );
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

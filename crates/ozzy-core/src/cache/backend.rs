@@ -34,10 +34,7 @@ pub enum CacheLocation {
     /// Local file path
     Local(PathBuf),
     /// Remote object storage
-    Remote {
-        bucket: String,
-        key: String,
-    },
+    Remote { bucket: String, key: String },
 }
 
 /// Filter for cache queries.

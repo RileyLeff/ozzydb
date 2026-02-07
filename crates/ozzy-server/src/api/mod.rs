@@ -2,7 +2,7 @@
 
 pub mod v1;
 
-use axum::{routing::get, Json, Router};
+use axum::{Json, Router, routing::get};
 use serde::Serialize;
 
 use crate::AppState;

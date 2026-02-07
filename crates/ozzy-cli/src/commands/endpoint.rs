@@ -1,13 +1,64 @@
 use anyhow::Result;
 use ozzy_core::project::{Endpoint, PipelineEdge, PipelineNode, SourceType};
-use ozzy_core::{commit, schema, Project};
-use std::collections::HashMap;
+use ozzy_core::{Project, commit, schema, validate_safe_name};
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::PathBuf;
+
+fn staged_endpoint_path(project: &Project, name: &str) -> PathBuf {
+    project
+        .ozzy_dir()
+        .join("staged_endpoints")
+        .join(format!("{}.json", name))
+}
+
+fn staged_endpoint_delete_path(project: &Project, name: &str) -> PathBuf {
+    project
+        .ozzy_dir()
+        .join("staged_endpoints")
+        .join(format!("{}.deleted", name))
+}
+
+fn load_staged_endpoint_deletions(project: &Project) -> Result<HashSet<String>> {
+    let staged_dir = project.ozzy_dir().join("staged_endpoints");
+    let mut deleted = HashSet::new();
+    if !staged_dir.exists() {
+        return Ok(deleted);
+    }
+
+    for entry in fs::read_dir(&staged_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map(|e| e == "deleted").unwrap_or(false) {
+            if let Some(stem) = path.file_stem() {
+                deleted.insert(stem.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    Ok(deleted)
+}
+
+fn expected_input_names(transform: &ozzy_core::project::Transform) -> Vec<String> {
+    if let Some(input_schema) = &transform.input_schema {
+        if let Some(inputs) = input_schema.get("inputs").and_then(|v| v.as_array()) {
+            let parsed: Vec<String> = inputs
+                .iter()
+                .filter_map(|v| v.as_str().map(ToString::to_string))
+                .collect();
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+    }
+    vec!["main".to_string()]
+}
 
 /// Create an endpoint with multi-input support.
 /// inputs is a list of (input_name, data_source_name) pairs.
 pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[String]) -> Result<()> {
     let mut project = Project::find_current()?;
+    validate_safe_name(name)?;
 
     if inputs.is_empty() {
         anyhow::bail!("At least one input is required");
@@ -49,7 +100,11 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
             anyhow::bail!(
                 "Transform '{}' not found. Available: {}",
                 t,
-                available_transforms.keys().cloned().collect::<Vec<_>>().join(", ")
+                available_transforms
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
     }
@@ -57,7 +112,9 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
     // Validate schema compatibility for all inputs
     // The first transform gets all input schemas; subsequent transforms get chained output
     // For the initial validation, use "main" or the first input for pipeline propagation
-    let primary_schema = input_schemas.get("main").or_else(|| input_schemas.values().next());
+    let primary_schema = input_schemas
+        .get("main")
+        .or_else(|| input_schemas.values().next());
     if let Some(schema) = primary_schema {
         let validation_result = validate_pipeline_schema(schema, transforms, &available_transforms);
 
@@ -70,9 +127,13 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
                             for req in required_list {
                                 if let Some(req_name) = req.as_str() {
                                     if !input_schemas.contains_key(req_name) {
-                                        println!("  ✗ Transform '{}' expects input '{}' but it was not provided",
-                                            transforms[0], req_name);
-                                        anyhow::bail!("Pipeline validation failed. Fix schema issues before creating endpoint.");
+                                        println!(
+                                            "  ✗ Transform '{}' expects input '{}' but it was not provided",
+                                            transforms[0], req_name
+                                        );
+                                        anyhow::bail!(
+                                            "Pipeline validation failed. Fix schema issues before creating endpoint."
+                                        );
                                     }
                                 }
                             }
@@ -87,7 +148,9 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
             for err in &validation_result.errors {
                 println!("  ✗ {}", err);
             }
-            anyhow::bail!("Pipeline validation failed. Fix schema issues before creating endpoint.");
+            anyhow::bail!(
+                "Pipeline validation failed. Fix schema issues before creating endpoint."
+            );
         }
 
         for warning in &validation_result.warnings {
@@ -102,13 +165,10 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
 
-    // Track previous outputs for chaining
-    let mut prev_outputs: HashMap<String, (String, SourceType)> = HashMap::new();
-
-    // Initially, all inputs come from data sources
-    for (input_name, source_name) in inputs {
-        prev_outputs.insert(input_name.clone(), (source_name.clone(), SourceType::DataSource));
-    }
+    let input_map: HashMap<String, String> = inputs
+        .iter()
+        .map(|(input_name, source_name)| (input_name.clone(), source_name.clone()))
+        .collect();
 
     for (i, transform_name) in transforms.iter().enumerate() {
         let node_name = if transforms.len() == 1 {
@@ -123,10 +183,39 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
             params: serde_json::json!({}),
         });
 
-        // For the first node, create edges from all data sources
-        // For subsequent nodes, chain from previous node's output
-        if i == 0 {
-            for (input_name, source_name) in inputs {
+        let transform = available_transforms.get(transform_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Transform '{}' not found while building pipeline",
+                transform_name
+            )
+        })?;
+        let expected_inputs = expected_input_names(transform);
+        let prev_node = if i > 0 {
+            Some(nodes[i - 1].node_name.clone())
+        } else {
+            None
+        };
+        let mut attached_prev = false;
+
+        for input_name in expected_inputs {
+            if let Some(prev) = &prev_node {
+                if input_name == "main" {
+                    edges.push(PipelineEdge {
+                        target_node: node_name.clone(),
+                        input_name: input_name.clone(),
+                        source_type: SourceType::Node,
+                        source_ref: prev.clone(),
+                        external_owner: None,
+                        external_project: None,
+                        external_endpoint: None,
+                        external_commit_hash: None,
+                    });
+                    attached_prev = true;
+                    continue;
+                }
+            }
+
+            if let Some(source_name) = input_map.get(&input_name) {
                 edges.push(PipelineEdge {
                     target_node: node_name.clone(),
                     input_name: input_name.clone(),
@@ -137,20 +226,33 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
                     external_endpoint: None,
                     external_commit_hash: None,
                 });
+                continue;
             }
-        } else {
-            // Chain from previous node - pass output as "main" input
-            let prev_node = &nodes[i - 1].node_name;
-            edges.push(PipelineEdge {
-                target_node: node_name.clone(),
-                input_name: "main".to_string(),
-                source_type: SourceType::Node,
-                source_ref: prev_node.clone(),
-                external_owner: None,
-                external_project: None,
-                external_endpoint: None,
-                external_commit_hash: None,
-            });
+
+            if let Some(prev) = &prev_node {
+                // If this node has no explicit `main`, allow the first unresolved input
+                // to be chained from previous node.
+                if !attached_prev {
+                    edges.push(PipelineEdge {
+                        target_node: node_name.clone(),
+                        input_name: input_name.clone(),
+                        source_type: SourceType::Node,
+                        source_ref: prev.clone(),
+                        external_owner: None,
+                        external_project: None,
+                        external_endpoint: None,
+                        external_commit_hash: None,
+                    });
+                    attached_prev = true;
+                    continue;
+                }
+            }
+
+            anyhow::bail!(
+                "Transform '{}' requires input '{}' but no source mapping was provided",
+                transform_name,
+                input_name
+            );
         }
     }
 
@@ -165,13 +267,26 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
     let staged_dir = project.ozzy_dir().join("staged_endpoints");
     fs::create_dir_all(&staged_dir)?;
 
-    let endpoint_path = staged_dir.join(format!("{}.json", name));
+    let endpoint_path = staged_endpoint_path(&project, name);
     let content = serde_json::to_string_pretty(&endpoint)?;
     fs::write(&endpoint_path, content)?;
+    let deletion_marker = staged_endpoint_delete_path(&project, name);
+    if deletion_marker.exists() {
+        fs::remove_file(deletion_marker)?;
+    }
 
     // Also update workspace config
-    if !project.config.workspace.staged_transforms.contains(&format!("endpoints/{}.json", name)) {
-        project.config.workspace.staged_transforms.push(format!("endpoints/{}.json", name));
+    if !project
+        .config
+        .workspace
+        .staged_transforms
+        .contains(&format!("endpoints/{}.json", name))
+    {
+        project
+            .config
+            .workspace
+            .staged_transforms
+            .push(format!("endpoints/{}.json", name));
         project.save_config()?;
     }
 
@@ -202,14 +317,22 @@ fn validate_pipeline_schema(
     let mut result = schema::ValidationResult::ok();
 
     // Track current schema (starts with input data source schema)
-    let mut current_columns: Vec<String> = input_schema.column_names().iter().map(|s| s.to_string()).collect();
+    let mut current_columns: Vec<String> = input_schema
+        .column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     for (i, transform_name) in transforms.iter().enumerate() {
         let transform = match available_transforms.get(transform_name) {
             Some(t) => t,
             None => {
                 result.valid = false;
-                result.errors.push(format!("Step {}: Transform '{}' not found", i + 1, transform_name));
+                result.errors.push(format!(
+                    "Step {}: Transform '{}' not found",
+                    i + 1,
+                    transform_name
+                ));
                 continue;
             }
         };
@@ -247,7 +370,9 @@ fn validate_pipeline_schema(
                             ));
                         } else if let Some(expected_type_str) = expected_type.as_str() {
                             // Check type compatibility against input schema fields
-                            if let Some(field) = input_schema.fields.iter().find(|f| f.name == *col_name) {
+                            if let Some(field) =
+                                input_schema.fields.iter().find(|f| f.name == *col_name)
+                            {
                                 if !types_compatible(&field.dtype, expected_type_str) {
                                     result.warnings.push(format!(
                                         "Step {}: Transform '{}' expects column '{}' to be '{}' but found '{}'",
@@ -315,6 +440,7 @@ pub async fn list() -> Result<()> {
     // Check staged endpoints
     let staged_dir = project.ozzy_dir().join("staged_endpoints");
     let mut endpoints = Vec::new();
+    let mut staged_deletions = load_staged_endpoint_deletions(&project)?;
 
     if staged_dir.exists() {
         for entry in fs::read_dir(&staged_dir)? {
@@ -323,6 +449,7 @@ pub async fn list() -> Result<()> {
             if path.extension().map(|e| e == "json").unwrap_or(false) {
                 let content = fs::read_to_string(&path)?;
                 let endpoint: Endpoint = serde_json::from_str(&content)?;
+                staged_deletions.remove(&endpoint.name);
                 endpoints.push((endpoint, false)); // false = not committed
             }
         }
@@ -331,11 +458,14 @@ pub async fn list() -> Result<()> {
     // Check committed endpoints
     if let Some(commit) = project.latest_commit()? {
         for (_, endpoint) in commit.endpoints {
+            if staged_deletions.contains(&endpoint.name) {
+                continue;
+            }
             endpoints.push((endpoint, true)); // true = committed
         }
     }
 
-    if endpoints.is_empty() {
+    if endpoints.is_empty() && staged_deletions.is_empty() {
         println!("No endpoints found.");
         println!();
         println!("Create an endpoint with:");
@@ -346,9 +476,22 @@ pub async fn list() -> Result<()> {
     println!("Endpoints:");
     for (endpoint, committed) in &endpoints {
         let status = if *committed { "" } else { " (staged)" };
-        let transforms: Vec<_> = endpoint.nodes.iter().map(|n| n.transform_name.as_str()).collect();
+        let transforms: Vec<_> = endpoint
+            .nodes
+            .iter()
+            .map(|n| n.transform_name.as_str())
+            .collect();
         println!("  {}{}", endpoint.name, status);
         println!("    Transforms: {}", transforms.join(" → "));
+    }
+    if !staged_deletions.is_empty() {
+        println!();
+        println!("Staged endpoint deletions:");
+        let mut deleted: Vec<_> = staged_deletions.into_iter().collect();
+        deleted.sort();
+        for name in deleted {
+            println!("  {} (pending delete)", name);
+        }
     }
 
     Ok(())
@@ -356,22 +499,35 @@ pub async fn list() -> Result<()> {
 
 pub async fn remove(name: &str) -> Result<()> {
     let project = Project::find_current()?;
+    validate_safe_name(name)?;
 
     // Check staged endpoints first
-    let staged_path = project.ozzy_dir().join("staged_endpoints").join(format!("{}.json", name));
+    let staged_path = staged_endpoint_path(&project, name);
     if staged_path.exists() {
         fs::remove_file(&staged_path)?;
+        let deletion_marker = staged_endpoint_delete_path(&project, name);
+        if deletion_marker.exists() {
+            fs::remove_file(deletion_marker)?;
+        }
         println!("Removed staged endpoint: {}", name);
         return Ok(());
     }
 
-    // Check if it's a committed endpoint
+    let deletion_marker = staged_endpoint_delete_path(&project, name);
+    if deletion_marker.exists() {
+        println!("Endpoint '{}' is already marked for deletion.", name);
+        return Ok(());
+    }
+
+    // If it's committed, stage a deletion marker.
     if let Some(commit) = project.latest_commit()? {
         if commit.endpoints.contains_key(name) {
-            anyhow::bail!(
-                "Endpoint '{}' is committed. Create a new commit without this endpoint to remove it.",
-                name
-            );
+            let staged_dir = project.ozzy_dir().join("staged_endpoints");
+            fs::create_dir_all(&staged_dir)?;
+            fs::write(&deletion_marker, b"deleted\n")?;
+            println!("Staged endpoint deletion: {}", name);
+            println!("Commit to finalize removal.");
+            return Ok(());
         }
     }
 
@@ -380,9 +536,15 @@ pub async fn remove(name: &str) -> Result<()> {
 
 pub async fn show(name: &str) -> Result<()> {
     let project = Project::find_current()?;
+    validate_safe_name(name)?;
+
+    let deletion_marker = staged_endpoint_delete_path(&project, name);
+    if deletion_marker.exists() {
+        anyhow::bail!("Endpoint '{}' is staged for deletion", name);
+    }
 
     // Check staged endpoints first
-    let staged_path = project.ozzy_dir().join("staged_endpoints").join(format!("{}.json", name));
+    let staged_path = staged_endpoint_path(&project, name);
     if staged_path.exists() {
         let content = fs::read_to_string(&staged_path)?;
         let endpoint: Endpoint = serde_json::from_str(&content)?;
@@ -419,7 +581,11 @@ fn print_endpoint(project: &Project, endpoint: &Endpoint, committed: bool) -> Re
                 if let Some(ds) = data_sources.get(&edge.source_ref) {
                     let path = project.root.join(&ds.path);
                     if let Ok(schema_info) = schema::extract_parquet_schema(&path) {
-                        format!("{} (data, {} columns)", edge.source_ref, schema_info.fields.len())
+                        format!(
+                            "{} (data, {} columns)",
+                            edge.source_ref,
+                            schema_info.fields.len()
+                        )
                     } else {
                         format!("{} (data)", edge.source_ref)
                     }
@@ -436,7 +602,10 @@ fn print_endpoint(project: &Project, endpoint: &Endpoint, committed: bool) -> Re
                 edge.external_commit_hash.as_deref().unwrap_or("?")
             ),
         };
-        println!("  {} -> {} [input: {}]", source, edge.target_node, edge.input_name);
+        println!(
+            "  {} -> {} [input: {}]",
+            source, edge.target_node, edge.input_name
+        );
     }
 
     println!();
@@ -474,8 +643,20 @@ fn types_compatible(actual: &str, expected: &str) -> bool {
     }
     // Numeric compatibility: int types are compatible with float expectations
     fn is_numeric(t: &str) -> bool {
-        matches!(t, "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64"
-            | "float16" | "float32" | "float64")
+        matches!(
+            t,
+            "int8"
+                | "int16"
+                | "int32"
+                | "int64"
+                | "uint8"
+                | "uint16"
+                | "uint32"
+                | "uint64"
+                | "float16"
+                | "float32"
+                | "float64"
+        )
     }
     if expected_norm == "float64" && is_numeric(actual_norm) {
         return true;

@@ -33,7 +33,9 @@ pub async fn run(name: Option<String>, owner: Option<String>) -> Result<()> {
             println!("Next steps:");
             println!("  1. Add raw data:      ozzy data add mydata.parquet --name raw");
             println!("  2. Add a transform:   ozzy transform add transforms/qc.py");
-            println!("  3. Create an endpoint: ozzy endpoint create corrected --input raw --transforms qc");
+            println!(
+                "  3. Create an endpoint: ozzy endpoint create corrected --input raw --transforms qc"
+            );
             println!("  4. Run the pipeline:  ozzy run corrected");
             Ok(())
         }

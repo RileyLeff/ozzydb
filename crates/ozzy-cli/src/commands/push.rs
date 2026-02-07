@@ -24,6 +24,12 @@ fn load_credentials() -> Result<CredentialsFile> {
 
 /// Push current commit to a remote registry.
 pub async fn run(message: Option<&str>, remote: &str) -> Result<()> {
+    // `ozzy push -m ...` means "commit (if needed) then push", without mutating
+    // an already-hashed commit payload in-flight.
+    if let Some(msg) = message {
+        super::commit::create(Some(msg)).await?;
+    }
+
     let project = Project::find_current()?;
 
     // Get remote URL
@@ -142,10 +148,6 @@ pub async fn run(message: Option<&str>, remote: &str) -> Result<()> {
         }
     }
     commit_json["tags"] = serde_json::Value::Object(tag_map);
-
-    if let Some(msg) = message {
-        commit_json["message"] = serde_json::Value::String(msg.to_string());
-    }
 
     // Push
     let push_response = client

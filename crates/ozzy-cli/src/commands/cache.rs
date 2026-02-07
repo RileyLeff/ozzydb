@@ -1,6 +1,6 @@
 use anyhow::Result;
-use ozzy_core::cache::{self, CacheBackend, LocalCache, TieredCache};
 use ozzy_core::Project;
+use ozzy_core::cache::{self, CacheBackend, LocalCache, TieredCache};
 
 pub async fn list() -> Result<()> {
     let cache = LocalCache::open()?;
@@ -16,7 +16,10 @@ pub async fn list() -> Result<()> {
 
     for entry in &entries {
         let size = cache::format_size(entry.byte_size.unwrap_or(0));
-        let rows = entry.row_count.map(|r| format!("{} rows", r)).unwrap_or_default();
+        let rows = entry
+            .row_count
+            .map(|r| format!("{} rows", r))
+            .unwrap_or_default();
         let accessed = entry.last_accessed.format("%Y-%m-%d %H:%M");
 
         println!("  {}...", &entry.materialized_hash[..16]);
@@ -56,7 +59,11 @@ pub async fn clear() -> Result<()> {
 
     cache.clear()?;
 
-    println!("Cleared {} cache entries ({})", count, cache::format_size(size));
+    println!(
+        "Cleared {} cache entries ({})",
+        count,
+        cache::format_size(size)
+    );
 
     Ok(())
 }
@@ -189,12 +196,8 @@ pub async fn pull(all: bool, hash: Option<&str>, dry_run: bool) -> Result<()> {
 
 pub async fn sync(direction: &str, dry_run: bool) -> Result<()> {
     match direction {
-        "push" => {
-            push(false, None, dry_run).await
-        }
-        "pull" => {
-            pull(false, None, dry_run).await
-        }
+        "push" => push(false, None, dry_run).await,
+        "pull" => pull(false, None, dry_run).await,
         "both" => {
             println!("Pulling from remote...");
             pull(false, None, dry_run).await?;
@@ -203,7 +206,10 @@ pub async fn sync(direction: &str, dry_run: bool) -> Result<()> {
             push(false, None, dry_run).await
         }
         _ => {
-            anyhow::bail!("Invalid sync direction: '{}'. Use 'push', 'pull', or 'both'.", direction);
+            anyhow::bail!(
+                "Invalid sync direction: '{}'. Use 'push', 'pull', or 'both'.",
+                direction
+            );
         }
     }
 }
@@ -222,12 +228,18 @@ pub async fn status() -> Result<()> {
     println!("Local cache:");
     println!("  Location: {}", cache::default_cache_dir().display());
     println!("  Entries: {}", cache_status.local_count);
-    println!("  Total size: {}", cache::format_size(cache_status.local_size));
+    println!(
+        "  Total size: {}",
+        cache::format_size(cache_status.local_size)
+    );
     println!();
 
     if cache_status.remote_configured {
         println!("Remote cache: configured");
-        println!("  Entries (current platform): {}", cache_status.remote_count);
+        println!(
+            "  Entries (current platform): {}",
+            cache_status.remote_count
+        );
         if !cache_status.remote_platforms.is_empty() {
             println!("  Platforms: {}", cache_status.remote_platforms.join(", "));
         }

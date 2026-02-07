@@ -67,10 +67,7 @@ pub async fn initiate_device_flow(config: &Config) -> Result<GitHubDeviceCodeRes
 
 /// Poll for device flow token.
 /// Returns Some(token) when auth is complete, None if still pending.
-pub async fn poll_device_flow(
-    config: &Config,
-    device_code: &str,
-) -> Result<Option<String>> {
+pub async fn poll_device_flow(config: &Config, device_code: &str) -> Result<Option<String>> {
     let client = reqwest::Client::new();
 
     let response = client
@@ -98,7 +95,11 @@ pub async fn poll_device_flow(
             "slow_down" => return Ok(None),
             "expired_token" => anyhow::bail!("Device code expired"),
             "access_denied" => anyhow::bail!("Access denied by user"),
-            _ => anyhow::bail!("GitHub OAuth error: {} - {:?}", error, token_response.error_description),
+            _ => anyhow::bail!(
+                "GitHub OAuth error: {} - {:?}",
+                error,
+                token_response.error_description
+            ),
         }
     }
 

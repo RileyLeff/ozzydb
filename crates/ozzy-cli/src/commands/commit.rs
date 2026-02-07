@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ozzy_core::project::Endpoint;
-use ozzy_core::{commit as commit_lib, Project};
+use ozzy_core::{Project, commit as commit_lib};
 use std::env;
 use std::fs;
 
@@ -24,9 +24,20 @@ pub async fn create(message: Option<&str>) -> Result<()> {
     // Build commit (this collects data sources and transforms)
     let mut commit = commit_lib::create_commit(&project, message, &author)?;
 
-    // Add staged endpoints to the commit
+    // Apply staged endpoint deletions/additions to the commit.
     let staged_dir = project.ozzy_dir().join("staged_endpoints");
     if staged_dir.exists() {
+        for entry in fs::read_dir(&staged_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().map(|e| e == "deleted").unwrap_or(false) {
+                if let Some(stem) = path.file_stem() {
+                    let endpoint_name = stem.to_string_lossy().to_string();
+                    commit.endpoints.remove(&endpoint_name);
+                }
+            }
+        }
+
         for entry in fs::read_dir(&staged_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -82,7 +93,12 @@ fn has_staged_endpoints(project: &Project) -> Result<bool> {
     if staged_dir.exists() {
         for entry in fs::read_dir(&staged_dir)? {
             let entry = entry?;
-            if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+            if entry
+                .path()
+                .extension()
+                .map(|e| e == "json" || e == "deleted")
+                .unwrap_or(false)
+            {
                 return Ok(true);
             }
         }

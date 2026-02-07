@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ozzy_core::{validate_safe_name, Project, schema};
+use ozzy_core::{Project, schema, validate_safe_name};
 use std::fs;
 use std::path::Path;
 
@@ -14,7 +14,11 @@ pub async fn add(file: &str, name: &str) -> Result<()> {
         anyhow::bail!("File not found: {}", file);
     }
 
-    if source_path.extension().map(|e| e != "parquet").unwrap_or(true) {
+    if source_path
+        .extension()
+        .map(|e| e != "parquet")
+        .unwrap_or(true)
+    {
         anyhow::bail!("Only parquet files are supported. Got: {}", file);
     }
 

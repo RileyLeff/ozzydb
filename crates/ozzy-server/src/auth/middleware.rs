@@ -93,10 +93,37 @@ fn action_implies(have: ScopeAction, need: ScopeAction) -> bool {
 }
 
 fn scope_matches_project(parsed: &ParsedScope, owner: &str, project: &str) -> bool {
+    fn matches_pattern(pattern: &str, value: &str) -> bool {
+        pattern == "*" || pattern == value
+    }
+
     match (&parsed.owner, &parsed.project) {
         (None, None) => true,
         (Some(scope_owner), Some(scope_project)) => {
-            scope_owner == owner && scope_project == project
+            matches_pattern(scope_owner, owner) && matches_pattern(scope_project, project)
+        }
+        _ => false,
+    }
+}
+
+fn pattern_covers(granter: &str, requested: &str) -> bool {
+    match (granter, requested) {
+        ("*", _) => true,
+        (_, "*") => granter == "*",
+        (g, r) => g == r,
+    }
+}
+
+fn target_covers(granter: &ParsedScope, requested: &ParsedScope) -> bool {
+    match (
+        &granter.owner,
+        &granter.project,
+        &requested.owner,
+        &requested.project,
+    ) {
+        (None, None, _, _) => true,
+        (Some(go), Some(gp), Some(ro), Some(rp)) => {
+            pattern_covers(go, ro) && pattern_covers(gp, rp)
         }
         _ => false,
     }
@@ -136,14 +163,7 @@ pub fn can_delegate_scopes(granter_scopes: &[String], requested_scopes: &[String
                 return false;
             }
 
-            match (&granter_parsed.owner, &granter_parsed.project) {
-                (None, None) => true,
-                (Some(owner), Some(project)) => {
-                    requested_parsed.owner.as_deref() == Some(owner.as_str())
-                        && requested_parsed.project.as_deref() == Some(project.as_str())
-                }
-                _ => false,
-            }
+            target_covers(&granter_parsed, &requested_parsed)
         })
     })
 }
@@ -375,5 +395,32 @@ mod tests {
             &granter,
             &["read:alice/other".to_string()]
         ));
+    }
+
+    #[test]
+    fn wildcard_project_scope_matches() {
+        let scopes = vec!["read:alice/*".to_string()];
+        assert!(has_project_scope(
+            &scopes,
+            ScopeAction::Read,
+            "alice",
+            "sapflux"
+        ));
+        assert!(!has_project_scope(
+            &scopes,
+            ScopeAction::Read,
+            "bob",
+            "sapflux"
+        ));
+    }
+
+    #[test]
+    fn wildcard_delegation_respects_coverage() {
+        let granter = vec!["write:alice/*".to_string()];
+        assert!(can_delegate_scopes(
+            &granter,
+            &["read:alice/sapflux".to_string()]
+        ));
+        assert!(!can_delegate_scopes(&granter, &["write:*/*".to_string()]));
     }
 }

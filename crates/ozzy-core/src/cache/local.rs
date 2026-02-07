@@ -4,7 +4,7 @@
 //! Cache entries are content-addressed by their materialized hash.
 
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -81,7 +81,8 @@ impl LocalCache {
 
     /// Get the file path for a cached entry.
     pub fn get_path(&self, hash: &str) -> Result<Option<PathBuf>> {
-        self.get(hash).map(|e| e.and_then(|e| e.file_path().cloned()))
+        self.get(hash)
+            .map(|e| e.and_then(|e| e.file_path().cloned()))
     }
 
     /// List all cache entries.
@@ -126,7 +127,12 @@ impl LocalCache {
         if data_dir.exists() {
             for entry in fs::read_dir(&data_dir)? {
                 let entry = entry?;
-                if entry.path().extension().map(|e| e == "parquet").unwrap_or(false) {
+                if entry
+                    .path()
+                    .extension()
+                    .map(|e| e == "parquet")
+                    .unwrap_or(false)
+                {
                     fs::remove_file(entry.path())?;
                 }
             }
@@ -141,7 +147,9 @@ impl LocalCache {
 
     /// Get the expected cache file path for a hash (doesn't check existence).
     pub fn cache_path_for(&self, hash: &str) -> PathBuf {
-        self.cache_dir.join("data").join(format!("{}.parquet", hash))
+        self.cache_dir
+            .join("data")
+            .join(format!("{}.parquet", hash))
     }
 
     /// Register a file that was downloaded from remote cache.
@@ -271,7 +279,10 @@ impl CacheBackend for LocalCache {
         source_path: &Path,
         row_count: Option<u64>,
     ) -> Result<PathBuf> {
-        let dest_path = self.cache_dir.join("data").join(format!("{}.parquet", hash));
+        let dest_path = self
+            .cache_dir
+            .join("data")
+            .join(format!("{}.parquet", hash));
 
         // Copy the file to cache
         fs::copy(source_path, &dest_path)?;
@@ -339,9 +350,8 @@ impl CacheBackend for LocalCache {
     fn count(&self) -> Result<usize> {
         let conn = self.connect()?;
 
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM cache_entries", [], |row| {
-            row.get(0)
-        })?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM cache_entries", [], |row| row.get(0))?;
 
         Ok(count as usize)
     }
@@ -392,7 +402,9 @@ mod tests {
 
         // Store in cache
         let hash = "abc123";
-        let path = cache.put(hash, "x86_64-linux", &test_file, Some(100)).unwrap();
+        let path = cache
+            .put(hash, "x86_64-linux", &test_file, Some(100))
+            .unwrap();
 
         assert!(path.exists());
         assert!(cache.contains(hash).unwrap());

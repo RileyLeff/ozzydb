@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use ozzy_core::Project;
 use ozzy_core::registry::protocol::ListRefsResponse;
 use ozzy_core::registry::{CredentialsFile, RegistryClient};
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
@@ -68,6 +69,38 @@ fn checked_destination(base: &Path, canonical_base: &Path, rel: &Path) -> Result
     }
 
     Ok(dest)
+}
+
+fn prune_unlisted_files(dir: &Path, project_root: &Path, keep: &HashSet<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+
+        if file_type.is_dir() {
+            prune_unlisted_files(&path, project_root, keep)?;
+            if std::fs::read_dir(&path)?.next().is_none() {
+                std::fs::remove_dir(&path)?;
+            }
+            continue;
+        }
+
+        if file_type.is_file() {
+            let rel = path
+                .strip_prefix(project_root)
+                .map_err(|e| anyhow::anyhow!("Failed to compute relative path: {}", e))?
+                .to_path_buf();
+            if !keep.contains(&rel) {
+                std::fs::remove_file(&path)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_local_ref_path(
@@ -155,6 +188,8 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
     let canonical_project_root = project.root.canonicalize()?;
 
     let mut commit_json_data: Option<Vec<u8>> = None;
+    let mut keep_data_files: HashSet<PathBuf> = HashSet::new();
+    let mut keep_transform_files: HashSet<PathBuf> = HashSet::new();
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -168,6 +203,7 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
         // Capture commit.json for storing locally
         if path.to_string_lossy() == "commit.json" {
             commit_json_data = Some(content.clone());
+            continue;
         }
 
         let dest_path = checked_destination(&project.root, &canonical_project_root, &path)?;
@@ -175,8 +211,25 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>) -> Result<()> {
         let mut file = std::fs::File::create(&dest_path)?;
         file.write_all(&content)?;
 
+        if path.starts_with("data") {
+            keep_data_files.insert(path.clone());
+        } else if path.starts_with("transforms") {
+            keep_transform_files.insert(path.clone());
+        }
+
         println!("  {}", path.display());
     }
+
+    prune_unlisted_files(
+        &project.data_dir(),
+        &canonical_project_root,
+        &keep_data_files,
+    )?;
+    prune_unlisted_files(
+        &project.transforms_dir(),
+        &canonical_project_root,
+        &keep_transform_files,
+    )?;
 
     // Store commit in .ozzy/commits/{hash}.json
     if let Some(commit_data) = &commit_json_data {

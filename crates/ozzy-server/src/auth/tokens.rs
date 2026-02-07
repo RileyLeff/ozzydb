@@ -44,7 +44,7 @@ pub fn validate_token_format(token: &str) -> Result<()> {
 
 /// Base64url encoding without padding.
 fn base64_url_encode(bytes: &[u8]) -> String {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     URL_SAFE_NO_PAD.encode(bytes)
 }
 

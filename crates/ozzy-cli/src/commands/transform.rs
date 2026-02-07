@@ -3,8 +3,15 @@ use ozzy_core::{Project, commit, validate_safe_name};
 use std::fs;
 use std::path::Path;
 
-pub async fn add(file: &str, _name: Option<&str>) -> Result<()> {
+pub async fn add(file: &str, name: Option<&str>) -> Result<()> {
     let project = Project::find_current()?;
+
+    if name.is_some() {
+        anyhow::bail!(
+            "--name is not supported yet for transform registration. \
+            Rename the function in source code instead."
+        );
+    }
 
     // Parse file:function format or just file
     let (source_path, function_name) = if file.contains(':') {
@@ -42,6 +49,12 @@ pub async fn add(file: &str, _name: Option<&str>) -> Result<()> {
                 "Function '{}' not found. Available transforms: {}",
                 fn_name,
                 functions.join(", ")
+            );
+        }
+        if functions.len() > 1 {
+            anyhow::bail!(
+                "Selecting a single transform from a file with multiple @ozzy.transform \
+                 functions is not supported. Split transforms into separate files."
             );
         }
     }

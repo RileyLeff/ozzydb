@@ -1,12 +1,18 @@
 use anyhow::Result;
-use ozzy_core::{commit as commit_lib, Project};
+use ozzy_core::{Project, commit as commit_lib};
 use std::fs;
 
 pub async fn show() -> Result<()> {
     let project = Project::find_current()?;
 
-    println!("Project: {}/{}", project.config.project.owner, project.config.project.name);
-    println!("Branch: {}", project.config.refs.head.replace("refs/heads/", ""));
+    println!(
+        "Project: {}/{}",
+        project.config.project.owner, project.config.project.name
+    );
+    println!(
+        "Branch: {}",
+        project.config.refs.head.replace("refs/heads/", "")
+    );
 
     // Show current HEAD
     if let Some(head) = project.head_commit()? {
@@ -76,11 +82,21 @@ pub async fn show() -> Result<()> {
     if staged_dir.exists() {
         for entry in fs::read_dir(&staged_dir)? {
             let entry = entry?;
-            if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
-                if let Some(stem) = entry.path().file_stem() {
-                    let name = stem.to_string_lossy().to_string();
-                    staged_endpoints.push(format!("  new:      endpoint/{}", name));
+            let path = entry.path();
+            match path.extension().and_then(|e| e.to_str()) {
+                Some("json") => {
+                    if let Some(stem) = path.file_stem() {
+                        let name = stem.to_string_lossy().to_string();
+                        staged_endpoints.push(format!("  new:      endpoint/{}", name));
+                    }
                 }
+                Some("deleted") => {
+                    if let Some(stem) = path.file_stem() {
+                        let name = stem.to_string_lossy().to_string();
+                        staged_endpoints.push(format!("  deleted:  endpoint/{}", name));
+                    }
+                }
+                _ => {}
             }
         }
     }
