@@ -422,13 +422,11 @@ impl RegistryClient {
         project: &str,
         ref_name: Option<&str>,
     ) -> Result<PullManifest> {
-        let mut url = format!("{}/pull/manifest", self.project_url(owner, project)?);
-        if let Some(r) = ref_name {
-            validate_path_segment(r, "Ref name")?;
-            url = format!("{}?ref={}", url, r);
-        }
-
+        let url = format!("{}/pull/manifest", self.project_url(owner, project)?);
         let mut request = self.client.get(&url);
+        if let Some(r) = ref_name {
+            request = request.query(&[("ref", r)]);
+        }
         if let Some(auth) = self.auth_header() {
             request = request.header("Authorization", auth);
         }
@@ -456,13 +454,11 @@ impl RegistryClient {
         project: &str,
         ref_name: Option<&str>,
     ) -> Result<Vec<u8>> {
-        let mut url = format!("{}/pull", self.project_url(owner, project)?);
-        if let Some(r) = ref_name {
-            validate_path_segment(r, "Ref name")?;
-            url = format!("{}?ref={}", url, r);
-        }
-
+        let url = format!("{}/pull", self.project_url(owner, project)?);
         let mut request = self.client.get(&url);
+        if let Some(r) = ref_name {
+            request = request.query(&[("ref", r)]);
+        }
         if let Some(auth) = self.auth_header() {
             request = request.header("Authorization", auth);
         }
