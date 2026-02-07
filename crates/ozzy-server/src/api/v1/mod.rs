@@ -1,5 +1,6 @@
 //! V1 API endpoints.
 
+mod access;
 mod auth;
 mod projects;
 mod push_pull;

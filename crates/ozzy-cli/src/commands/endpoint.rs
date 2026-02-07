@@ -64,9 +64,14 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
         anyhow::bail!("At least one input is required");
     }
 
+    if transforms.is_empty() {
+        anyhow::bail!("At least one transform is required");
+    }
+
     // Verify all input data sources exist
     let data_sources = commit::collect_data_sources(&project)?;
-    let mut input_schemas: HashMap<String, schema::SchemaInfo> = HashMap::new();
+    let mut input_schemas: std::collections::BTreeMap<String, schema::SchemaInfo> =
+        std::collections::BTreeMap::new();
 
     println!("Validating pipeline schema...");
     println!();
@@ -308,7 +313,7 @@ pub async fn create(name: &str, inputs: &[(String, String)], transforms: &[Strin
 
 /// Validate schema compatibility through the pipeline.
 fn validate_pipeline_schema(
-    input_schemas: &HashMap<String, schema::SchemaInfo>,
+    input_schemas: &std::collections::BTreeMap<String, schema::SchemaInfo>,
     transforms: &[String],
     available_transforms: &std::collections::BTreeMap<String, ozzy_core::project::Transform>,
 ) -> schema::ValidationResult {
@@ -321,6 +326,15 @@ fn validate_pipeline_schema(
         for field in &input_schema.fields {
             if !current_columns.iter().any(|c| c == &field.name) {
                 current_columns.push(field.name.clone());
+            }
+            if let Some(existing_type) = current_types.get(&field.name) {
+                if existing_type != &field.dtype {
+                    result.valid = false;
+                    result.warnings.push(format!(
+                        "Column '{}' has conflicting types across inputs: '{}' vs '{}'",
+                        field.name, existing_type, field.dtype
+                    ));
+                }
             }
             current_types
                 .entry(field.name.clone())

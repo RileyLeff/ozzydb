@@ -122,9 +122,15 @@ pub fn canonicalize_json(value: &Value) -> String {
             if let Some(i) = n.as_i64() {
                 i.to_string()
             } else if let Some(f) = n.as_f64() {
-                // Remove trailing zeros
+                // Canonical float: trim fractional trailing zeros only when
+                // there's a decimal point and no exponent (e.g. 1.50 → 1.5,
+                // but 1e10 stays as-is and 100 stays as 100).
                 let s = format!("{}", f);
-                s.trim_end_matches('0').trim_end_matches('.').to_string()
+                if s.contains('.') && !s.contains('e') && !s.contains('E') {
+                    s.trim_end_matches('0').trim_end_matches('.').to_string()
+                } else {
+                    s
+                }
             } else {
                 n.to_string()
             }

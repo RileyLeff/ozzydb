@@ -241,14 +241,17 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>, force: bool) -> R
     let owner = &project.config.project.owner;
     let project_slug = &project.config.project.name;
     let requested_ref = ref_name.unwrap_or("main");
-    let normalized_ref = match requested_ref {
+    // Pass ref name to server as-is (including refs/tags/ or refs/heads/ prefix)
+    // so the server can resolve the correct type. Only strip the '@' shorthand.
+    let server_ref = match requested_ref {
         "@latest" => "@latest",
-        s => s
-            .strip_prefix("refs/heads/")
-            .or_else(|| s.strip_prefix("refs/tags/"))
-            .or_else(|| s.strip_prefix('@'))
-            .unwrap_or(s),
+        s => s.strip_prefix('@').unwrap_or(s),
     };
+    // For local display, strip prefixes to get the bare name
+    let display_ref = server_ref
+        .strip_prefix("refs/heads/")
+        .or_else(|| server_ref.strip_prefix("refs/tags/"))
+        .unwrap_or(server_ref);
 
     let workspace_dirty = is_workspace_dirty_since_last_commit(&project)?;
     if workspace_dirty && !force {
@@ -264,7 +267,7 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>, force: bool) -> R
 
     // Get manifest first to show what will be downloaded
     let manifest = client
-        .pull_manifest(owner, project_slug, Some(normalized_ref))
+        .pull_manifest(owner, project_slug, Some(server_ref))
         .await?;
 
     println!(
@@ -278,9 +281,7 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>, force: bool) -> R
     );
 
     // Download the tar archive
-    let tar_data = client
-        .pull(owner, project_slug, Some(normalized_ref))
-        .await?;
+    let tar_data = client.pull(owner, project_slug, Some(server_ref)).await?;
 
     // Extract the tar archive
     let cursor = std::io::Cursor::new(tar_data);
@@ -353,11 +354,11 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>, force: bool) -> R
 
     // Resolve whether this is a branch or tag ref so local refs stay consistent.
     let refs = client.list_refs(owner, project_slug).await.ok();
-    let ref_full = resolve_local_ref_path(normalized_ref, refs.as_ref(), &project.config.refs.head);
+    let ref_full = resolve_local_ref_path(display_ref, refs.as_ref(), &project.config.refs.head);
     project.update_ref(&ref_full, &manifest.commit_hash)?;
 
     // Also update HEAD if we're pulling the default branch
-    if ref_full == project.config.refs.head || normalized_ref == "main" {
+    if ref_full == project.config.refs.head || display_ref == "main" {
         project.update_ref(&project.config.refs.head, &manifest.commit_hash)?;
     }
 
@@ -368,7 +369,7 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>, force: bool) -> R
     println!();
     println!(
         "Pull complete. Updated ref '{}' -> {}",
-        normalized_ref,
+        display_ref,
         manifest
             .commit_hash
             .get(..8)

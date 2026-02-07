@@ -82,6 +82,7 @@ pub async fn list() -> Result<()> {
 
 /// Delete a tag.
 pub async fn delete(name: &str) -> Result<()> {
+    ozzy_core::validate_safe_name(name)?;
     let project = Project::find_current()?;
 
     let tag_path = project.ozzy_dir().join("refs").join("tags").join(name);
@@ -99,6 +100,7 @@ pub async fn delete(name: &str) -> Result<()> {
 
 /// Show details of a specific tag.
 pub async fn show(name: &str) -> Result<()> {
+    ozzy_core::validate_safe_name(name)?;
     let project = Project::find_current()?;
 
     let tag_path = project.ozzy_dir().join("refs").join("tags").join(name);

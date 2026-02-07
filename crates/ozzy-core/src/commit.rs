@@ -13,6 +13,24 @@ use crate::project::{Commit, DataSource, Project, Transform};
 use crate::schema::{extract_parquet_schema, get_parquet_row_count};
 use walkdir::WalkDir;
 
+/// Compute the canonical hash for a commit from its fields.
+///
+/// This is the single source of truth for commit hash computation.
+/// All code paths that need a commit hash (CLI commit, server push verification)
+/// must use this function to avoid divergence.
+pub fn compute_commit_hash(commit: &Commit) -> String {
+    let commit_content = serde_json::json!({
+        "parent_hashes": commit.parent_hashes,
+        "data_sources": commit.data_sources,
+        "transforms": commit.transforms,
+        "endpoints": commit.endpoints,
+        "author": commit.author,
+        "message": commit.message,
+        "timestamp": commit.timestamp.to_rfc3339(),
+    });
+    canon::hash_json(&commit_content)
+}
+
 /// Build a commit from the current workspace state.
 pub fn create_commit(project: &Project, message: &str, author: &str) -> Result<Commit> {
     // Collect data sources from data/ directory
@@ -38,20 +56,8 @@ pub fn create_commit(project: &Project, message: &str, author: &str) -> Result<C
     // Capture timestamp before hashing so it's included in the hash
     let timestamp = Utc::now();
 
-    // Build the commit hash from all content (including timestamp)
-    let commit_content = serde_json::json!({
-        "parent_hashes": parent_hashes,
-        "data_sources": data_sources,
-        "transforms": transforms,
-        "endpoints": endpoints,
-        "author": author,
-        "message": message,
-        "timestamp": timestamp.to_rfc3339(),
-    });
-    let hash = canon::hash_json(&commit_content);
-
-    Ok(Commit {
-        hash,
+    let mut commit = Commit {
+        hash: String::new(),
         parent_hashes,
         author: author.to_string(),
         message: message.to_string(),
@@ -59,7 +65,10 @@ pub fn create_commit(project: &Project, message: &str, author: &str) -> Result<C
         data_sources,
         transforms,
         endpoints,
-    })
+    };
+    commit.hash = compute_commit_hash(&commit);
+
+    Ok(commit)
 }
 
 /// Collect data sources from the data/ directory.

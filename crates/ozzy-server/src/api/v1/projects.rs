@@ -15,6 +15,7 @@ use ozzy_core::registry::protocol::{
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use super::access::{enforce_read_access, user_has_project_permission};
 use super::auth::ApiError;
 use crate::{
     AppState,
@@ -61,64 +62,6 @@ pub fn router() -> Router<AppState> {
             "/{owner}/{project}/collaborators/{username}",
             delete(remove_collaborator),
         )
-}
-
-fn collaborator_allows(permission: &str, need: ScopeAction) -> bool {
-    match need {
-        ScopeAction::Read => matches!(permission, "read" | "write" | "admin"),
-        ScopeAction::Write => matches!(permission, "write" | "admin"),
-        ScopeAction::Admin => permission == "admin",
-        ScopeAction::Owner => false,
-    }
-}
-
-async fn user_has_project_permission(
-    state: &AppState,
-    project: &crate::db::Project,
-    user_id: uuid::Uuid,
-    need: ScopeAction,
-) -> Result<bool, ApiError> {
-    if user_id == project.owner_user_id {
-        return Ok(true);
-    }
-
-    let collaborator = state
-        .db
-        .get_project_collaborator(project.id, user_id)
-        .await?;
-    Ok(collaborator
-        .as_ref()
-        .map(|c| collaborator_allows(&c.permission, need))
-        .unwrap_or(false))
-}
-
-async fn enforce_read_access(
-    state: &AppState,
-    project: &crate::db::Project,
-    owner: &str,
-    project_slug: &str,
-    auth: &MaybeAuthUser,
-) -> Result<(), ApiError> {
-    // Public projects are readable without authentication.
-    if project.visibility == "public" {
-        return Ok(());
-    }
-
-    let user = auth.user.as_ref().ok_or_else(|| {
-        ApiError::unauthorized("Authentication required for private/org projects")
-    })?;
-
-    if !has_project_scope(&auth.scopes, ScopeAction::Read, owner, project_slug) {
-        return Err(ApiError::forbidden(
-            "Token lacks read scope for this project",
-        ));
-    }
-
-    if user_has_project_permission(state, project, user.id, ScopeAction::Read).await? {
-        Ok(())
-    } else {
-        Err(ApiError::forbidden("You don't have access to this project"))
-    }
 }
 
 /// List projects owned by the authenticated user.

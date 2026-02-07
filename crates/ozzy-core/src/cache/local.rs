@@ -288,13 +288,21 @@ impl LocalCache {
         Ok(dest_path)
     }
 
+    /// Look up a cache entry's file path without updating access statistics.
+    fn get_path_only(&self, hash: &str) -> Result<Option<PathBuf>> {
+        let conn = self.connect()?;
+        let mut stmt =
+            conn.prepare("SELECT file_path FROM cache_entries WHERE materialized_hash = ?")?;
+        let path: Option<String> = stmt.query_row([hash], |row| row.get(0)).ok();
+        Ok(path.map(PathBuf::from))
+    }
+
     /// Remove a cache entry.
     pub fn remove(&self, hash: &str) -> Result<()> {
-        // Get the file path first
-        if let Some(entry) = self.get(hash)? {
-            // Remove the file
-            if entry.file_path().exists() {
-                fs::remove_file(entry.file_path())?;
+        // Get the file path without touching access stats
+        if let Some(file_path) = self.get_path_only(hash)? {
+            if file_path.exists() {
+                fs::remove_file(&file_path)?;
             }
         }
 

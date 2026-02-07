@@ -552,8 +552,12 @@ impl Database {
         Ok(refs)
     }
 
-    /// Get ref by name (tries branch first, then tag).
-    /// Special handling: "@latest" resolves to the project's default_branch.
+    /// Get ref by name, respecting explicit type prefixes.
+    ///
+    /// - `refs/tags/foo` → looks up tag "foo" only
+    /// - `refs/heads/foo` → looks up branch "foo" only
+    /// - `@latest` / `latest` → resolves to the project's default branch
+    /// - bare name → tries branch first, then tag
     pub async fn get_ref_by_name(&self, project_id: Uuid, name: &str) -> Result<Option<DbRef>> {
         // Handle @latest - resolve to the project's default_branch (usually "main")
         if name == "@latest" || name == "latest" {
@@ -567,11 +571,18 @@ impl Database {
             return self.get_ref(project_id, &branch_name, "branch").await;
         }
 
-        // Try branch first
+        // Respect explicit type prefixes to avoid tag/branch collisions
+        if let Some(tag_name) = name.strip_prefix("refs/tags/") {
+            return self.get_ref(project_id, tag_name, "tag").await;
+        }
+        if let Some(branch_name) = name.strip_prefix("refs/heads/") {
+            return self.get_ref(project_id, branch_name, "branch").await;
+        }
+
+        // Bare name: try branch first, then tag
         if let Some(r) = self.get_ref(project_id, name, "branch").await? {
             return Ok(Some(r));
         }
-        // Then try tag
         self.get_ref(project_id, name, "tag").await
     }
 

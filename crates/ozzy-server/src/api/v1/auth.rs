@@ -85,6 +85,12 @@ async fn github_poll(
     let (plaintext_token, token_hash) = tokens::generate_api_token();
     let token_prefix = &plaintext_token[..12.min(plaintext_token.len())];
 
+    // Replace any existing cli-session token so repeated logins don't hit UNIQUE(user_id, name).
+    state
+        .db
+        .delete_token_by_name(user.id, "cli-session")
+        .await?;
+
     state
         .db
         .create_token(
@@ -197,24 +203,29 @@ async fn get_me(AuthUser { user, .. }: AuthUser) -> Json<UserInfo> {
 }
 
 /// API error type with proper HTTP status codes.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     /// 400 Bad Request - invalid input
+    #[error("{0}")]
     BadRequest(String),
     /// 401 Unauthorized - missing or invalid auth
+    #[error("{0}")]
     Unauthorized(String),
     /// 403 Forbidden - authenticated but not allowed
+    #[error("{0}")]
     Forbidden(String),
     /// 404 Not Found - resource doesn't exist
+    #[error("{0}")]
     NotFound(String),
     /// 409 Conflict - resource already exists
+    #[error("{0}")]
     Conflict(String),
     /// 500 Internal Server Error - unexpected error
+    #[error(transparent)]
     Internal(anyhow::Error),
 }
 
 impl ApiError {
-    #[allow(dead_code)]
     pub fn not_found(resource: impl Into<String>) -> Self {
         Self::NotFound(resource.into())
     }
@@ -230,31 +241,29 @@ impl ApiError {
     pub fn unauthorized(msg: impl Into<String>) -> Self {
         Self::Unauthorized(msg.into())
     }
+
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self::Conflict(msg.into())
+    }
 }
 
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
-        // Try to infer the appropriate status code from the error message
-        let msg = err.to_string().to_lowercase();
-        if msg.contains("not found") {
-            Self::NotFound(err.to_string())
-        } else if msg.contains("unauthorized") || msg.contains("invalid token") {
-            Self::Unauthorized(err.to_string())
-        } else if msg.contains("forbidden")
-            || msg.contains("cannot push")
-            || msg.contains("not allowed")
-        {
-            Self::Forbidden(err.to_string())
-        } else if msg.contains("already exists") || msg.contains("conflict") {
-            Self::Conflict(err.to_string())
-        } else if msg.contains("invalid")
-            || msg.contains("missing")
-            || msg.contains("path traversal")
-        {
-            Self::BadRequest(err.to_string())
-        } else {
-            Self::Internal(err)
+        if let Some(sqlx_err) = err.downcast_ref::<sqlx::Error>() {
+            match sqlx_err {
+                sqlx::Error::RowNotFound => return Self::not_found("Resource not found"),
+                sqlx::Error::Database(db_err) => {
+                    if db_err.is_unique_violation() {
+                        return Self::conflict("Resource already exists");
+                    }
+                    if db_err.is_foreign_key_violation() {
+                        return Self::bad_request("Referenced resource does not exist");
+                    }
+                }
+                _ => {}
+            }
         }
+        Self::Internal(err)
     }
 }
 

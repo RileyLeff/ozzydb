@@ -49,17 +49,8 @@ pub async fn create(message: Option<&str>) -> Result<()> {
         }
     }
 
-    // Recompute hash with endpoints included (using canonical JSON for determinism)
-    let commit_content = serde_json::json!({
-        "parent_hashes": commit.parent_hashes,
-        "data_sources": commit.data_sources,
-        "transforms": commit.transforms,
-        "endpoints": commit.endpoints,
-        "author": commit.author,
-        "message": commit.message,
-        "timestamp": commit.timestamp.to_rfc3339(),
-    });
-    commit.hash = ozzy_core::canon::hash_json(&commit_content);
+    // Recompute hash with endpoints included
+    commit.hash = commit_lib::compute_commit_hash(&commit);
 
     // Save commit
     project.save_commit(&commit)?;

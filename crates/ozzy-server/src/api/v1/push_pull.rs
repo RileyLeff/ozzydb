@@ -17,11 +17,11 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Component, Path as FsPath, PathBuf};
 
+use super::access::{enforce_read_access, enforce_write_access};
 use super::auth::ApiError;
 use crate::{
     AppState,
     auth::middleware::{AuthUser, MaybeAuthUser, ScopeAction, WriteAuthUser, has_project_scope},
-    db::Project,
 };
 
 /// Extract Arrow schema from parquet bytes as a JSON value.
@@ -50,96 +50,7 @@ fn normalize_ref_name(ref_name: &str) -> &str {
 
 /// Recompute the canonical commit hash for integrity verification.
 fn expected_commit_hash(commit: &ozzy_core::project::Commit) -> String {
-    let commit_content = serde_json::json!({
-        "parent_hashes": commit.parent_hashes,
-        "data_sources": commit.data_sources,
-        "transforms": commit.transforms,
-        "endpoints": commit.endpoints,
-        "author": commit.author,
-        "message": commit.message,
-        "timestamp": commit.timestamp.to_rfc3339(),
-    });
-    ozzy_core::canon::hash_json(&commit_content)
-}
-
-/// Check if a user can access a project based on visibility.
-fn collaborator_allows(permission: &str, need: ScopeAction) -> bool {
-    match need {
-        ScopeAction::Read => matches!(permission, "read" | "write" | "admin"),
-        ScopeAction::Write => matches!(permission, "write" | "admin"),
-        ScopeAction::Admin => permission == "admin",
-        ScopeAction::Owner => false,
-    }
-}
-
-async fn user_has_project_permission(
-    state: &AppState,
-    project: &Project,
-    user_id: uuid::Uuid,
-    need: ScopeAction,
-) -> Result<bool, ApiError> {
-    if user_id == project.owner_user_id {
-        return Ok(true);
-    }
-    let collaborator = state
-        .db
-        .get_project_collaborator(project.id, user_id)
-        .await?;
-    Ok(collaborator
-        .as_ref()
-        .map(|c| collaborator_allows(&c.permission, need))
-        .unwrap_or(false))
-}
-
-async fn enforce_read_access(
-    state: &AppState,
-    project: &Project,
-    owner: &str,
-    project_slug: &str,
-    auth: &MaybeAuthUser,
-) -> Result<(), ApiError> {
-    if project.visibility == "public" {
-        return Ok(());
-    }
-
-    let user = auth.user.as_ref().ok_or_else(|| {
-        ApiError::unauthorized("Authentication required for private/org projects")
-    })?;
-
-    if !has_project_scope(&auth.scopes, ScopeAction::Read, owner, project_slug) {
-        return Err(ApiError::forbidden(
-            "Token lacks read scope for this project",
-        ));
-    }
-
-    if user_has_project_permission(state, project, user.id, ScopeAction::Read).await? {
-        Ok(())
-    } else {
-        Err(ApiError::forbidden("You don't have access to this project"))
-    }
-}
-
-async fn enforce_write_access(
-    state: &AppState,
-    project: &Project,
-    owner: &str,
-    project_slug: &str,
-    user: &crate::db::User,
-    scopes: &[String],
-) -> Result<(), ApiError> {
-    if !has_project_scope(scopes, ScopeAction::Write, owner, project_slug) {
-        return Err(ApiError::forbidden(
-            "Token lacks write scope for this project",
-        ));
-    }
-
-    if user_has_project_permission(state, project, user.id, ScopeAction::Write).await? {
-        Ok(())
-    } else {
-        Err(ApiError::forbidden(
-            "You don't have write access to this project",
-        ))
-    }
+    ozzy_core::commit::compute_commit_hash(commit)
 }
 
 /// Validate and sanitize a relative path to prevent traversal.
@@ -148,7 +59,10 @@ fn sanitize_relative_path(path: &str) -> Result<String, anyhow::Error> {
         anyhow::bail!("Invalid path: null bytes not allowed");
     }
 
-    let fs_path = FsPath::new(path);
+    // Normalize separators BEFORE validation to prevent backslash-encoded traversal
+    let normalized = path.replace('\\', "/");
+
+    let fs_path = FsPath::new(&normalized);
     let mut sanitized = PathBuf::new();
     for component in fs_path.components() {
         match component {
