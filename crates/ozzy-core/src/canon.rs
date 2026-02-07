@@ -112,7 +112,18 @@ pub fn canonicalize_json(value: &Value) -> String {
                     '\r' => "\\r".to_string(),
                     '\t' => "\\t".to_string(),
                     c if c.is_ascii_graphic() || c == ' ' => c.to_string(),
-                    c => format!("\\u{:04x}", c as u32),
+                    c => {
+                        let cp = c as u32;
+                        if cp > 0xFFFF {
+                            // Supplementary character: encode as UTF-16 surrogate pair
+                            let adjusted = cp - 0x10000;
+                            let high = 0xD800 + (adjusted >> 10);
+                            let low = 0xDC00 + (adjusted & 0x3FF);
+                            format!("\\u{:04x}\\u{:04x}", high, low)
+                        } else {
+                            format!("\\u{:04x}", cp)
+                        }
+                    }
                 })
                 .collect();
             format!("\"{}\"", escaped)

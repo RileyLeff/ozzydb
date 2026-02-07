@@ -53,6 +53,11 @@ fn expected_commit_hash(commit: &ozzy_core::project::Commit) -> String {
     ozzy_core::commit::compute_commit_hash(commit)
 }
 
+/// Sanitize a value for use in HTTP headers (strip control chars and quotes).
+fn sanitize_header_value(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control() && *c != '"').collect()
+}
+
 /// Validate and sanitize a relative path to prevent traversal.
 fn sanitize_relative_path(path: &str) -> Result<String, anyhow::Error> {
     if path.contains('\0') {
@@ -315,7 +320,7 @@ async fn push(
         return Err(e);
     }
 
-    let new_transform_count = transform_files.len();
+    let new_transform_count = stored_hashes.iter().filter(|(_, ext)| ext == "py").count();
 
     // Ensure schema metadata is available for all committed data sources, including
     // deduplicated blobs that may not have been uploaded in this push.
@@ -770,7 +775,11 @@ async fn pull(
         .header(header::CONTENT_TYPE, "application/x-tar")
         .header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}-{}.tar\"", project_slug, ref_name),
+            format!(
+                "attachment; filename=\"{}-{}.tar\"",
+                sanitize_header_value(&project_slug),
+                sanitize_header_value(&ref_name)
+            ),
         )
         .body(Body::from(tar_data))
         .map_err(|e| ApiError::from(anyhow::anyhow!("Failed to build response: {}", e)))
@@ -1024,7 +1033,9 @@ async fn fetch_endpoint(
             header::CONTENT_DISPOSITION,
             format!(
                 "attachment; filename=\"{}-{}-{}.tar\"",
-                project_slug, endpoint_name, ref_name
+                sanitize_header_value(&project_slug),
+                sanitize_header_value(&endpoint_name),
+                sanitize_header_value(&ref_name)
             ),
         )
         .body(Body::from(tar_data))

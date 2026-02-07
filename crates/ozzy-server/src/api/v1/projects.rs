@@ -31,6 +31,15 @@ struct PaginationParams {
     offset: i64,
 }
 
+impl PaginationParams {
+    /// Clamp offset to non-negative and limit to a reasonable range.
+    fn sanitized(&self) -> (i64, i64) {
+        let limit = self.limit.clamp(1, 100);
+        let offset = self.offset.max(0);
+        (limit, offset)
+    }
+}
+
 fn default_limit() -> i64 {
     50
 }
@@ -72,7 +81,7 @@ async fn list_projects(
 ) -> Result<Json<Vec<ProjectInfo>>, ApiError> {
     let projects = state
         .db
-        .list_user_projects_paginated(user.id, pagination.limit, pagination.offset)
+        .list_user_projects_paginated(user.id, pagination.sanitized().0, pagination.sanitized().1)
         .await?;
 
     let infos: Vec<ProjectInfo> = projects
@@ -201,7 +210,11 @@ async fn list_commits(
 
     let commits = state
         .db
-        .list_commits_paginated(project.id, pagination.limit, pagination.offset)
+        .list_commits_paginated(
+            project.id,
+            pagination.sanitized().0,
+            pagination.sanitized().1,
+        )
         .await?;
 
     let infos = commits

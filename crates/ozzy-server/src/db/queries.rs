@@ -68,6 +68,7 @@ impl Database {
             INSERT INTO users (id, username, email, github_id, github_login, avatar_url)
             VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (github_id) DO UPDATE SET
+                username = EXCLUDED.username,
                 github_login = EXCLUDED.github_login,
                 email = COALESCE(EXCLUDED.email, users.email),
                 avatar_url = EXCLUDED.avatar_url,

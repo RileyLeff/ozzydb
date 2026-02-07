@@ -160,6 +160,21 @@ fn print_json_dag(endpoints: &[Endpoint]) -> Result<()> {
     Ok(())
 }
 
+/// Sanitize a name for use as a Mermaid node ID (alphanumeric + underscore only).
+fn mermaid_id(prefix: &str, name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{}_{}", prefix, sanitized)
+}
+
 fn print_mermaid_dag(project: &Project, endpoints: &[Endpoint]) -> Result<()> {
     let data_sources = commit::collect_data_sources(project)?;
 
@@ -169,13 +184,14 @@ fn print_mermaid_dag(project: &Project, endpoints: &[Endpoint]) -> Result<()> {
     for endpoint in endpoints {
         println!(
             "    subgraph {}[\"Endpoint: {}\"]",
-            endpoint.name, endpoint.name
+            mermaid_id("ep", &endpoint.name),
+            endpoint.name
         );
 
         // Add data source nodes
         for edge in &endpoint.edges {
             if edge.source_type == SourceType::DataSource {
-                let ds_id = format!("ds_{}", edge.source_ref);
+                let ds_id = mermaid_id("ds", &edge.source_ref);
                 if let Some(ds) = data_sources.get(&edge.source_ref) {
                     println!("        {}[(\"{}\")]", ds_id, ds.name);
                 } else {
@@ -186,25 +202,25 @@ fn print_mermaid_dag(project: &Project, endpoints: &[Endpoint]) -> Result<()> {
 
         // Add transform nodes
         for node in &endpoint.nodes {
-            let node_id = format!("node_{}", node.node_name);
-            println!("        {}[{}]", node_id, node.transform_name);
+            let node_id = mermaid_id("node", &node.node_name);
+            println!("        {}[\"{}\"]", node_id, node.transform_name);
         }
 
         // Add edges
         for edge in &endpoint.edges {
             let source_id = match edge.source_type {
-                SourceType::DataSource => format!("ds_{}", edge.source_ref),
-                SourceType::Node => format!("node_{}", edge.source_ref),
-                SourceType::External => format!("ext_{}", edge.source_ref),
+                SourceType::DataSource => mermaid_id("ds", &edge.source_ref),
+                SourceType::Node => mermaid_id("node", &edge.source_ref),
+                SourceType::External => mermaid_id("ext", &edge.source_ref),
             };
-            let target_id = format!("node_{}", edge.target_node);
+            let target_id = mermaid_id("node", &edge.target_node);
             println!("        {} --> {}", source_id, target_id);
         }
 
         // Add output node
         if let Some(last_node) = endpoint.nodes.last() {
-            let last_id = format!("node_{}", last_node.node_name);
-            let output_id = format!("out_{}", endpoint.name);
+            let last_id = mermaid_id("node", &last_node.node_name);
+            let output_id = mermaid_id("out", &endpoint.name);
             println!("        {}((output))", output_id);
             println!("        {} --> {}", last_id, output_id);
         }

@@ -47,6 +47,27 @@ pub const DETERMINISTIC_ENV: &[(&str, &str)] = &[
     ("NUMEXPR_NUM_THREADS", "1"),
 ];
 
+/// Validate that a string is a valid Python identifier (safe for use in import/call statements).
+fn validate_python_identifier(name: &str, context: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(Error::RuntimeError(format!("{} is empty", context)));
+    }
+    let first = name.chars().next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return Err(Error::RuntimeError(format!(
+            "{} '{}' is not a valid Python identifier (must start with letter or underscore)",
+            context, name
+        )));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(Error::RuntimeError(format!(
+            "{} '{}' is not a valid Python identifier (only letters, digits, and underscores allowed)",
+            context, name
+        )));
+    }
+    Ok(())
+}
+
 /// Extract transform directory and module name from a transform source path.
 fn extract_transform_info(transform_source: &Path) -> Result<(String, String)> {
     let transform_dir = transform_source
@@ -70,6 +91,8 @@ fn extract_transform_info(transform_source: &Path) -> Result<(String, String)> {
         })?
         .to_string_lossy()
         .to_string();
+
+    validate_python_identifier(&module_name, "Module name")?;
 
     Ok((transform_dir, module_name))
 }
@@ -288,8 +311,9 @@ impl PythonRuntime {
             )));
         }
 
-        // Extract transform info
+        // Extract and validate transform info
         let (transform_dir, module_name) = extract_transform_info(transform_source)?;
+        validate_python_identifier(function_name, "Function name")?;
 
         // Build input loading code with proper escaping
         let input_code = build_sorted_input_load_code(inputs);
@@ -383,8 +407,9 @@ print("SUCCESS")
         params: &serde_json::Value,
         dependencies: &[&str],
     ) -> Result<()> {
-        // Extract transform info
+        // Extract and validate transform info
         let (transform_dir, module_name) = extract_transform_info(transform_source)?;
+        validate_python_identifier(function_name, "Function name")?;
 
         // Build input loading code with proper escaping
         let input_code = build_sorted_input_load_code(inputs);
@@ -496,6 +521,7 @@ pub fn execute_transform_uv(
     })?;
 
     let (transform_dir, module_name) = extract_transform_info(transform_source)?;
+    validate_python_identifier(function_name, "Function name")?;
 
     // Escape paths and identifiers for safe script generation
     let escaped_transform_dir = escape_python_string(&transform_dir);
@@ -590,6 +616,7 @@ pub fn execute_transform_simple(
         .map_err(|_| Error::RuntimeError("Neither uv nor python found in PATH".to_string()))?;
 
     let (transform_dir, module_name) = extract_transform_info(transform_source)?;
+    validate_python_identifier(function_name, "Function name")?;
 
     // Escape paths and identifiers for safe script generation
     let escaped_transform_dir = escape_python_string(&transform_dir);
@@ -674,6 +701,7 @@ pub fn execute_transform_multi(
     })?;
 
     let (transform_dir, module_name) = extract_transform_info(transform_source)?;
+    validate_python_identifier(function_name, "Function name")?;
 
     // Build input loading code for all inputs with proper escaping
     let input_code = build_sorted_input_load_code(inputs);
