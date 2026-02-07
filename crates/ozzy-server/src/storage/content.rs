@@ -134,7 +134,7 @@ impl ContentStorage {
             .put(&path, Bytes::copy_from_slice(content).into())
             .await
         {
-            eprintln!("Warning: failed to mirror content to R2: {}", e);
+            tracing::warn!("failed to mirror content to R2: {}", e);
         }
         Ok(())
     }

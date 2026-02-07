@@ -25,27 +25,33 @@ pub async fn create(message: Option<&str>) -> Result<()> {
     let mut commit = commit_lib::create_commit(&project, message, &author)?;
 
     // Apply staged endpoint deletions/additions to the commit.
+    // Read directory entries once to avoid TOCTOU race between two read_dir calls.
     let staged_dir = project.ozzy_dir().join("staged_endpoints");
     if staged_dir.exists() {
-        for entry in fs::read_dir(&staged_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().map(|e| e == "deleted").unwrap_or(false) {
-                if let Some(stem) = path.file_stem() {
-                    let endpoint_name = stem.to_string_lossy().to_string();
-                    commit.endpoints.remove(&endpoint_name);
-                }
-            }
-        }
+        let mut deletions = Vec::new();
+        let mut additions = Vec::new();
 
         for entry in fs::read_dir(&staged_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map(|e| e == "json").unwrap_or(false) {
-                let content = fs::read_to_string(&path)?;
-                let endpoint: Endpoint = serde_json::from_str(&content)?;
-                commit.endpoints.insert(endpoint.name.clone(), endpoint);
+            match path.extension().and_then(|e| e.to_str()) {
+                Some("deleted") => deletions.push(path),
+                Some("json") => additions.push(path),
+                _ => {}
             }
+        }
+
+        // Apply deletions first, then additions (so re-creating an endpoint works)
+        for path in &deletions {
+            if let Some(stem) = path.file_stem() {
+                let endpoint_name = stem.to_string_lossy().to_string();
+                commit.endpoints.remove(&endpoint_name);
+            }
+        }
+        for path in &additions {
+            let content = fs::read_to_string(path)?;
+            let endpoint: Endpoint = serde_json::from_str(&content)?;
+            commit.endpoints.insert(endpoint.name.clone(), endpoint);
         }
     }
 

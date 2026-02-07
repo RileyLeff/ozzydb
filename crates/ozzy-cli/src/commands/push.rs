@@ -47,10 +47,14 @@ pub async fn run(message: Option<&str>, remote: &str) -> Result<()> {
     let mut data_files: HashMap<String, Vec<u8>> = HashMap::new();
     for (name, ds) in &commit.data_sources {
         let path = project.root.join(&ds.path);
-        if path.exists() {
-            let content = std::fs::read(&path)?;
-            data_files.insert(format!("{}.parquet", name), content);
-        }
+        let content = std::fs::read(&path).with_context(|| {
+            format!(
+                "Data source '{}' referenced in commit but file not found: {}",
+                name,
+                path.display()
+            )
+        })?;
+        data_files.insert(format!("{}.parquet", name), content);
     }
 
     // Collect transform files and lockfiles
@@ -59,10 +63,14 @@ pub async fn run(message: Option<&str>, remote: &str) -> Result<()> {
     let mut seen_lockfile_hashes = std::collections::HashSet::new();
     for (name, t) in &commit.transforms {
         let path = project.root.join(&t.source_path);
-        if path.exists() {
-            let content = std::fs::read(&path)?;
-            transform_files.insert(format!("{}.py", name), content);
-        }
+        let content = std::fs::read(&path).with_context(|| {
+            format!(
+                "Transform '{}' referenced in commit but file not found: {}",
+                name,
+                path.display()
+            )
+        })?;
+        transform_files.insert(format!("{}.py", name), content);
 
         // Collect lockfile if it exists and hasn't been collected yet
         if !t.lockfile_hash.is_empty() && seen_lockfile_hashes.insert(t.lockfile_hash.clone()) {

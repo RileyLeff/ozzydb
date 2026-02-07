@@ -400,8 +400,12 @@ pub fn validate_pipeline(
         }
         result.warnings.extend(step_result.warnings);
 
-        // For now, assume transforms pass through all columns
-        // In a full implementation, we'd track schema changes through transforms
+        // LIMITATION: We validate each transform against the original data source
+        // schema, not against the output of the preceding transform. Accurately
+        // tracking schema evolution requires transforms to declare output_schema
+        // (adds/removes/renames columns). Until that metadata is reliably present,
+        // multi-step pipelines may pass validation even when an intermediate
+        // transform drops a column that a later transform requires.
     }
 
     result

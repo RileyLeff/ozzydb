@@ -16,8 +16,8 @@ package-lock.json
 *.generated.*
 
 # Documentation & planning (not code)
-*.md
-planning/
+planning/outdated/**
+planning/reviews/**
 
 # Python client (separate project)
 clients/

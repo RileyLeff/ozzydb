@@ -476,7 +476,7 @@ async fn push(
     if let Some(tags) = commit_data.get("tags").and_then(|v| v.as_object()) {
         for (tag_name, tag_hash_value) in tags {
             if let Err(e) = ozzy_core::validate_safe_name(tag_name) {
-                eprintln!("Warning: skipping invalid tag '{}': {}", tag_name, e);
+                tracing::warn!("skipping invalid tag '{}': {}", tag_name, e);
                 continue;
             }
             let Some(tag_hash) = tag_hash_value.as_str() else {
@@ -498,7 +498,7 @@ async fn push(
                 .upsert_ref(project.id, tag_name, "tag", tag_commit_id)
                 .await
             {
-                eprintln!("Warning: failed to upsert tag '{}': {}", tag_name, e);
+                tracing::warn!("failed to upsert tag '{}': {}", tag_name, e);
             }
         }
     }
