@@ -188,6 +188,7 @@ impl RegistryClient {
 
     /// Revoke a token by name.
     pub async fn revoke_token(&self, name: &str) -> Result<()> {
+        validate_path_segment(name, "Token name")?;
         let mut request = self
             .client
             .delete(format!("{}/api/v1/auth/token/{}", self.base_url, name));
@@ -423,6 +424,7 @@ impl RegistryClient {
     ) -> Result<PullManifest> {
         let mut url = format!("{}/pull/manifest", self.project_url(owner, project)?);
         if let Some(r) = ref_name {
+            validate_path_segment(r, "Ref name")?;
             url = format!("{}?ref={}", url, r);
         }
 
@@ -456,6 +458,7 @@ impl RegistryClient {
     ) -> Result<Vec<u8>> {
         let mut url = format!("{}/pull", self.project_url(owner, project)?);
         if let Some(r) = ref_name {
+            validate_path_segment(r, "Ref name")?;
             url = format!("{}?ref={}", url, r);
         }
 

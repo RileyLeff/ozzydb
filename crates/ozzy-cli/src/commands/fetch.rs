@@ -203,8 +203,18 @@ fn setup_temp_project(temp_path: &std::path::Path, project_name: &str, owner: &s
     std::fs::create_dir_all(temp_path.join("data"))?;
     std::fs::create_dir_all(temp_path.join("transforms"))?;
 
-    let safe_name = project_name.replace('\\', "\\\\").replace('"', "\\\"");
-    let safe_owner = owner.replace('\\', "\\\\").replace('"', "\\\"");
+    let safe_name = project_name
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    let safe_owner = owner
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
     let config = format!(
         "[project]\nname = \"{}\"\nowner = \"{}\"\n",
         safe_name, safe_owner
