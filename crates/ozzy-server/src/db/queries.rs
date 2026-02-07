@@ -691,7 +691,7 @@ impl Database {
             return Ok(0);
         }
         let total: Option<i64> = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(byte_size), 0) FROM content_refs WHERE content_hash = ANY($1)",
+            "SELECT COALESCE(SUM(byte_size), 0)::BIGINT FROM content_refs WHERE content_hash = ANY($1)",
         )
         .bind(hashes)
         .fetch_one(&self.pool)

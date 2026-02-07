@@ -85,20 +85,20 @@ async fn github_poll(
     let (plaintext_token, token_hash) = tokens::generate_api_token();
     let token_prefix = &plaintext_token[..12.min(plaintext_token.len())];
 
-    // Replace any existing cli-session token atomically within a transaction
-    // to avoid race conditions from concurrent login attempts.
+    // Upsert the cli-session token atomically to avoid race conditions
+    // from concurrent login attempts. INSERT ... ON CONFLICT is safe under
+    // PostgreSQL READ COMMITTED unlike DELETE + INSERT in a transaction.
     {
-        let mut tx = state.db.pool().begin().await.map_err(anyhow::Error::from)?;
-        sqlx::query("DELETE FROM api_tokens WHERE user_id = $1 AND name = $2")
-            .bind(user.id)
-            .bind("cli-session")
-            .execute(&mut *tx)
-            .await
-            .map_err(anyhow::Error::from)?;
         let token_id = uuid::Uuid::new_v4();
         let expires = chrono::Utc::now() + chrono::Duration::days(90);
         sqlx::query(
-            "INSERT INTO api_tokens (id, user_id, name, token_hash, token_prefix, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            r#"INSERT INTO api_tokens (id, user_id, name, token_hash, token_prefix, scopes, expires_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT (user_id, name) DO UPDATE SET
+                   token_hash = EXCLUDED.token_hash,
+                   token_prefix = EXCLUDED.token_prefix,
+                   scopes = EXCLUDED.scopes,
+                   expires_at = EXCLUDED.expires_at"#,
         )
         .bind(token_id)
         .bind(user.id)
@@ -107,10 +107,9 @@ async fn github_poll(
         .bind(token_prefix)
         .bind(&vec!["owner".to_string()])
         .bind(expires)
-        .execute(&mut *tx)
+        .execute(state.db.pool())
         .await
         .map_err(anyhow::Error::from)?;
-        tx.commit().await.map_err(anyhow::Error::from)?;
     }
 
     Ok(Json(AuthResponse {

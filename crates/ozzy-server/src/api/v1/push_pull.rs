@@ -24,6 +24,47 @@ use crate::{
     auth::middleware::{AuthUser, MaybeAuthUser, ScopeAction, WriteAuthUser, has_project_scope},
 };
 
+/// Extract the field name from a Content-Disposition header, including RFC 5987
+/// extended syntax (`name*=utf-8''data%2Fraw.parquet`).
+fn parse_content_disposition_name(headers: &axum::http::HeaderMap) -> Option<String> {
+    let cd = headers.get("content-disposition")?.to_str().ok()?;
+    // Try RFC 5987: name*=charset'language'value
+    if let Some(idx) = cd.find("name*=") {
+        let rest = &cd[idx + 6..];
+        // Skip charset and language: e.g. "utf-8''data%2Fraw.parquet"
+        let value = rest.split("''").nth(1)?;
+        // Take until ';' or end of string, then percent-decode
+        let encoded = value.split(';').next().unwrap_or(value).trim();
+        let decoded = percent_decode(encoded);
+        return Some(decoded);
+    }
+    None
+}
+
+/// Simple percent decoding (e.g., %2F → /).
+fn percent_decode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                result.push(byte as char);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Parse an "endpoint@ref" combined path parameter into (endpoint, ref).
+fn parse_endpoint_ref(combined: &str) -> Result<(&str, &str), ApiError> {
+    combined
+        .split_once('@')
+        .ok_or_else(|| ApiError::bad_request("Expected format: endpoint@ref"))
+}
+
 /// Extract Arrow schema from parquet bytes as a JSON value.
 fn extract_parquet_schema(data: &[u8]) -> Result<serde_json::Value, anyhow::Error> {
     let reader = SerializedFileReader::new(bytes::Bytes::from(data.to_vec()))
@@ -94,15 +135,15 @@ pub fn router() -> Router<AppState> {
         .route("/{owner}/{project}/pull/manifest", get(pull_manifest))
         // Content check for deduplication
         .route("/{owner}/{project}/content/check", post(check_content))
-        // Ref resolution
+        // Ref resolution (endpoint_ref = "endpoint@ref")
         .route(
-            "/resolve/{owner}/{project}/{endpoint}@{ref}",
+            "/resolve/{owner}/{project}/{endpoint_ref}",
             get(resolve_endpoint),
         )
-        // Endpoint fetch
-        .route("/{owner}/{project}/{endpoint}@{ref}", get(fetch_endpoint))
+        // Endpoint fetch (endpoint_ref = "endpoint@ref")
+        .route("/{owner}/{project}/{endpoint_ref}", get(fetch_endpoint))
         .route(
-            "/{owner}/{project}/{endpoint}@{ref}/manifest",
+            "/{owner}/{project}/{endpoint_ref}/manifest",
             get(fetch_endpoint_manifest),
         )
 }
@@ -152,7 +193,15 @@ async fn push(
 
     // Process multipart fields
     while let Some(field) = multipart.next_field().await? {
-        let name = field.name().unwrap_or("").to_string();
+        // Some HTTP clients (reqwest 0.12+) encode field names containing
+        // special characters using RFC 5987 extended syntax:
+        //   name*=utf-8''data%2Fraw.parquet
+        // axum/multer only parses standard `name="..."`, so we fall back to
+        // parsing the Content-Disposition header manually.
+        let name = match field.name() {
+            Some(n) if !n.is_empty() => n.to_string(),
+            _ => parse_content_disposition_name(field.headers()).unwrap_or_default(),
+        };
         let data = field.bytes().await?;
 
         total_upload_size += data.len() as u64;
@@ -805,8 +854,9 @@ async fn pull(
 async fn fetch_endpoint_manifest(
     auth: MaybeAuthUser,
     State(state): State<AppState>,
-    Path((owner, project_slug, endpoint_name, ref_name)): Path<(String, String, String, String)>,
+    Path((owner, project_slug, endpoint_ref)): Path<(String, String, String)>,
 ) -> Result<Json<EndpointManifest>, ApiError> {
+    let (endpoint_name, ref_name) = parse_endpoint_ref(&endpoint_ref)?;
     let project = state
         .db
         .get_project(&owner, &project_slug)
@@ -868,8 +918,9 @@ async fn fetch_endpoint_manifest(
 async fn resolve_endpoint(
     auth: MaybeAuthUser,
     State(state): State<AppState>,
-    Path((owner, project_slug, endpoint_name, ref_name)): Path<(String, String, String, String)>,
+    Path((owner, project_slug, endpoint_ref)): Path<(String, String, String)>,
 ) -> Result<Json<ResolveEndpointResponse>, ApiError> {
+    let (endpoint_name, ref_name) = parse_endpoint_ref(&endpoint_ref)?;
     let project = state
         .db
         .get_project(&owner, &project_slug)
@@ -899,8 +950,8 @@ async fn resolve_endpoint(
     Ok(Json(ResolveEndpointResponse {
         owner,
         project: project_slug,
-        endpoint: endpoint_name,
-        ref_name,
+        endpoint: endpoint_name.to_string(),
+        ref_name: ref_name.to_string(),
         commit_hash: commit.hash,
         definition: endpoint.definition,
     }))
@@ -910,8 +961,9 @@ async fn resolve_endpoint(
 async fn fetch_endpoint(
     auth: MaybeAuthUser,
     State(state): State<AppState>,
-    Path((owner, project_slug, endpoint_name, ref_name)): Path<(String, String, String, String)>,
+    Path((owner, project_slug, endpoint_ref)): Path<(String, String, String)>,
 ) -> Result<Response, ApiError> {
+    let (endpoint_name, ref_name) = parse_endpoint_ref(&endpoint_ref)?;
     let project = state
         .db
         .get_project(&owner, &project_slug)
