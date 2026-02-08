@@ -70,6 +70,7 @@
 		background: var(--gray-900, #1a1a1a);
 		border-radius: var(--radius-lg, 12px);
 		overflow: hidden;
+		min-width: 0;
 	}
 
 	.header {
@@ -137,5 +138,11 @@
 		color: var(--gray-200, #ddd);
 		white-space: pre;
 		tab-size: 2;
+	}
+
+	@media (max-width: 480px) {
+		code {
+			font-size: 11px;
+		}
 	}
 </style>

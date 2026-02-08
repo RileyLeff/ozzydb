@@ -23,7 +23,7 @@ python -c "import ozzydb; print(ozzydb.fetch('alice/weather/daily-forecast'))"`;
 <!-- Hero -->
 <section class="hero">
 	<div class="container hero-inner">
-		<img src="/logo.png" alt="OzzyDB" class="hero-logo" />
+		<img src="/logo.png" alt="OzzyDB" class="hero-logo" width="160" height="178" />
 		<h1 class="hero-tagline">Content-addressed data pipelines</h1>
 		<p class="hero-subtitle">
 			Version, share, and reproduce data pipelines with cryptographic guarantees.
@@ -293,6 +293,7 @@ python -c "import ozzydb; print(ozzydb.fetch('alice/weather/daily-forecast'))"`;
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-md);
+		min-width: 0;
 	}
 
 	.example-label {
@@ -316,6 +317,10 @@ python -c "import ozzydb; print(ozzydb.fetch('alice/weather/daily-forecast'))"`;
 
 		.hero {
 			padding: var(--space-2xl) 0 calc(var(--space-2xl) + 16px);
+		}
+
+		.hero-code {
+			max-width: 100%;
 		}
 	}
 </style>
