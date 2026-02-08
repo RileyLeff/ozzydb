@@ -28,37 +28,7 @@
 <nav class="nav">
 	<div class="nav-inner">
 		<a href="/" class="logo-link">
-			<svg
-				class="logo-svg"
-				viewBox="0 0 32 32"
-				fill="none"
-				xmlns="http://www.w3.org/2000/svg"
-				aria-hidden="true"
-			>
-				<!-- Ears -->
-				<polygon points="4,4 10,14 2,14" fill="var(--white)" />
-				<polygon points="28,4 22,14 30,14" fill="var(--white)" />
-				<polygon points="6,6 10,14 4,14" fill="var(--black)" />
-				<polygon points="26,6 22,14 28,14" fill="var(--black)" />
-				<!-- Head -->
-				<ellipse cx="16" cy="20" rx="13" ry="11" fill="var(--white)" />
-				<!-- Tuxedo mask -->
-				<path d="M8,14 Q16,18 24,14 Q26,20 24,24 Q16,20 8,24 Q6,20 8,14Z" fill="var(--black)" />
-				<!-- Eyes -->
-				<ellipse cx="11" cy="18" rx="2" ry="2.2" fill="var(--green)" />
-				<ellipse cx="21" cy="18" rx="2" ry="2.2" fill="var(--green)" />
-				<ellipse cx="11.4" cy="17.6" rx="0.8" ry="0.9" fill="var(--black)" />
-				<ellipse cx="21.4" cy="17.6" rx="0.8" ry="0.9" fill="var(--black)" />
-				<!-- Nose -->
-				<ellipse cx="16" cy="22" rx="1.5" ry="1" fill="var(--pink)" />
-				<!-- Mouth -->
-				<path d="M14.5,23.5 Q16,25 17.5,23.5" stroke="var(--gray-600)" stroke-width="0.6" fill="none" />
-				<!-- Whiskers -->
-				<line x1="3" y1="20" x2="10" y2="21" stroke="var(--gray-400)" stroke-width="0.5" />
-				<line x1="3" y1="23" x2="10" y2="22.5" stroke="var(--gray-400)" stroke-width="0.5" />
-				<line x1="22" y1="21" x2="29" y2="20" stroke="var(--gray-400)" stroke-width="0.5" />
-				<line x1="22" y1="22.5" x2="29" y2="23" stroke="var(--gray-400)" stroke-width="0.5" />
-			</svg>
+			<img src="/logo-face.png" alt="OzzyDB" class="logo-img" />
 			<span class="logo-text">ozzy</span>
 		</a>
 
@@ -149,9 +119,11 @@
 		color: var(--white);
 	}
 
-	.logo-svg {
-		width: 28px;
-		height: 28px;
+	.logo-img {
+		width: 30px;
+		height: 30px;
+		border-radius: 4px;
+		image-rendering: pixelated;
 	}
 
 	.logo-text {

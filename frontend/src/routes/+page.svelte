@@ -22,6 +22,7 @@ ozzy fetch alice/weather/daily-forecast`;
 <!-- Hero -->
 <section class="hero">
 	<div class="container hero-inner">
+		<img src="/logo.png" alt="OzzyDB" class="hero-logo" />
 		<h1 class="hero-tagline">Content-addressed data pipelines</h1>
 		<p class="hero-subtitle">
 			Version, share, and reproduce data pipelines with cryptographic guarantees.
@@ -147,6 +148,14 @@ ozzy fetch alice/weather/daily-forecast`;
 		flex-direction: column;
 		align-items: center;
 		text-align: center;
+	}
+
+	.hero-logo {
+		width: 160px;
+		height: auto;
+		margin-bottom: var(--space-lg);
+		image-rendering: pixelated;
+		border-radius: var(--radius-lg);
 	}
 
 	.hero-tagline {
