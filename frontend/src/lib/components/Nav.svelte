@@ -28,8 +28,7 @@
 <nav class="nav">
 	<div class="nav-inner">
 		<a href="/" class="logo-link">
-			<img src="/logo-face.png" alt="OzzyDB" class="logo-img" />
-			<span class="logo-text">ozzy</span>
+			<span class="logo-text">OzzyDB</span>
 		</a>
 
 		<div class="nav-right">
@@ -117,13 +116,6 @@
 	.logo-link:hover {
 		text-decoration: none;
 		color: var(--white);
-	}
-
-	.logo-img {
-		width: 30px;
-		height: 30px;
-		border-radius: 4px;
-		image-rendering: pixelated;
 	}
 
 	.logo-text {
