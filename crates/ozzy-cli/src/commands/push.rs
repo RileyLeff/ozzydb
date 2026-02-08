@@ -6,7 +6,7 @@ use ozzy_core::registry::RegistryClient;
 use std::collections::HashMap;
 
 use super::remote::get_remote_url;
-use super::shared::load_credentials;
+use super::shared::resolve_token;
 
 /// Push current commit to a remote registry.
 pub async fn run(message: Option<&str>, remote: &str) -> Result<()> {
@@ -23,13 +23,11 @@ pub async fn run(message: Option<&str>, remote: &str) -> Result<()> {
 
     println!("Pushing to {} ({})...", remote_name, remote_url);
 
-    // Get credentials
-    let creds = load_credentials()?;
-    let registry_creds = creds
-        .get(&remote_url)
-        .context("Not logged in to this registry. Run 'ozzy auth login' first.")?;
+    // Get credentials (OZZY_TOKEN env var takes priority over credentials file)
+    let token = resolve_token(&remote_url)
+        .context("Not logged in. Run 'ozzy auth login' or set OZZY_TOKEN env var.")?;
 
-    let client = RegistryClient::with_token(&remote_url, &registry_creds.access_token);
+    let client = RegistryClient::with_token(&remote_url, &token);
 
     // Parse remote URL to get owner/project
     // Expected format: https://registry.example.com/owner/project or just the base URL

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::remote::get_remote_url;
-use super::shared::{checked_destination, load_credentials, sanitize_archive_relative_path};
+use super::shared::{checked_destination, resolve_token, sanitize_archive_relative_path};
 
 fn prune_unlisted_files(dir: &Path, project_root: &Path, keep: &HashSet<PathBuf>) -> Result<()> {
     if !dir.exists() {
@@ -156,15 +156,9 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>, force: bool) -> R
 
     println!("Pulling from {} ({})...", remote_name, remote_url);
 
-    // Get credentials (optional for public projects)
-    let creds = load_credentials().ok();
-    let token = creds
-        .as_ref()
-        .and_then(|c| c.get(&remote_url))
-        .map(|c| c.access_token.as_str());
-
-    let client = if let Some(t) = token {
-        RegistryClient::with_token(&remote_url, t)
+    // Get credentials (optional for public projects, OZZY_TOKEN takes priority)
+    let client = if let Some(token) = resolve_token(&remote_url) {
+        RegistryClient::with_token(&remote_url, &token)
     } else {
         RegistryClient::new(&remote_url)
     };

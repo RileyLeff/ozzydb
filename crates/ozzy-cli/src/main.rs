@@ -318,6 +318,13 @@ enum AuthCommands {
         registry: Option<String>,
     },
 
+    /// Show authentication status
+    Status {
+        /// Registry URL (defaults to https://api.ozzydb.com)
+        #[arg(long)]
+        registry: Option<String>,
+    },
+
     /// Manage API tokens
     Token {
         #[command(subcommand)]
@@ -471,6 +478,7 @@ async fn main() -> Result<()> {
         Commands::Auth { command } => match command {
             AuthCommands::Login { registry } => commands::auth::login(registry.as_deref()).await,
             AuthCommands::Logout { registry } => commands::auth::logout(registry.as_deref()).await,
+            AuthCommands::Status { registry } => commands::auth::status(registry.as_deref()).await,
             AuthCommands::Token { command } => match command {
                 TokenCommands::Create {
                     name,

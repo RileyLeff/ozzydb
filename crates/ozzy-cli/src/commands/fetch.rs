@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use super::shared::{
-    build_param_overrides, checked_destination, load_credentials, sanitize_archive_relative_path,
+    build_param_overrides, checked_destination, resolve_token, sanitize_archive_relative_path,
 };
 
 /// Parse a remote endpoint reference.
@@ -119,15 +119,9 @@ pub async fn run(
         owner, project, endpoint, ref_name, registry
     );
 
-    // Get credentials (optional for public projects)
-    let creds = load_credentials().ok();
-    let token = creds
-        .as_ref()
-        .and_then(|c| c.get(&registry))
-        .map(|c| c.access_token.as_str());
-
-    let client = if let Some(t) = token {
-        RegistryClient::with_token(&registry, t)
+    // Get credentials (optional for public projects, OZZY_TOKEN takes priority)
+    let client = if let Some(token) = resolve_token(&registry) {
+        RegistryClient::with_token(&registry, &token)
     } else {
         RegistryClient::new(&registry)
     };

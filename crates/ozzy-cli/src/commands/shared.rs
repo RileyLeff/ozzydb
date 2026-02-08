@@ -27,6 +27,21 @@ pub fn load_credentials() -> Result<CredentialsFile> {
     }
 }
 
+/// Resolve an access token for a registry URL.
+///
+/// Priority: `OZZY_TOKEN` env var > credentials file.
+/// Returns `None` if no token is available.
+pub fn resolve_token(registry_url: &str) -> Option<String> {
+    if let Ok(token) = std::env::var("OZZY_TOKEN") {
+        if !token.is_empty() {
+            return Some(token);
+        }
+    }
+    load_credentials()
+        .ok()
+        .and_then(|c| c.get(registry_url).map(|r| r.access_token.clone()))
+}
+
 // ---------------------------------------------------------------------------
 // Staged endpoint deletions
 // ---------------------------------------------------------------------------

@@ -52,6 +52,20 @@ fn save_credentials(creds: &CredentialsFile) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a token for a registry: OZZY_TOKEN env var > credentials file.
+fn resolve_token(registry_url: &str) -> Result<String> {
+    if let Ok(token) = std::env::var("OZZY_TOKEN") {
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+    let creds = load_credentials()?;
+    let registry_creds = creds
+        .get(registry_url)
+        .context("Not logged in. Run 'ozzy auth login' or set OZZY_TOKEN env var.")?;
+    Ok(registry_creds.access_token.clone())
+}
+
 /// Get the default registry URL.
 fn default_registry() -> String {
     std::env::var("OZZY_REGISTRY").unwrap_or_else(|_| "https://api.ozzydb.com".to_string())
@@ -127,6 +141,56 @@ pub async fn login(registry: Option<&str>) -> Result<()> {
     }
 }
 
+/// Show authentication status.
+pub async fn status(registry: Option<&str>) -> Result<()> {
+    let registry_url = registry
+        .map(|s| s.to_string())
+        .unwrap_or_else(default_registry);
+
+    // Check OZZY_TOKEN env var first, then credentials file
+    let (token, source) = match std::env::var("OZZY_TOKEN").ok().filter(|t| !t.is_empty()) {
+        Some(env_token) => (Some(env_token), "OZZY_TOKEN env var"),
+        None => {
+            let creds = load_credentials()?;
+            match creds.get(&registry_url) {
+                Some(registry_creds) => (
+                    Some(registry_creds.access_token.clone()),
+                    "credentials file",
+                ),
+                None => (None, ""),
+            }
+        }
+    };
+
+    let Some(token) = token else {
+        println!("Not authenticated.");
+        println!();
+        println!("To log in:           ozzy auth login");
+        println!("Or set env var:      export OZZY_TOKEN=<your-token>");
+        return Ok(());
+    };
+
+    // Try to validate the token against the API
+    let client = ozzy_core::registry::RegistryClient::with_token(&registry_url, &token);
+    match client.get_me().await {
+        Ok(user) => {
+            println!("Authenticated as {} (via {})", user.username, source);
+            println!("  Registry: {}", registry_url);
+            if let Some(email) = &user.email {
+                println!("  Email:    {}", email);
+            }
+        }
+        Err(e) => {
+            println!("Token found (via {}) but validation failed:", source);
+            println!("  {}", e);
+            println!();
+            println!("Try logging in again: ozzy auth login");
+        }
+    }
+
+    Ok(())
+}
+
 /// Logout from a registry.
 pub async fn logout(registry: Option<&str>) -> Result<()> {
     let registry_url = registry
@@ -160,12 +224,8 @@ pub async fn token_create(
         .map(|s| s.to_string())
         .unwrap_or_else(default_registry);
 
-    let creds = load_credentials()?;
-    let registry_creds = creds
-        .get(&registry_url)
-        .context("Not logged in. Run 'ozzy auth login' first.")?;
-
-    let client = RegistryClient::with_token(&registry_url, &registry_creds.access_token);
+    let token = resolve_token(&registry_url)?;
+    let client = RegistryClient::with_token(&registry_url, &token);
 
     let token_response = client.create_token(name, scopes, expires_days).await?;
 
@@ -184,12 +244,8 @@ pub async fn token_list(registry: Option<&str>) -> Result<()> {
         .map(|s| s.to_string())
         .unwrap_or_else(default_registry);
 
-    let creds = load_credentials()?;
-    let registry_creds = creds
-        .get(&registry_url)
-        .context("Not logged in. Run 'ozzy auth login' first.")?;
-
-    let client = RegistryClient::with_token(&registry_url, &registry_creds.access_token);
+    let token = resolve_token(&registry_url)?;
+    let client = RegistryClient::with_token(&registry_url, &token);
 
     let tokens = client.list_tokens().await?;
 
@@ -219,12 +275,8 @@ pub async fn token_revoke(name: &str, registry: Option<&str>) -> Result<()> {
         .map(|s| s.to_string())
         .unwrap_or_else(default_registry);
 
-    let creds = load_credentials()?;
-    let registry_creds = creds
-        .get(&registry_url)
-        .context("Not logged in. Run 'ozzy auth login' first.")?;
-
-    let client = RegistryClient::with_token(&registry_url, &registry_creds.access_token);
+    let token = resolve_token(&registry_url)?;
+    let client = RegistryClient::with_token(&registry_url, &token);
 
     client.revoke_token(name).await?;
 
