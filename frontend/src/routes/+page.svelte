@@ -129,7 +129,7 @@ ozzy run forecast`;
 				<h3 class="feature-title">One platform for everyone</h3>
 				<p class="feature-description">
 					Every lab, department, and field station shouldn't have to build
-					its own data hosting. OzzyDB is the shared platform &mdash; upload,
+					its own data hosting. OzzyDB is the shared platform: upload,
 					version, and deliver data without becoming a part-time DevOps engineer.
 				</p>
 			</div>
@@ -143,9 +143,9 @@ ozzy run forecast`;
 				</div>
 				<h3 class="feature-title">Bring your own tools</h3>
 				<p class="feature-description">
-					No DSL. No config language. Write Python functions with polars,
-					numpy, scipy &mdash; whatever you already know. Your code works
-					outside OzzyDB just fine. OzzyDB just remembers what you did.
+					No DSL. No config language. Write ordinary functions with the
+					libraries you already know. Your code works outside OzzyDB
+					just fine. OzzyDB just remembers what you did.
 				</p>
 			</div>
 
@@ -156,11 +156,11 @@ ozzy run forecast`;
 						<circle cx="12" cy="12" r="3" />
 					</svg>
 				</div>
-				<h3 class="feature-title">Transparent methodology</h3>
+				<h3 class="feature-title">Your process is your data</h3>
 				<p class="feature-description">
 					"We cleaned the data" should mean something verifiable.
 					Every step is code. Every parameter is recorded. Every decision
-					is inspectable. What you did IS the data.
+					is inspectable. The methodology is the dataset.
 				</p>
 			</div>
 
@@ -172,9 +172,9 @@ ozzy run forecast`;
 				</div>
 				<h3 class="feature-title">Efficient by design</h3>
 				<p class="feature-description">
-					A unit conversion on a million rows is perfectly described by
+					A unit conversion on a trillion rows is perfectly described by
 					a one-line function. OzzyDB stores the recipe, materializes
-					on demand, and caches the result.
+					into data on demand, and caches the result.
 				</p>
 			</div>
 
@@ -189,9 +189,9 @@ ozzy run forecast`;
 				</div>
 				<h3 class="feature-title">Cite the exact thing</h3>
 				<p class="feature-description">
-					Not "the dataset" &mdash; the dataset, cleaned this way, with
-					these parameters, at this version. One command to reproduce
-					exactly what someone had in 2024, 2030, or 2040.
+					Not "the dataset," but the dataset, cleaned this way, with
+					these parameters, at this version. One hash to reproduce
+					exactly what someone had. DOI minting coming soon.
 				</p>
 			</div>
 
@@ -207,7 +207,7 @@ ozzy run forecast`;
 				<p class="feature-description">
 					Lab A publishes a QC pipeline. Lab B chains their analysis off it.
 					The computation graph grows across the community. A data catalog
-					stores files &mdash; OzzyDB stores a living computation graph.
+					stores files. OzzyDB stores a living computation graph.
 				</p>
 			</div>
 		</div>
