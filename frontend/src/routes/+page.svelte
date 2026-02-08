@@ -15,8 +15,6 @@ ozzy transform add clean.py
 ozzy endpoint create forecast --pipeline "measurements -> clean"
 ozzy run forecast`;
 
-	const quickStart = `uv add ozzydb
-python -c "import ozzydb; print(ozzydb.fetch('alice/weather/daily-forecast'))"`;
 
 </script>
 
@@ -54,8 +52,57 @@ python -c "import ozzydb; print(ozzydb.fetch('alice/weather/daily-forecast'))"`;
 			</a>
 		</div>
 
-		<div class="hero-code">
-			<CodeSnippet code={quickStart} language="bash" title="Quick start" />
+		<div class="hero-demo">
+			<!-- Terminal: install -->
+			<div class="demo-panel">
+				<div class="panel-bar">
+					<div class="bar-dots"><span></span><span></span><span></span></div>
+					<span class="bar-title">terminal</span>
+				</div>
+				<div class="panel-body terminal-body">
+					<code class="terminal-line"><span class="prompt">$</span> uv add ozzydb</code>
+				</div>
+			</div>
+
+			<!-- Editor: script -->
+			<div class="demo-panel">
+				<div class="panel-bar">
+					<span class="file-tab">
+						<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+						app.py
+					</span>
+				</div>
+				<div class="panel-body editor-body">
+					<div class="editor-line"><span class="ln">1</span><span class="kw">import</span> ozzydb</div>
+					<div class="editor-line"><span class="ln">2</span> </div>
+					<div class="editor-line"><span class="ln">3</span>df = ozzydb.<span class="fn">fetch</span>(<span class="st">"acme/sales/weekly"</span>)</div>
+					<div class="editor-line"><span class="ln">4</span><span class="fn">print</span>(df)</div>
+				</div>
+			</div>
+
+			<!-- Output: polars DataFrame -->
+			<div class="demo-panel">
+				<div class="panel-bar">
+					<span class="bar-title">
+						<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+						output
+					</span>
+				</div>
+				<div class="panel-body output-body">
+					<div class="df-shape">shape: (3, 3)</div>
+					<table class="df-table">
+						<thead>
+							<tr class="df-cols"><th>week</th><th>revenue</th><th>region</th></tr>
+							<tr class="df-types"><td>str</td><td>f64</td><td>str</td></tr>
+						</thead>
+						<tbody>
+							<tr><td>W1</td><td>2847.50</td><td>East</td></tr>
+							<tr><td>W2</td><td>3201.00</td><td>West</td></tr>
+							<tr><td>W3</td><td>2955.75</td><td>East</td></tr>
+						</tbody>
+					</table>
+				</div>
+			</div>
 		</div>
 	</div>
 </section>
@@ -210,10 +257,173 @@ python -c "import ozzydb; print(ozzydb.fetch('alice/weather/daily-forecast'))"`;
 		text-decoration: none;
 	}
 
-	.hero-code {
+	/* ── Hero demo card ──────────────────────────────────── */
+
+	.hero-demo {
 		margin-top: var(--space-2xl);
 		width: 100%;
 		max-width: 520px;
+		border-radius: var(--radius-lg);
+		overflow: hidden;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		text-align: left;
+	}
+
+	.demo-panel + .demo-panel {
+		border-top: 1px solid rgba(255, 255, 255, 0.06);
+	}
+
+	.panel-bar {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 8px 14px;
+		background: rgba(255, 255, 255, 0.03);
+		border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+	}
+
+	.bar-dots {
+		display: flex;
+		gap: 5px;
+	}
+
+	.bar-dots span {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: rgba(255, 255, 255, 0.12);
+	}
+
+	.bar-title {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--gray-500);
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+	}
+
+	.file-tab {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--gray-400);
+		padding: 2px 8px;
+		background: rgba(255, 255, 255, 0.05);
+		border-radius: 4px;
+	}
+
+	.file-tab svg {
+		opacity: 0.5;
+	}
+
+	.panel-body {
+		padding: 12px 14px;
+		background: var(--gray-900);
+	}
+
+	/* Terminal */
+	.terminal-body {
+		padding: 10px 14px;
+	}
+
+	.terminal-line {
+		font-family: var(--font-mono);
+		font-size: 12.5px;
+		color: var(--gray-200);
+		line-height: 1.6;
+	}
+
+	.prompt {
+		color: var(--pink);
+		margin-right: 6px;
+		user-select: none;
+	}
+
+	/* Editor */
+	.editor-body {
+		padding: 10px 0 10px 0;
+		overflow-x: auto;
+	}
+
+	.editor-line {
+		font-family: var(--font-mono);
+		font-size: 12.5px;
+		color: var(--gray-200);
+		line-height: 1.7;
+		padding: 0 14px;
+		white-space: pre;
+		min-height: 1.7em;
+	}
+
+	.editor-line:hover {
+		background: rgba(255, 255, 255, 0.02);
+	}
+
+	.ln {
+		display: inline-block;
+		width: 22px;
+		color: var(--gray-600);
+		text-align: right;
+		margin-right: 14px;
+		user-select: none;
+		white-space: normal;
+	}
+
+	.kw { color: var(--pink); }
+	.st { color: var(--green); }
+	.fn { color: #ddd; }
+
+	/* Output */
+	.output-body {
+		padding: 10px 14px;
+	}
+
+	.df-shape {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--gray-500);
+		margin-bottom: 6px;
+	}
+
+	.df-table {
+		width: 100%;
+		border-collapse: collapse;
+		font-family: var(--font-mono);
+		font-size: 11.5px;
+		table-layout: auto;
+	}
+
+	.df-table th,
+	.df-table td {
+		padding: 3px 10px;
+		text-align: left;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		white-space: nowrap;
+	}
+
+	.df-cols th {
+		color: var(--gray-200);
+		font-weight: 600;
+		background: rgba(255, 255, 255, 0.03);
+	}
+
+	.df-types td {
+		color: var(--gray-600);
+		font-weight: 400;
+		font-size: 10.5px;
+		font-style: italic;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+	}
+
+	.df-table tbody td {
+		color: var(--gray-300);
+	}
+
+	.df-table tbody tr:hover {
+		background: rgba(255, 255, 255, 0.02);
 	}
 
 	/* ── How it works ─────────────────────────────────────── */
@@ -319,8 +529,21 @@ python -c "import ozzydb; print(ozzydb.fetch('alice/weather/daily-forecast'))"`;
 			padding: var(--space-2xl) 0 calc(var(--space-2xl) + 16px);
 		}
 
-		.hero-code {
+		.hero-demo {
 			max-width: 100%;
+		}
+
+		.terminal-line,
+		.editor-line {
+			font-size: 11px;
+		}
+
+		.df-table {
+			font-size: 11px;
+		}
+
+		.df-types td {
+			font-size: 10px;
 		}
 	}
 </style>
