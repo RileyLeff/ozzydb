@@ -306,14 +306,14 @@ enum CacheCommands {
 enum AuthCommands {
     /// Login to registry via GitHub
     Login {
-        /// Registry URL (defaults to https://registry.ozzydb.dev)
+        /// Registry URL (defaults to https://api.ozzydb.com)
         #[arg(long)]
         registry: Option<String>,
     },
 
     /// Logout from registry
     Logout {
-        /// Registry URL (defaults to https://registry.ozzydb.dev)
+        /// Registry URL (defaults to https://api.ozzydb.com)
         #[arg(long)]
         registry: Option<String>,
     },

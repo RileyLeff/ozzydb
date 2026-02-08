@@ -66,7 +66,7 @@ fn parse_endpoint_ref(
 
 /// Get the default registry URL.
 fn default_registry() -> String {
-    std::env::var("OZZY_REGISTRY").unwrap_or_else(|_| "https://registry.ozzydb.dev".to_string())
+    std::env::var("OZZY_REGISTRY").unwrap_or_else(|_| "https://api.ozzydb.com".to_string())
 }
 
 /// Set up a temp directory as a minimal ozzy project for execution.

@@ -54,7 +54,7 @@ fn save_credentials(creds: &CredentialsFile) -> Result<()> {
 
 /// Get the default registry URL.
 fn default_registry() -> String {
-    std::env::var("OZZY_REGISTRY").unwrap_or_else(|_| "https://registry.ozzydb.dev".to_string())
+    std::env::var("OZZY_REGISTRY").unwrap_or_else(|_| "https://api.ozzydb.com".to_string())
 }
 
 /// Login to a registry using GitHub device flow.
