@@ -458,7 +458,7 @@ Polite, chatty, playful.
 
 ## Implementation Plan
 
-### 0. Remove dead code from Phase 2
+### 0. Remove dead code from Phase 2 [DONE]
 
 The Phase 2 tiered cache (local L1 + S3 L2) is obsoleted by the server's R2
 materialized cache. Remove the remote cache subsystem and its CLI commands.
@@ -484,7 +484,7 @@ materialized cache. Remove the remote cache subsystem and its CLI commands.
 
 **Scope:** Net deletion. ~400 lines removed.
 
-### 1. R2-only storage
+### 1. R2-only storage [DONE]
 
 Flip `ContentStorage` from local-first to R2-primary.
 
@@ -495,7 +495,7 @@ Flip `ContentStorage` from local-first to R2-primary.
 
 **Scope:** ~100 lines changed.
 
-### 2. Server-side transform execution
+### 2. Server-side transform execution [DONE]
 
 Add `compute` module to `ozzy-server`.
 
@@ -514,7 +514,7 @@ Add `compute` module to `ozzy-server`.
 
 **Scope:** ~500-800 lines.
 
-### 3. End-to-end tests
+### 3. End-to-end tests [DONE]
 
 Automated tests against Docker Compose (postgres + minio + gvisor).
 
@@ -533,17 +533,19 @@ Automated tests against Docker Compose (postgres + minio + gvisor).
 - Collaborator access control
 - Private project visibility
 
-### 4. Deploy to Hetzner
+### 4. Deploy to Hetzner [DONE]
 
-1. Provision Hetzner VPS (CX22: 2 vCPU, 4GB RAM)
-2. Install gVisor (`apt install runsc`, set as Docker default runtime)
-3. Register GitHub OAuth App for `registry.ozzydb.dev`
-4. Create Cloudflare R2 bucket (`ozzy-content`)
-5. DNS: `registry.ozzydb.dev` -> Hetzner IP
-6. `.env.prod` with credentials
-7. `docker compose -f docker-compose.prod.yml up -d`
-8. Caddy auto-provisions TLS
-9. Smoke test: full push/fetch cycle from CLI
+Deployed to Hetzner CX22 (2 vCPU, 4GB RAM) at `46.225.111.110`.
+- Docker + gVisor (runsc) installed
+- PostgreSQL 17 + Caddy + ozzy-server in Docker Compose
+- TLS via Caddy auto-provisioning (Let's Encrypt)
+- API at `https://api.ozzydb.com`
+- Local-only storage (no R2 yet)
+- Registration restricted via `ALLOWED_LOGINS=rileyleff`
+- Server-side compute enabled with gVisor runtime
+- GitHub OAuth device flow working
+
+**To update:** `cd /opt/ozzydb && git pull && cd crates/ozzy-server/docker && docker compose -f docker-compose.prod.yml --env-file .env.prod build server && docker compose -f docker-compose.prod.yml --env-file .env.prod up -d`
 
 **Ongoing ops:** `pg_dump` -> R2 backups, `/health` monitoring, `docker logs`.
 
