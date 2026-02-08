@@ -22,11 +22,8 @@ ozzy run forecast`;
 <section class="hero">
 	<div class="container hero-inner">
 		<img src="/logo.png" alt="OzzyDB" class="hero-logo" width="160" height="178" />
-		<h1 class="hero-tagline">Content-addressed data pipelines</h1>
-		<p class="hero-subtitle">
-			Version, share, and reproduce data pipelines with cryptographic guarantees.
-			Git for data pipelines.
-		</p>
+		<h1 class="hero-tagline">Data as functions, not files</h1>
+		<p class="hero-subtitle">A new kind of database.</p>
 
 		<div class="hero-ctas">
 			<a href="/docs" class="btn btn-primary btn-lg">Get started</a>
@@ -115,53 +112,102 @@ ozzy run forecast`;
 <!-- Divider -->
 <WavyDivider />
 
-<!-- How it works -->
+<!-- Why OzzyDB -->
 <section class="how-it-works">
 	<div class="container">
-		<h2 class="section-heading">How it works</h2>
+		<h2 class="section-heading">Why OzzyDB</h2>
 
 		<div class="features-grid">
 			<div class="feature-card">
 				<div class="feature-icon">
 					<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-						<rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-						<path d="M7 11V7a5 5 0 0110 0v4" />
+						<circle cx="12" cy="12" r="10" />
+						<line x1="2" y1="12" x2="22" y2="12" />
+						<path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
 					</svg>
 				</div>
-				<h3 class="feature-title">Content-addressed</h3>
+				<h3 class="feature-title">One platform for everyone</h3>
 				<p class="feature-description">
-					Every data source, transform, and output is hashed with BLAKE3.
-					Same inputs always produce the same cache key.
+					Every lab, department, and field station shouldn't have to build
+					its own data hosting. OzzyDB is the shared platform &mdash; upload,
+					version, and deliver data without becoming a part-time DevOps engineer.
 				</p>
 			</div>
 
 			<div class="feature-card">
 				<div class="feature-icon">
 					<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-						<polyline points="16 18 22 12 16 6" />
-						<polyline points="8 6 2 12 8 18" />
+						<circle cx="12" cy="12" r="3" />
+						<path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
 					</svg>
 				</div>
-				<h3 class="feature-title">Reproducible</h3>
+				<h3 class="feature-title">Bring your own tools</h3>
 				<p class="feature-description">
-					Platform fingerprinting and deterministic execution. Your pipeline
-					runs the same everywhere.
+					No DSL. No config language. Write Python functions with polars,
+					numpy, scipy &mdash; whatever you already know. Your code works
+					outside OzzyDB just fine. OzzyDB just remembers what you did.
 				</p>
 			</div>
 
 			<div class="feature-card">
 				<div class="feature-icon">
 					<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-						<path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
-						<circle cx="9" cy="7" r="4" />
-						<path d="M23 21v-2a4 4 0 00-3-3.87" />
-						<path d="M16 3.13a4 4 0 010 7.75" />
+						<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+						<circle cx="12" cy="12" r="3" />
 					</svg>
 				</div>
-				<h3 class="feature-title">Collaborative</h3>
+				<h3 class="feature-title">Transparent methodology</h3>
 				<p class="feature-description">
-					Push and pull projects like git. Share endpoints across teams
-					and organizations.
+					"We cleaned the data" should mean something verifiable.
+					Every step is code. Every parameter is recorded. Every decision
+					is inspectable. What you did IS the data.
+				</p>
+			</div>
+
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+					</svg>
+				</div>
+				<h3 class="feature-title">Efficient by design</h3>
+				<p class="feature-description">
+					A unit conversion on a million rows is perfectly described by
+					a one-line function. OzzyDB stores the recipe, materializes
+					on demand, and caches the result.
+				</p>
+			</div>
+
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<line x1="4" y1="9" x2="20" y2="9" />
+						<line x1="4" y1="15" x2="20" y2="15" />
+						<line x1="10" y1="3" x2="8" y2="21" />
+						<line x1="16" y1="3" x2="14" y2="21" />
+					</svg>
+				</div>
+				<h3 class="feature-title">Cite the exact thing</h3>
+				<p class="feature-description">
+					Not "the dataset" &mdash; the dataset, cleaned this way, with
+					these parameters, at this version. One command to reproduce
+					exactly what someone had in 2024, 2030, or 2040.
+				</p>
+			</div>
+
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<circle cx="18" cy="18" r="3" />
+						<circle cx="6" cy="6" r="3" />
+						<path d="M6 21V9a9 9 0 009 9" />
+					</svg>
+				</div>
+				<h3 class="feature-title">Build on each other's work</h3>
+				<p class="feature-description">
+					Lab A publishes a QC pipeline. Lab B chains their analysis off it.
+					The computation graph grows across the community. A data catalog
+					stores files &mdash; OzzyDB stores a living computation graph.
 				</p>
 			</div>
 		</div>
@@ -527,10 +573,19 @@ ozzy run forecast`;
 
 	/* ── Responsive ───────────────────────────────────────── */
 
-	@media (max-width: 768px) {
+	@media (max-width: 1024px) {
+		.features-grid {
+			grid-template-columns: repeat(2, 1fr);
+		}
+	}
+
+	@media (max-width: 640px) {
 		.features-grid {
 			grid-template-columns: 1fr;
 		}
+	}
+
+	@media (max-width: 768px) {
 
 		.examples-grid {
 			grid-template-columns: 1fr;
