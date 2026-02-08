@@ -706,12 +706,28 @@ mod tests {
 
     #[test]
     fn test_validate_safe_name_strict_ascii_pattern() {
+        // Valid names
         assert!(validate_safe_name("main").is_ok());
         assert!(validate_safe_name("branch_1-test").is_ok());
         assert!(validate_safe_name("v1.0.0").is_ok());
+        assert!(validate_safe_name("UPPERCASE").is_ok());
+
+        // Invalid: traversal and hidden
         assert!(validate_safe_name(".hidden").is_err());
-        assert!(validate_safe_name("has space").is_err());
         assert!(validate_safe_name("../escape").is_err());
+        assert!(validate_safe_name("..").is_err());
+
+        // Invalid: special chars (R6 finding)
+        assert!(validate_safe_name("has space").is_err());
+        assert!(validate_safe_name("has/slash").is_err());
+        assert!(validate_safe_name("has\\backslash").is_err());
+        assert!(validate_safe_name("has\ttab").is_err());
+        assert!(validate_safe_name("has\nnewline").is_err());
+        assert!(validate_safe_name("").is_err());
+
+        // Invalid: unicode
+        assert!(validate_safe_name("caf\u{00e9}").is_err());
+        assert!(validate_safe_name("\u{1F600}").is_err());
     }
 
     #[test]

@@ -107,6 +107,15 @@ pub fn checked_destination(base: &Path, canonical_base: &Path, rel: &Path) -> Re
     }
 
     if dest.exists() {
+        // Reject symlinks to prevent following them to write outside the root.
+        // Use symlink_metadata (does not follow symlinks) to detect this.
+        let meta = dest.symlink_metadata()?;
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "Refusing to overwrite symlink during archive extraction: {}",
+                rel.display()
+            );
+        }
         let canonical_dest = dest.canonicalize()?;
         if !canonical_dest.starts_with(canonical_base) {
             anyhow::bail!(

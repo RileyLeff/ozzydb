@@ -40,13 +40,14 @@ async fn main() -> Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("Database migrations complete");
 
-    // Initialize storage (local NVMe primary, optional R2 redundancy)
+    // Initialize storage (R2 primary when configured, local cache for reads)
     let storage = ContentStorage::from_config(&config)?;
-    tracing::info!("Local storage initialized at {}", config.local_storage_path);
     if let Some(r2) = &config.r2 {
-        tracing::info!("R2 redundancy enabled: {}/{}", r2.endpoint, r2.bucket);
+        tracing::info!("R2 storage: {}/{}", r2.endpoint, r2.bucket);
+        tracing::info!("Local cache at {}", config.cache_dir);
     } else {
-        tracing::info!("R2 redundancy disabled");
+        tracing::info!("Running in local-only mode (no R2 configured)");
+        tracing::info!("Local storage at {}", config.cache_dir);
     }
 
     // Build application state

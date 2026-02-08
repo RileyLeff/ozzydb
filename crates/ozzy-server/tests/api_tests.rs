@@ -30,7 +30,7 @@ async fn build_test_app() -> Option<Router> {
 
     sqlx::migrate!("./migrations").run(&pool).await.ok()?;
 
-    let local_storage_path = tempfile::tempdir().ok()?.into_path();
+    let cache_dir = tempfile::tempdir().ok()?.into_path();
 
     let config = Config {
         bind_address: "127.0.0.1:0".to_string(),
@@ -39,7 +39,7 @@ async fn build_test_app() -> Option<Router> {
         github_client_id: "test_client_id".to_string(),
         github_client_secret: "test_client_secret".to_string(),
         base_url: "http://localhost:3000".to_string(),
-        local_storage_path: local_storage_path.to_string_lossy().to_string(),
+        cache_dir: cache_dir.to_string_lossy().to_string(),
         r2: match (r2_endpoint, r2_bucket, r2_access_key, r2_secret) {
             (Some(endpoint), Some(bucket), Some(access_key_id), Some(secret_access_key)) => {
                 Some(ozzy_server::config::R2Config {

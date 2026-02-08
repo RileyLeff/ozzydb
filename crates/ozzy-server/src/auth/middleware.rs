@@ -27,6 +27,15 @@ pub struct WriteAuthUser {
     pub scopes: Vec<String>,
 }
 
+/// Authenticated user with unscoped read (for account-wide endpoints like /auth/me, /auth/token).
+/// Rejects project-scoped tokens (e.g. "read:alice/project1") since those should not
+/// grant access to account management operations.
+#[derive(Debug, Clone)]
+pub struct AccountAuthUser {
+    pub user: User,
+    pub scopes: Vec<String>,
+}
+
 /// Optional authenticated user (for public endpoints).
 #[derive(Debug, Clone)]
 pub struct MaybeAuthUser {
@@ -137,6 +146,20 @@ pub fn has_any_scope(scopes: &[String], need: ScopeAction) -> bool {
     })
 }
 
+/// Check whether the token has an unscoped (account-wide) scope at the given level.
+/// Project-scoped tokens like "read:alice/project1" do NOT satisfy this check.
+pub fn has_unscoped_scope(scopes: &[String], need: ScopeAction) -> bool {
+    scopes.iter().any(|scope| {
+        parse_scope(scope)
+            .map(|parsed| {
+                action_implies(parsed.action, need)
+                    && parsed.owner.is_none()
+                    && parsed.project.is_none()
+            })
+            .unwrap_or(false)
+    })
+}
+
 pub fn has_project_scope(scopes: &[String], need: ScopeAction, owner: &str, project: &str) -> bool {
     scopes.iter().any(|scope| {
         parse_scope(scope)
@@ -200,6 +223,24 @@ impl FromRequestParts<AppState> for WriteAuthUser {
                 return Err(AuthError::InsufficientScope);
             }
             Ok(WriteAuthUser { user, scopes })
+        }
+    }
+}
+
+impl FromRequestParts<AppState> for AccountAuthUser {
+    type Rejection = AuthError;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        async move {
+            let token = extract_token(parts)?;
+            let (user, scopes) = validate_token_with_scopes(&state.db, &token).await?;
+            if !has_unscoped_scope(&scopes, ScopeAction::Read) {
+                return Err(AuthError::InsufficientScope);
+            }
+            Ok(AccountAuthUser { user, scopes })
         }
     }
 }
@@ -349,7 +390,7 @@ impl IntoResponse for AuthError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScopeAction, can_delegate_scopes, has_any_scope, has_project_scope};
+    use super::{ScopeAction, can_delegate_scopes, has_any_scope, has_project_scope, has_unscoped_scope};
 
     #[test]
     fn read_scope_accepts_read_and_write() {
@@ -412,6 +453,30 @@ mod tests {
             "bob",
             "sapflux"
         ));
+    }
+
+    #[test]
+    fn unscoped_scope_rejects_project_scoped_tokens() {
+        // Project-scoped tokens should NOT satisfy unscoped check
+        assert!(!has_unscoped_scope(
+            &["read:alice/sapflux".to_string()],
+            ScopeAction::Read
+        ));
+        assert!(!has_unscoped_scope(
+            &["write:alice/*".to_string()],
+            ScopeAction::Read
+        ));
+        // Unscoped tokens SHOULD satisfy unscoped check
+        assert!(has_unscoped_scope(
+            &["read".to_string()],
+            ScopeAction::Read
+        ));
+        assert!(has_unscoped_scope(
+            &["owner".to_string()],
+            ScopeAction::Read
+        ));
+        // Empty scopes should not satisfy
+        assert!(!has_unscoped_scope(&[], ScopeAction::Read));
     }
 
     #[test]

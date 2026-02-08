@@ -23,10 +23,10 @@ pub struct Config {
     /// Base URL for this server (for OAuth callbacks)
     pub base_url: String,
 
-    /// Local filesystem storage root (NVMe primary).
-    pub local_storage_path: String,
+    /// Local cache directory for read-through caching of R2 content.
+    pub cache_dir: String,
 
-    /// Optional R2/S3 redundancy backend.
+    /// Optional R2/S3 storage backend (primary when configured).
     pub r2: Option<R2Config>,
 
     /// Maximum tar archive size in bytes (default: 1GB)
@@ -74,7 +74,7 @@ impl Config {
             github_client_secret: std::env::var("GITHUB_CLIENT_SECRET")
                 .context("GITHUB_CLIENT_SECRET environment variable required")?,
             base_url: std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3000".into()),
-            local_storage_path: std::env::var("LOCAL_STORAGE_PATH")
+            cache_dir: std::env::var("LOCAL_STORAGE_PATH")
                 .unwrap_or_else(|_| "/tmp/ozzydb-content".into()),
             r2: R2Config::from_env_optional(),
             max_tar_size_bytes: std::env::var("MAX_TAR_SIZE_BYTES")

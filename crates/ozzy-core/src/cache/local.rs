@@ -300,9 +300,13 @@ impl LocalCache {
     /// Look up a cache entry's file path without updating access statistics.
     fn get_path_only(&self, hash: &str) -> Result<Option<PathBuf>> {
         let conn = self.connect()?;
-        let mut stmt =
-            conn.prepare("SELECT file_path FROM cache_entries WHERE materialized_hash = ?")?;
-        let path: Option<String> = stmt.query_row([hash], |row| row.get(0)).ok();
+        let path: Option<String> = conn
+            .query_row(
+                "SELECT file_path FROM cache_entries WHERE materialized_hash = ?",
+                [hash],
+                |row| row.get(0),
+            )
+            .optional()?;
         Ok(path.map(PathBuf::from))
     }
 

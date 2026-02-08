@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Literal, Optional, Union, overload
 
@@ -159,8 +160,6 @@ def fetch(
         return _fetch_local(ref, as_pandas=as_pandas, override_params=override_params, force=force)
     else:
         if force:
-            import warnings
-
             warnings.warn(
                 "force=True is not supported for remote refs and will be ignored",
                 stacklevel=2,
@@ -385,8 +384,6 @@ def _ozzy_type_to_arrow(type_str: str) -> pa.DataType:
             val_type = _ozzy_type_to_arrow(inner[split_pos + 1 :].strip())
             return pa.dictionary(key_type, val_type)
     # Fallback with warning
-    import warnings
-
     warnings.warn(
         f"Unknown Arrow type '{type_str}', falling back to utf8",
         stacklevel=2,

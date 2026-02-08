@@ -1,7 +1,10 @@
-//! Content-addressed storage with local-first writes and optional R2 redundancy.
+//! Content-addressed storage: R2-primary with local read-through cache.
 //!
-//! Files are addressed by BLAKE3 content hash.
-//! Layout: {root}/{prefix}/{hash[0:2]}/{hash[2:4]}/{hash}.{ext}
+//! When R2 is configured, it is the single source of truth. Local disk serves
+//! as a read-through cache for fast repeated reads.
+//! When R2 is not configured (dev/test), local disk is the primary store.
+//!
+//! Layout: {prefix}/{hash[0:2]}/{hash[2:4]}/{hash}.{ext}
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -16,10 +19,13 @@ use std::sync::Arc;
 
 use crate::config::{Config, R2Config};
 
-/// Content-addressed storage backend using local filesystem as primary with optional R2 mirror.
+/// Content-addressed storage backend.
+///
+/// When R2 is configured: R2 is the source of truth, local disk is a cache.
+/// When R2 is not configured: local disk is the primary store (dev/test mode).
 #[derive(Clone)]
 pub struct ContentStorage {
-    local_root: PathBuf,
+    cache_dir: PathBuf,
     remote_store: Option<Arc<dyn ObjectStore>>,
     prefix: String,
 }
@@ -48,32 +54,35 @@ impl ContentStorage {
         Ok(Arc::new(store))
     }
 
-    fn default_local_root() -> PathBuf {
+    fn default_cache_dir() -> PathBuf {
         std::env::temp_dir().join("ozzydb-content")
     }
 
-    fn new_with_root_and_remote(
-        local_root: PathBuf,
+    fn new_with_cache_and_remote(
+        cache_dir: PathBuf,
         remote_store: Option<Arc<dyn ObjectStore>>,
         prefix: impl Into<String>,
     ) -> Result<Self> {
-        std::fs::create_dir_all(&local_root)?;
+        std::fs::create_dir_all(&cache_dir)?;
         Ok(Self {
-            local_root,
+            cache_dir,
             remote_store,
             prefix: prefix.into(),
         })
     }
 
-    /// Create storage from server config (local-first, optional R2 mirror).
+    /// Create storage from server config.
+    ///
+    /// When R2 is configured, it becomes the primary store with local as cache.
+    /// When R2 is absent (dev/test), local disk is the primary store.
     pub fn from_config(config: &Config) -> Result<Self> {
         let remote_store = config
             .r2
             .as_ref()
             .map(Self::build_remote_store)
             .transpose()?;
-        Self::new_with_root_and_remote(
-            PathBuf::from(&config.local_storage_path),
+        Self::new_with_cache_and_remote(
+            PathBuf::from(&config.cache_dir),
             remote_store,
             "content",
         )
@@ -82,13 +91,13 @@ impl ContentStorage {
     /// Create storage with R2-only configuration (used by legacy tests).
     pub fn new(config: &R2Config) -> Result<Self> {
         let remote_store = Some(Self::build_remote_store(config)?);
-        Self::new_with_root_and_remote(Self::default_local_root(), remote_store, "content")
+        Self::new_with_cache_and_remote(Self::default_cache_dir(), remote_store, "content")
     }
 
     /// Create storage with custom prefix (used by integration tests).
     pub fn with_prefix(config: &R2Config, prefix: impl Into<String>) -> Result<Self> {
         let remote_store = Some(Self::build_remote_store(config)?);
-        Self::new_with_root_and_remote(Self::default_local_root(), remote_store, prefix)
+        Self::new_with_cache_and_remote(Self::default_cache_dir(), remote_store, prefix)
     }
 
     fn object_path(&self, content_hash: &str, extension: &str) -> Result<ObjectPath> {
@@ -106,7 +115,7 @@ impl ContentStorage {
         let dir1 = &content_hash[0..2];
         let dir2 = &content_hash[2..4];
         Ok(self
-            .local_root
+            .cache_dir
             .join(&self.prefix)
             .join(dir1)
             .join(dir2)
@@ -120,23 +129,46 @@ impl ContentStorage {
         Ok(())
     }
 
-    async fn upload_remote_best_effort(
-        &self,
-        content_hash: &str,
-        extension: &str,
-        content: &[u8],
-    ) -> Result<()> {
-        let Some(remote) = &self.remote_store else {
-            return Ok(());
-        };
+    /// Upload content to R2. Errors propagate (R2 is the source of truth).
+    async fn upload_remote(&self, content_hash: &str, extension: &str, content: &[u8]) -> Result<()> {
+        let remote = self
+            .remote_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("R2 not configured"))?;
         let path = self.object_path(content_hash, extension)?;
-        if let Err(e) = remote
+        remote
             .put(&path, Bytes::copy_from_slice(content).into())
             .await
-        {
-            tracing::warn!("failed to mirror content to R2: {}", e);
-        }
+            .context("Failed to write content to R2")?;
         Ok(())
+    }
+
+    /// Cache content locally for fast future reads. Best-effort; failures are logged.
+    async fn cache_local_best_effort(&self, content_hash: &str, extension: &str, content: &[u8]) {
+        let local_path = match self.local_path(content_hash, extension) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        if local_path.exists() {
+            return;
+        }
+        if Self::ensure_parent(&local_path).is_err() {
+            return;
+        }
+        let tmp_path = local_path.with_extension(format!(
+            "{}.{}.tmp",
+            extension,
+            uuid::Uuid::new_v4()
+        ));
+        if tokio::fs::write(&tmp_path, content).await.is_err() {
+            return;
+        }
+        match tokio::fs::rename(&tmp_path, &local_path).await {
+            Ok(()) => {}
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+            }
+        }
     }
 
     /// Check if content with the given hash exists.
@@ -170,25 +202,38 @@ impl ContentStorage {
     }
 
     /// Store content and return its hash.
+    ///
+    /// When R2 is configured: writes to R2 first (source of truth), then caches locally.
+    /// When R2 is absent: writes to local disk as primary store.
     pub async fn store(&self, content: &[u8], extension: &str) -> Result<String> {
         let content_hash = hash::blake3_hash(content);
-        let local_path = self.local_path(&content_hash, extension)?;
 
-        if !local_path.exists() {
-            Self::ensure_parent(&local_path)?;
-            // Write to a temp file first, then atomically rename to prevent
-            // partial writes from leaving corrupted content on crash.
-            let tmp_path = local_path.with_extension(format!(
-                "{}.{}.tmp",
-                extension,
-                std::process::id()
-            ));
-            std::fs::write(&tmp_path, content)?;
-            std::fs::rename(&tmp_path, &local_path)?;
+        if self.remote_store.is_some() {
+            // R2-primary mode: write to R2 first, cache locally best-effort.
+            self.upload_remote(&content_hash, extension, content).await?;
+            self.cache_local_best_effort(&content_hash, extension, content).await;
+        } else {
+            // Local-only mode (dev/test): write to local disk as primary.
+            let local_path = self.local_path(&content_hash, extension)?;
+            if !local_path.exists() {
+                Self::ensure_parent(&local_path)?;
+                let tmp_path = local_path.with_extension(format!(
+                    "{}.{}.tmp",
+                    extension,
+                    uuid::Uuid::new_v4()
+                ));
+                tokio::fs::write(&tmp_path, content).await?;
+                match tokio::fs::rename(&tmp_path, &local_path).await {
+                    Ok(()) => {}
+                    Err(e) if local_path.exists() => {
+                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                        tracing::debug!("concurrent store race for {}: {}", content_hash, e);
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
         }
 
-        self.upload_remote_best_effort(&content_hash, extension, content)
-            .await?;
         Ok(content_hash)
     }
 
@@ -239,9 +284,15 @@ impl ContentStorage {
 
         // Hydrate local cache for future reads (atomic: write to temp, then rename).
         Self::ensure_parent(&local_path)?;
-        let tmp_path = local_path.with_extension(format!("{}.tmp", std::process::id()));
-        std::fs::write(&tmp_path, &content)?;
-        std::fs::rename(&tmp_path, &local_path)?;
+        let tmp_path = local_path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        tokio::fs::write(&tmp_path, &content).await?;
+        match tokio::fs::rename(&tmp_path, &local_path).await {
+            Ok(()) => {}
+            Err(_) if local_path.exists() => {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
 
         Ok(content)
     }
@@ -282,31 +333,55 @@ impl ContentStorage {
     }
 
     /// Delete content by hash.
+    ///
+    /// When R2 is configured: deletes from R2 (source of truth), then cleans local cache.
+    /// When R2 is absent: deletes from local disk.
     pub async fn delete(&self, content_hash: &str, extension: &str) -> Result<()> {
-        let local_path = self.local_path(content_hash, extension)?;
-        if local_path.exists() {
-            std::fs::remove_file(&local_path)?;
-        }
-
         if let Some(remote) = &self.remote_store {
             let path = self.object_path(content_hash, extension)?;
             match remote.delete(&path).await {
                 Ok(()) => {}
                 Err(object_store::Error::NotFound { .. }) => {}
-                Err(e) => return Err(e).context("Failed to delete content from remote storage"),
+                Err(e) => return Err(e).context("Failed to delete content from R2"),
             }
+        }
+
+        // Clean local cache (or primary in local-only mode)
+        let local_path = self.local_path(content_hash, extension)?;
+        if local_path.exists() {
+            std::fs::remove_file(&local_path)?;
         }
 
         Ok(())
     }
 
-    /// List all content hashes with a given prefix (first 2 chars).
+    /// List all content hashes with a given prefix (first 2 hex chars).
+    ///
+    /// When R2 is configured, lists from R2. Otherwise lists from local disk.
     pub async fn list_by_prefix(&self, hash_prefix: &str) -> Result<Vec<String>> {
         // Validate prefix is hex-only to prevent path traversal
         if !hash_prefix.chars().all(|c| c.is_ascii_hexdigit()) {
             anyhow::bail!("Invalid hash prefix: must contain only hex characters");
         }
-        let root = self.local_root.join(&self.prefix).join(hash_prefix);
+
+        if let Some(remote) = &self.remote_store {
+            use futures::TryStreamExt;
+            let prefix = ObjectPath::from(format!("{}/{}", self.prefix, hash_prefix));
+            let mut hashes = Vec::new();
+            let mut listing = remote.list(Some(&prefix));
+            while let Some(meta) = listing.try_next().await? {
+                let path_str = meta.location.to_string();
+                if let Some(filename) = path_str.rsplit('/').next() {
+                    if let Some(hash) = filename.split('.').next() {
+                        hashes.push(hash.to_string());
+                    }
+                }
+            }
+            return Ok(hashes);
+        }
+
+        // Local-only fallback
+        let root = self.cache_dir.join(&self.prefix).join(hash_prefix);
         let mut hashes = Vec::new();
 
         if !root.exists() {

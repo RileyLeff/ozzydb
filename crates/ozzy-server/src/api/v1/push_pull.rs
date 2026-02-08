@@ -8,6 +8,8 @@ use axum::{
     response::Response,
     routing::{get, post},
 };
+use ozzy_core::canon::hash_json;
+use ozzy_core::hash::transform_hash;
 use ozzy_core::registry::protocol::{
     ContentCheckRequest, ContentCheckResponse, EndpointManifest, PullManifest, PushResponse,
     ResolveEndpointResponse,
@@ -220,15 +222,18 @@ async fn push(
             commit_json = Some(serde_json::from_slice(&data)?);
         } else if name.starts_with("data/") {
             let filename = name.strip_prefix("data/").unwrap();
-            let safe_name = sanitize_relative_path(filename)?;
+            let safe_name = sanitize_relative_path(filename)
+                .map_err(|e| ApiError::bad_request(format!("Invalid data path: {}", e)))?;
             data_files.insert(safe_name, data.to_vec());
         } else if name.starts_with("transforms/") {
             let filename = name.strip_prefix("transforms/").unwrap();
-            let safe_name = sanitize_relative_path(filename)?;
+            let safe_name = sanitize_relative_path(filename)
+                .map_err(|e| ApiError::bad_request(format!("Invalid transform path: {}", e)))?;
             transform_files.insert(safe_name, data.to_vec());
         } else if name.starts_with("lockfiles/") {
             let filename = name.strip_prefix("lockfiles/").unwrap();
-            let safe_name = sanitize_relative_path(filename)?;
+            let safe_name = sanitize_relative_path(filename)
+                .map_err(|e| ApiError::bad_request(format!("Invalid lockfile path: {}", e)))?;
             lockfiles.insert(safe_name, data.to_vec());
         }
     }
@@ -423,6 +428,13 @@ async fn push(
     if ref_name.is_empty() {
         return Err(ApiError::bad_request("Ref name cannot be empty"));
     }
+    // Reject nested ref prefixes (e.g. "refs/heads/refs/heads/main")
+    if ref_name.contains('/') {
+        return Err(ApiError::bad_request(format!(
+            "Ref name '{}' contains invalid characters",
+            ref_name
+        )));
+    }
     ozzy_core::validate_safe_name(&ref_name).map_err(|e| ApiError::bad_request(e.to_string()))?;
     let ref_type = if raw_ref_name.starts_with("refs/tags/") {
         "tag"
@@ -472,12 +484,7 @@ async fn push(
         }
     }
 
-    if let Err(e) = tx.commit().await {
-        tracing::warn!("push transaction commit failed; leaving uploaded blobs for GC");
-        return Err(anyhow::Error::from(e).into());
-    }
-
-    // Update tags sent by client (best-effort: skip invalid or missing tags).
+    // Update tags sent by client inside the transaction (best-effort: skip invalid or missing).
     if let Some(tags) = commit_data.get("tags").and_then(|v| v.as_object()) {
         for (tag_name, tag_hash_value) in tags {
             if let Err(e) = ozzy_core::validate_safe_name(tag_name) {
@@ -500,12 +507,17 @@ async fn push(
 
             if let Err(e) = state
                 .db
-                .upsert_ref(project.id, tag_name, "tag", tag_commit_id)
+                .upsert_ref_in_tx(&mut tx, project.id, tag_name, "tag", tag_commit_id)
                 .await
             {
                 tracing::warn!("failed to upsert tag '{}': {}", tag_name, e);
             }
         }
+    }
+
+    if let Err(e) = tx.commit().await {
+        tracing::warn!("push transaction commit failed; leaving uploaded blobs for GC");
+        return Err(anyhow::Error::from(e).into());
     }
 
     Ok(Json(PushResponse {
@@ -685,18 +697,16 @@ async fn pull(
         let mut builder = tar::Builder::new(&mut tar_data);
 
         // Add commit.json with full commit data (data_sources, transforms, endpoints).
-        // Use the preserved original timestamp string (not DB created_at) to
-        // ensure the pulled commit.json can reproduce the original commit hash.
-        let original_ts: serde_json::Value =
-            chrono::DateTime::parse_from_rfc3339(&commit.commit_timestamp)
-                .map(|dt| serde_json::json!(dt.with_timezone(&chrono::Utc)))
-                .unwrap_or_else(|_| serde_json::json!(commit.created_at));
+        // IMPORTANT: Use the raw timestamp string from the DB exactly as-is.
+        // Re-parsing through DateTime and re-serializing via serde_json can change
+        // precision/format (e.g. "...+00:00" vs "...Z"), causing the pulled
+        // commit.json to produce a different hash than the original.
         let mut commit_data = serde_json::json!({
             "hash": commit.hash,
             "message": commit.message,
             "parent_hashes": commit.parent_hashes,
             "author": commit.author_name,
-            "timestamp": original_ts,
+            "timestamp": commit.commit_timestamp,
         });
 
         // Include data_sources
@@ -725,11 +735,23 @@ async fn pull(
             .map(|t| {
                 let source_path = sanitize_relative_path(&t.source_storage_key)
                     .unwrap_or_else(|_| format!("transforms/{}.py", t.name));
+                // Recompute the composite hash from stored components.
+                // The DB content_hash stores the source content hash, but the
+                // Transform.hash field is the composite identity hash.
+                let params_schema_hash = hash_json(&t.params_schema);
+                let composite_hash = transform_hash(
+                    &t.content_hash,
+                    &t.function_name,
+                    &t.lockfile_hash,
+                    &t.runtime,
+                    &params_schema_hash,
+                );
                 (
                     t.name.clone(),
                     serde_json::json!({
                         "name": t.name,
-                        "hash": t.content_hash,
+                        "hash": composite_hash,
+                        "source_hash": t.content_hash,
                         "runtime": t.runtime,
                         "source_path": source_path,
                         "function_name": t.function_name,
@@ -826,6 +848,12 @@ async fn pull(
                         .replace('\\', "/");
                     if seen_lockfile_paths.insert(lockfile_path.clone()) {
                         total_size += lockfile_content.len() as u64;
+                        if total_size > max_size {
+                            return Err(ApiError::bad_request(format!(
+                                "Archive size exceeds limit of {} bytes",
+                                max_size
+                            )));
+                        }
                         let mut lf_header = tar::Header::new_gnu();
                         lf_header.set_size(lockfile_content.len() as u64);
                         lf_header.set_mode(0o644);
@@ -1068,8 +1096,9 @@ async fn fetch_endpoint(
                 builder.append_data(&mut header, &source_path, &content[..])?;
             }
 
-            // Include lockfile if available.
-            if !t.lockfile_hash.is_empty() {
+            // Include lockfile if available (skip empty-content sentinel).
+            let empty_lock_sentinel_fetch = ozzy_core::hash::blake3_hash(b"");
+            if !t.lockfile_hash.is_empty() && t.lockfile_hash != empty_lock_sentinel_fetch {
                 if let Ok(lockfile_content) = state.storage.get(&t.lockfile_hash, "lock").await {
                     let lockfile_path = FsPath::new(&source_path)
                         .parent()
@@ -1150,5 +1179,20 @@ mod tests {
     #[test]
     fn parse_endpoint_ref_missing_at() {
         assert!(parse_endpoint_ref("no-at-sign").is_err());
+    }
+
+    #[test]
+    fn normalize_ref_strips_prefix() {
+        assert_eq!(normalize_ref_name("refs/heads/main"), "main");
+        assert_eq!(normalize_ref_name("refs/tags/v1.0"), "v1.0");
+        assert_eq!(normalize_ref_name("main"), "main");
+    }
+
+    #[test]
+    fn normalize_ref_nested_prefix_contains_slash() {
+        // After normalization, nested prefix still contains '/' which
+        // should be rejected by the caller's validation
+        let result = normalize_ref_name("refs/heads/refs/heads/main");
+        assert!(result.contains('/'), "Nested ref prefix should still contain '/'");
     }
 }

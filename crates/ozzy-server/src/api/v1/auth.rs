@@ -14,7 +14,7 @@ use crate::{
     AppState,
     auth::{
         github,
-        middleware::{AuthUser, WriteAuthUser, can_delegate_scopes},
+        middleware::{AccountAuthUser, WriteAuthUser, can_delegate_scopes},
         tokens,
     },
 };
@@ -174,8 +174,9 @@ async fn create_token(
 }
 
 /// List user's API tokens.
+/// Requires unscoped read access (project-scoped tokens cannot list account tokens).
 async fn list_tokens(
-    AuthUser { user, .. }: AuthUser,
+    AccountAuthUser { user, .. }: AccountAuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<TokenInfo>>, ApiError> {
     let tokens = state.db.list_user_tokens(user.id).await?;
@@ -196,8 +197,9 @@ async fn list_tokens(
 }
 
 /// Delete an API token.
+/// Requires unscoped read access (project-scoped tokens cannot manage account tokens).
 async fn delete_token(
-    AuthUser { user, .. }: AuthUser,
+    AccountAuthUser { user, .. }: AccountAuthUser,
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Result<Json<()>, ApiError> {
@@ -209,7 +211,8 @@ async fn delete_token(
 }
 
 /// Get current user info.
-async fn get_me(AuthUser { user, .. }: AuthUser) -> Json<UserInfo> {
+/// Requires unscoped read access (project-scoped tokens cannot access account info).
+async fn get_me(AccountAuthUser { user, .. }: AccountAuthUser) -> Json<UserInfo> {
     Json(UserInfo {
         id: user.id,
         username: user.username,
@@ -305,25 +308,24 @@ impl axum::response::IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::StatusCode;
 
-        let (status, message) = match self {
-            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-            ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
-            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
-            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
+        let (status, error_code, message) = match self {
+            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
+            ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "unauthorized", msg),
+            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", msg),
+            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
+            ApiError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg),
             ApiError::Internal(err) => {
                 // Log internal errors but don't expose details to clients
                 tracing::error!("Internal error: {:?}", err);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
                     "Internal server error".to_string(),
                 )
             }
         };
 
-        let body = serde_json::json!({
-            "error": message
-        });
+        let body = ozzy_core::registry::protocol::ApiError::new(error_code, message);
 
         (status, axum::Json(body)).into_response()
     }

@@ -208,7 +208,7 @@ fn parse_python_transforms(
                     saw_open_paren = true;
                 }
                 paren_depth += open_count;
-                paren_depth -= close_count;
+                paren_depth = (paren_depth - close_count).max(0);
 
                 // Single-line decorators can be balanced on the same line (j == i).
                 if (!saw_open_paren && j == i) || (saw_open_paren && paren_depth == 0) {

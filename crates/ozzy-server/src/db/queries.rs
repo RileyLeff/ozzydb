@@ -290,7 +290,10 @@ impl Database {
         .bind(author_id)
         .bind(&commit.author)
         .bind(&commit.message)
-        .bind(commit.timestamp.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+        // Use the same format as compute_commit_hash() (to_rfc3339 with default
+        // precision) so that the stored string can be returned verbatim during pull
+        // and still reproduce the original commit hash.
+        .bind(commit.timestamp.to_rfc3339())
         .execute(&mut **tx)
         .await?;
 

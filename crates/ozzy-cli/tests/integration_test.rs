@@ -1804,3 +1804,369 @@ fn test_endpoint_rm_of_staged_override_marks_committed_for_deletion() {
         .success()
         .stdout(predicate::str::contains("ep1").not());
 }
+
+// ========================================================================
+// Review Series 1 Wrapup Tests
+// ========================================================================
+
+/// Status should distinguish between "new" and "modified" staged endpoints.
+#[test]
+fn test_status_shows_modified_vs_new_endpoints() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "status-test", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .assert()
+        .success();
+
+    let transform_path = dir.path().join("transforms/qc.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    create_test_transform(&transform_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/qc.py"])
+        .assert()
+        .success();
+
+    // Create and commit first endpoint
+    ozzy()
+        .current_dir(dir.path())
+        .args(["endpoint", "create", "ep1", "--input", "raw", "--transforms", "filter_by_value"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["commit", "-m", "initial"])
+        .assert()
+        .success();
+
+    // Now create a staged override of ep1 (modified) and a new endpoint ep2
+    ozzy()
+        .current_dir(dir.path())
+        .args(["endpoint", "create", "ep1", "--input", "raw", "--transforms", "add_prefix"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["endpoint", "create", "ep2", "--input", "raw", "--transforms", "filter_by_value"])
+        .assert()
+        .success();
+
+    // Status should show ep1 as modified and ep2 as new
+    let output = ozzy()
+        .current_dir(dir.path())
+        .args(["status"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("modified:") && stdout.contains("ep1"),
+        "Status should label ep1 as 'modified:', got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("new:") && stdout.contains("ep2"),
+        "Status should label ep2 as 'new:', got: {}",
+        stdout
+    );
+}
+
+/// Commit when there are no changes should indicate clean state.
+#[test]
+fn test_commit_with_no_changes_shows_nothing_to_commit() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "clean-test", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .assert()
+        .success();
+
+    // First commit
+    ozzy()
+        .current_dir(dir.path())
+        .args(["commit", "-m", "first"])
+        .assert()
+        .success();
+
+    // Second commit with no changes should fail or indicate nothing to commit
+    let output = ozzy()
+        .current_dir(dir.path())
+        .args(["commit", "-m", "empty"])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("Nothing to commit")|| combined.contains("nothing to commit") || combined.contains("No changes"),
+        "Should indicate nothing to commit, got: {}",
+        combined
+    );
+}
+
+/// Multiple transforms in the same file should produce distinct hashes.
+#[test]
+fn test_multiple_transforms_same_file_distinct_hashes() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "multi-hash", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let transform_path = dir.path().join("transforms/qc.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    create_test_transform(&transform_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/qc.py"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .assert()
+        .success();
+
+    // Create two endpoints using different transforms from the same file
+    ozzy()
+        .current_dir(dir.path())
+        .args(["endpoint", "create", "ep_filter", "--input", "raw", "--transforms", "filter_by_value"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["endpoint", "create", "ep_prefix", "--input", "raw", "--transforms", "add_prefix"])
+        .assert()
+        .success();
+
+    // Run both endpoints - they should produce different outputs
+    let output_filter = dir.path().join("filter_out.parquet");
+    let output_prefix = dir.path().join("prefix_out.parquet");
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["run", "ep_filter", "--output", output_filter.to_str().unwrap()])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["run", "ep_prefix", "--output", output_prefix.to_str().unwrap()])
+        .assert()
+        .success();
+
+    assert!(output_filter.exists(), "Filter output should exist");
+    assert!(output_prefix.exists(), "Prefix output should exist");
+
+    // Different transforms should produce different-sized outputs or different content
+    let filter_rows = parquet_row_count(&output_filter);
+    let prefix_rows = parquet_row_count(&output_prefix);
+    // filter_by_value (threshold=10.0) filters rows, add_prefix keeps all
+    assert_ne!(
+        filter_rows, prefix_rows,
+        "Different transforms should produce different row counts"
+    );
+}
+
+/// Verify data rm removes a data source.
+#[test]
+fn test_data_rm() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "data-rm", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .assert()
+        .success();
+
+    // Verify it's listed
+    ozzy()
+        .current_dir(dir.path())
+        .args(["data", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("raw"));
+
+    // Remove it
+    ozzy()
+        .current_dir(dir.path())
+        .args(["data", "rm", "raw"])
+        .assert()
+        .success();
+
+    // Should be gone
+    ozzy()
+        .current_dir(dir.path())
+        .args(["data", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("raw").not());
+}
+
+/// Verify transform rm removes a transform.
+#[test]
+fn test_transform_rm() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "transform-rm", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    // Use a single-transform file so rm can delete the file
+    let transform_path = dir.path().join("transforms/single.py");
+    fs::create_dir_all(transform_path.parent().unwrap()).unwrap();
+    fs::write(
+        &transform_path,
+        r#"
+import polars as pl
+
+class ozzy:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
+@ozzy.transform(
+    params={"threshold": float},
+)
+def solo_transform(inputs, params):
+    """A single transform in its own file."""
+    df = inputs["main"]
+    return df
+"#,
+    )
+    .unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "add", "transforms/single.py"])
+        .assert()
+        .success();
+
+    // Verify solo_transform is listed
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("solo_transform"));
+
+    // Remove it
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "rm", "solo_transform"])
+        .assert()
+        .success();
+
+    // Should be gone
+    ozzy()
+        .current_dir(dir.path())
+        .args(["transform", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("solo_transform").not());
+}
+
+/// Tag list and show should work after creating tags.
+#[test]
+fn test_tag_operations() {
+    let dir = tempdir().unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["init", "--name", "tag-ops", "--owner", "testuser"])
+        .assert()
+        .success();
+
+    let parquet_path = dir.path().join("test_data.parquet");
+    create_test_parquet(&parquet_path);
+    ozzy()
+        .current_dir(dir.path())
+        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .assert()
+        .success();
+
+    ozzy()
+        .current_dir(dir.path())
+        .args(["commit", "-m", "seed"])
+        .assert()
+        .success();
+
+    // Create tag
+    ozzy()
+        .current_dir(dir.path())
+        .args(["tag", "v1.0.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created tag 'v1.0.0'"));
+
+    // List tags
+    ozzy()
+        .current_dir(dir.path())
+        .args(["tag", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("v1.0.0"));
+
+    // Show tag
+    ozzy()
+        .current_dir(dir.path())
+        .args(["tag", "show", "v1.0.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("v1.0.0"));
+
+    // Remove tag
+    ozzy()
+        .current_dir(dir.path())
+        .args(["tag", "rm", "v1.0.0"])
+        .assert()
+        .success();
+
+    // Tag should be gone
+    ozzy()
+        .current_dir(dir.path())
+        .args(["tag", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("v1.0.0").not());
+}

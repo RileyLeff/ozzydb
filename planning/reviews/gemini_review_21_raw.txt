@@ -1,0 +1,115 @@
+(node:42446) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:42480) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+Loaded cached credentials.
+Loading extension: GeminiCloudAssist
+Loading extension: google-maps-platform
+Loading extension: huggingface
+Loading extension: nanobanana
+Error discovering tools from gwu_hpc: [
+  {
+    "code": "invalid_value",
+    "values": [
+      "object"
+    ],
+    "path": [
+      "tools",
+      0,
+      "outputSchema",
+      "type"
+    ],
+    "message": "Invalid input: expected \"object\""
+  }
+]MCP server 'huggingface' requires authentication using: /mcp auth huggingfaceServer 'context7' supports tool updates. Listening for changes...
+Server 'github' supports tool updates. Listening for changes...
+Server 'github' supports resource updates. Listening for changes...
+Server 'runpod' supports tool updates. Listening for changes...
+Server 'chrome-devtools' supports tool updates. Listening for changes...
+Server 'pulumi' supports tool updates. Listening for changes...
+Server 'pulumi' supports prompt updates. Listening for changes...
+Server 'gemini-cloud-assist-mcp' supports tool updates. Listening for changes...
+Hook registry initialized with 0 hook entries
+MCP ERROR (context7)[ERROR] MCP ERROR (context7)
+Thorough code review of the OzzyDB codebase has identified the following issues, including several critical bugs that break core functionality and security vulnerabilities.
+
+### HIGH Severity
+
+1. **Broken `ozzy fetch` CLI Parsing and Client Validation**
+   - **File:** `crates/ozzy-cli/src/commands/fetch.rs:39`, `crates/ozzy-core/src/registry/client.rs:18`
+   - **Description:** The CLI parsing logic for `endpoint @ref` is incorrect. It extracts `ref_name` starting from the `@` (e.g., `@main`), but the `RegistryClient` then wraps this in another `@` (e.g., `@@main`) and fails its own validation check which strictly prohibits the `@` character in path segments. This makes `ozzy fetch` completely unusable for any named ref.
+   - **Suggested Fix:** In `fetch.rs`, use `at_idx + 2` to skip both the space and the `@` character when extracting `ref_name`. In `RegistryClient`, allow `@` in `validate_path_segment` if it's intended to be part of the protocol, or ensure it's handled consistently.
+
+2. **Server DoS/OOM Vulnerability via In-Memory Tar Building**
+   - **File:** `crates/ozzy-server/src/api/v1/push_pull.rs:315`, `push_pull.rs:510`
+   - **Description:** Both `pull` and `fetch_endpoint` handlers build the entire project/endpoint tar archive in memory (`Vec<u8>`) before sending it. For large data pipelines (common in data engineering), this will quickly exhaust server memory and lead to OOM crashes, especially with concurrent requests.
+   - **Suggested Fix:** Use a streaming approach. Pipe the `object_store` streams directly into a `tar::Builder` wrapping a `tokio_util::io::SyncIoBridge` or similar, and return an `axum::body::Body` that streams the archive as it's built.
+
+3. **Arbitrary File Write via Symlink during `pull` Extraction**
+   - **File:** `crates/ozzy-cli/src/commands/shared.rs:100`
+   - **Description:** The `checked_destination` function uses `dest.exists()` to check for traversal. However, if a malicious archive (or a pre-existing local state) contains a symlink to a sensitive system file (e.g., `data/raw.parquet` -> `/etc/passwd`), `std::fs::File::create` will follow the symlink and overwrite the target file. The `exists()` check follows symlinks, so if the target exists, it may pass the `starts_with` check if the canonical path isn't re-validated against the symlink source.
+   - **Suggested Fix:** Use `dest.symlink_metadata()` to check for symlinks and reject them, or use the `open` crate with `O_NOFOLLOW` flags. Always validate the canonical path of the *final* destination file relative to the project root.
+
+4. **Broken Transform Discovery in `ozzy commit`**
+   - **File:** `crates/ozzy-core/src/commit.rs:165`
+   - **Description:** The parser in `commit.rs` uses `line.starts_with(" @ozzy.transform")`. Because `line` is previously `trim()`ed, it will never have a leading space, and thus this condition will always be false. This prevents `ozzy commit` from finding and registering any transforms in the project.
+   - **Suggested Fix:** Remove the leading space from the pattern: `line.starts_with("@ozzy.transform")`.
+
+5. **Hash Divergence after Push/Pull Roundtrip**
+   - **File:** `crates/ozzy-core/src/commit.rs:22`, `crates/ozzy-server/src/api/v1/push_pull.rs:322`
+   - **Description:** Commit hashes are calculated using `commit.timestamp.to_rfc3339()`. The server preserves this as text, but `pull` parses it back to a `DateTime` and then uses `serde_json::json!(dt)` to build the pulled `commit.json`. `serde_json`'s serialization of `DateTime` may use a different precision or format than the original `to_rfc3339()` string, causing the pulled commit to have a different hash than the original.
+   - **Suggested Fix:** The server should treat the `commit_timestamp` as an opaque string and return it exactly as-is in the `commit.json` without parsing/re-serializing it as a date object.
+
+### MEDIUM Severity
+
+6. **API `list_projects` Excludes Collaborated Projects**
+   - **File:** `crates/ozzy-server/src/db/queries.rs:118`
+   - **Description:** The `list_user_projects_paginated` query only returns projects where the user is the owner. Users cannot see projects they have been added to as collaborators in the project list.
+   - **Suggested Fix:** Update the query to JOIN with `project_collaborators` and return projects where the user is either the owner OR a collaborator.
+
+7. **Fragile and Broken Nested Schema Parsing**
+   - **File:** `crates/ozzy-core/src/schema.rs:230`
+   - **Description:** `parse_data_type` for `struct<` and `dict<` uses a simple depth counter for `<>` but ignores `[]`. This causes incorrect splitting on types like `struct<f1: timestamp[s, UTC], f2: int64>`, where the comma inside the timestamp brackets causes an incorrect split at depth 0.
+   - **Suggested Fix:** Update the depth tracking to include `[` and `]` characters to correctly handle nested Arrow types.
+
+8. **Incorrect Schema Validation for Multi-Input Pipelines**
+   - **File:** `crates/ozzy-cli/src/commands/endpoint.rs:260`
+   - **Description:** `validate_pipeline_schema` merges all input schemas into a single union map of types. If two different inputs have a column with the same name but different types (e.g., `main.id` is `int64` and `meta.id` is `utf8`), the validator fails with a conflict error, even though they are distinct inputs that a transform could handle.
+   - **Suggested Fix:** Track types per input name (`HashMap<String, HashMap<String, String>>`) and validate transforms against the specific inputs they reference.
+
+9. **Blocking FS Operations in Async Server Storage**
+   - **File:** `crates/ozzy-server/src/storage/content.rs:145`
+   - **Description:** `ContentStorage::store` uses `std::fs::write` and `std::fs::rename` directly inside an `async` function. These are blocking operations that will stall the Axum executor threads under heavy load.
+   - **Suggested Fix:** Use `tokio::fs::write` and `tokio::fs::rename`.
+
+10. **Incomplete Transform Selection with Multiple Decorators**
+    - **File:** `crates/ozzy-cli/src/commands/transform.rs:260`
+    - **Description:** `rewrite_selected_transform_source` only comments out the first `@ozzy.transform` decorator it finds for non-selected functions. If a function has multiple decorators (e.g., multiple `ozzy.transform` calls for different endpoints), the others remain active and will be incorrectly registered.
+    - **Suggested Fix:** The loop should identify all decorators associated with a function and comment out every `@ozzy.transform` line.
+
+11. **Authentication Polling Backoff Mismatch**
+    - **File:** `crates/ozzy-cli/src/commands/auth.rs:103`, `crates/ozzy-server/src/api/v1/auth.rs:65`
+    - **Description:** The CLI expects an `Err` containing "slow_down" to increase its polling interval. However, the server catches the `slow_down` error from GitHub and returns `pending: true` with a `200 OK`. This prevents the CLI from backing off, potentially causing GitHub to block the server's IP.
+    - **Suggested Fix:** The server should return a specific error code or the `interval` from GitHub in the `AuthResponse` so the CLI can adjust its wait time.
+
+12. **Multi-Component Branch Names Rejected in `push`**
+    - **File:** `crates/ozzy-server/src/api/v1/push_pull.rs:265`
+    - **Description:** The `push` handler rejects any `ref_name` containing a `/`. This prevents the use of common branch naming conventions like `feature/login` or `release/v1`.
+    - **Suggested Fix:** Allow `/` in ref names, but ensure the resulting path remains within the project's `refs/` directory via `sanitize_relative_path`.
+
+### LOW Severity
+
+13. **Redundant Byte Copying in Server Schema Extraction**
+    - **File:** `crates/ozzy-server/src/api/v1/push_pull.rs:55`
+    - **Description:** `extract_parquet_schema` calls `data.to_vec()`, creating a full copy of the parquet file bytes just to read the metadata footer.
+    - **Suggested Fix:** Use `bytes::Bytes::copy_from_slice` or pass the `Bytes` object directly to avoid the heap allocation.
+
+14. **Memory-Intensive Source Hashing**
+    - **File:** `crates/ozzy-core/src/canon.rs:71`
+    - **Description:** `hash_source_directory` collects all file contents into a single massive `String` before hashing. For projects with large source files, this can cause high memory pressure.
+    - **Suggested Fix:** Use `blake3::Hasher` and `update()` it iteratively in the loop.
+
+15. **Performance of `data ls` with Many Files**
+    - **File:** `crates/ozzy-cli/src/commands/data.rs:75`
+    - **Description:** `ozzy data ls` opens and reads the footer of every parquet file in the `data/` directory to get row counts. This is slow if the directory contains hundreds of files.
+    - **Suggested Fix:** Cache the row counts in the `.ozzy` project metadata or only compute them on demand.

@@ -305,6 +305,33 @@ pub async fn run(remote: Option<&str>, ref_name: Option<&str>, force: bool) -> R
         println!("  {}", path.display());
     }
 
+    // Verify all expected files were present in the archive.
+    // This prevents partial archives from being silently accepted and pruning valid files.
+    let seen_data: HashSet<String> = keep_data_files
+        .iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    let seen_transforms: HashSet<String> = keep_transform_files
+        .iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    for (expected_path, _) in &expected_data {
+        if !seen_data.contains(expected_path) {
+            anyhow::bail!(
+                "Incomplete archive: missing expected data file '{}'",
+                expected_path
+            );
+        }
+    }
+    for (expected_path, _) in &expected_transforms {
+        if !seen_transforms.contains(expected_path) {
+            anyhow::bail!(
+                "Incomplete archive: missing expected transform file '{}'",
+                expected_path
+            );
+        }
+    }
+
     // Canonicalize dirs to match canonical_project_root (prevents strip_prefix
     // failures when the project path contains symlinks, e.g. /tmp -> /private/tmp on macOS).
     let canonical_data_dir = project.data_dir().canonicalize().unwrap_or(project.data_dir());

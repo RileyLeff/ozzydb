@@ -4,6 +4,7 @@ Project loading and management for OzzyDB Python client.
 
 import json
 import os
+import warnings
 from pathlib import Path
 from typing import Any, Optional
 
@@ -75,10 +76,28 @@ class Project:
 
         # Read the HEAD ref
         head = self.head
+        # Validate ref path to prevent traversal (e.g. refs/../../../../tmp/x)
+        if ".." in head or os.path.isabs(head):
+            warnings.warn(
+                f"Refusing suspicious ref path '{head}' (contains traversal or is absolute)",
+                stacklevel=2,
+            )
+            self._commit_loaded = True
+            return None
         if head.startswith("refs/"):
             ref_path = self.ozzy_dir / head
         else:
             ref_path = self.ozzy_dir / "refs" / "heads" / head
+        # Verify resolved path stays within .ozzy/refs
+        try:
+            ref_path.resolve().relative_to(self.ozzy_dir.resolve())
+        except ValueError:
+            warnings.warn(
+                f"Ref path '{head}' resolves outside .ozzy directory",
+                stacklevel=2,
+            )
+            self._commit_loaded = True
+            return None
 
         if not ref_path.exists():
             self._commit_loaded = True
@@ -91,7 +110,15 @@ class Project:
             self._commit_loaded = True
             return None
 
-        self._commit = json.loads(commit_path.read_text())
+        try:
+            self._commit = json.loads(commit_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            warnings.warn(
+                f"Could not load commit {commit_hash}: {exc}",
+                stacklevel=2,
+            )
+            self._commit_loaded = True
+            return None
         self._commit_loaded = True
         return self._commit
 
@@ -114,7 +141,7 @@ class Project:
                 # Try to get row count from parquet metadata
                 parquet_meta = pq.read_metadata(parquet_file)
                 row_count = parquet_meta.num_rows
-            except Exception:
+            except (OSError, pq.lib.ArrowInvalid):
                 row_count = None
 
             sources[name] = DataSourceMeta(
@@ -145,8 +172,6 @@ class Project:
                 found_transforms = self._parse_transform_file(content, py_file, transforms_dir)
                 transforms.update(found_transforms)
             except (OSError, UnicodeDecodeError, ValueError) as exc:
-                import warnings
-
                 warnings.warn(
                     f"Could not parse transform file {py_file}: {exc}",
                     stacklevel=2,
@@ -199,7 +224,14 @@ class Project:
 
         endpoints = {}
         for f in staged_dir.glob("*.json"):
-            data = json.loads(f.read_text())
+            try:
+                data = json.loads(f.read_text())
+            except (json.JSONDecodeError, OSError) as exc:
+                warnings.warn(
+                    f"Could not load staged endpoint {f.stem}: {exc}",
+                    stacklevel=2,
+                )
+                continue
             endpoints[f.stem] = data
         return endpoints
 
@@ -307,29 +339,29 @@ class Project:
                 raise KeyError(f"Endpoint '{name}' not found")
             endpoint_data = commit["endpoints"][name]
 
-        # Parse nodes
+        # Parse nodes (guard against null values)
         nodes = [
             PipelineNode(
-                node_name=n["node_name"],
-                transform_name=n["transform_name"],
-                params=n.get("params", {}),
+                node_name=n.get("node_name", ""),
+                transform_name=n.get("transform_name", ""),
+                params=n.get("params") or {},
             )
-            for n in endpoint_data.get("nodes", [])
+            for n in (endpoint_data.get("nodes") or [])
         ]
 
-        # Parse edges
+        # Parse edges (guard against null values)
         edges = [
             PipelineEdge(
-                target_node=e["target_node"],
-                input_name=e["input_name"],
-                source_type=e["source_type"],
-                source_ref=e["source_ref"],
+                target_node=e.get("target_node", ""),
+                input_name=e.get("input_name", ""),
+                source_type=e.get("source_type", ""),
+                source_ref=e.get("source_ref", ""),
                 external_owner=e.get("external_owner"),
                 external_project=e.get("external_project"),
                 external_endpoint=e.get("external_endpoint"),
                 external_commit_hash=e.get("external_commit_hash"),
             )
-            for e in endpoint_data.get("edges", [])
+            for e in (endpoint_data.get("edges") or [])
         ]
 
         return EndpointMeta(
@@ -346,7 +378,15 @@ class Project:
         source = self.data_sources.get(source_name)
         if not source:
             raise KeyError(f"Data source '{source_name}' not found")
-        return self.root / source.path
+        resolved = (self.root / source.path).resolve()
+        # Prevent path traversal outside project root
+        try:
+            resolved.relative_to(self.root)
+        except ValueError:
+            raise ValueError(
+                f"Data source path '{source.path}' resolves outside project root"
+            )
+        return resolved
 
     def get_schema(self, source_name: str):
         """Get the Arrow schema of a data source."""

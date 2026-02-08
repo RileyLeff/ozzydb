@@ -211,6 +211,34 @@ pub async fn run(
         file.write_all(&content)?;
     }
 
+    // Verify all expected files from the manifest were present in the archive.
+    let seen_data: std::collections::HashSet<String> = expected_data
+        .keys()
+        .filter(|path| temp_path.join(path).exists())
+        .cloned()
+        .collect();
+    let seen_transforms: std::collections::HashSet<String> = expected_transforms
+        .keys()
+        .filter(|path| temp_path.join(path).exists())
+        .cloned()
+        .collect();
+    for expected_path in expected_data.keys() {
+        if !seen_data.contains(expected_path) {
+            anyhow::bail!(
+                "Incomplete archive: missing expected data file '{}'",
+                expected_path
+            );
+        }
+    }
+    for expected_path in expected_transforms.keys() {
+        if !seen_transforms.contains(expected_path) {
+            anyhow::bail!(
+                "Incomplete archive: missing expected transform file '{}'",
+                expected_path
+            );
+        }
+    }
+
     // Read and deserialize endpoint definition
     let endpoint_content = std::fs::read_to_string(temp_path.join("endpoint.json"))
         .context("Endpoint definition not found in archive")?;

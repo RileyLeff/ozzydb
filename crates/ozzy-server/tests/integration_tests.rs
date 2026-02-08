@@ -15,7 +15,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use ozzy_core::canon::canonicalize_source;
 use ozzy_core::commit::compute_commit_hash;
-use ozzy_core::hash::blake3_hash;
+use ozzy_core::hash::{blake3_hash, transform_hash as compute_transform_hash};
 use ozzy_core::project::{Commit, DataSource, Transform};
 use ozzy_core::registry::protocol::PushResponse;
 use ozzy_server::config::Config;
@@ -107,7 +107,7 @@ impl TestServer {
             github_client_id: "test_client_id".to_string(),
             github_client_secret: "test_client_secret".to_string(),
             base_url: "http://localhost:3000".to_string(),
-            local_storage_path: storage_dir.path().to_string_lossy().to_string(),
+            cache_dir: storage_dir.path().to_string_lossy().to_string(),
             r2: None,
             max_tar_size_bytes: 1_073_741_824,
             max_upload_size_bytes: 104_857_600,
@@ -253,6 +253,38 @@ impl TestServer {
             .await
             .expect("Pull manifest request failed")
     }
+
+    /// Create a test user with specific token scopes. Returns (username, bearer_token).
+    async fn create_test_user_with_scopes(
+        &self,
+        suffix: &str,
+        scopes: Vec<String>,
+    ) -> (String, String) {
+        let github_id = rand::random::<i64>().abs();
+        let username = format!("testuser_{}", suffix);
+        let user = self
+            .db
+            .upsert_user_from_github(github_id, &username, None, None)
+            .await
+            .expect("Failed to create test user");
+
+        let (plaintext, token_hash) = ozzy_server::auth::tokens::generate_api_token();
+        let prefix = &plaintext[..12.min(plaintext.len())];
+
+        self.db
+            .create_token(
+                user.id,
+                &format!("test-token-{}", suffix),
+                &token_hash,
+                prefix,
+                &scopes,
+                None,
+            )
+            .await
+            .expect("Failed to create test token");
+
+        (username, plaintext)
+    }
 }
 
 /// Create a minimal valid parquet file.
@@ -313,8 +345,20 @@ fn build_commit(
 
     // Canonicalize transform for hash
     let canonical = canonicalize_source(transform_source);
-    let transform_hash = blake3_hash(canonical.as_bytes());
+    let source_hash = blake3_hash(canonical.as_bytes());
     let lockfile_hash = blake3_hash(b"");
+    let function_name = format!("{}_fn", transform_name);
+    let runtime = "python".to_string();
+    let params_schema = serde_json::json!({});
+    let params_schema_hash = ozzy_core::canon::hash_json(&params_schema);
+    // Composite hash: blake3(source_hash + function_name + lockfile_hash + runtime + params_schema_hash)
+    let composite_hash = compute_transform_hash(
+        &source_hash,
+        &function_name,
+        &lockfile_hash,
+        &runtime,
+        &params_schema_hash,
+    );
 
     let mut data_sources = BTreeMap::new();
     data_sources.insert(
@@ -335,12 +379,12 @@ fn build_commit(
         Transform {
             name: transform_name.to_string(),
             source_path: format!("transforms/{}.py", transform_name),
-            hash: transform_hash.clone(),
-            source_hash: transform_hash,
-            function_name: format!("{}_fn", transform_name),
+            hash: composite_hash,
+            source_hash,
+            function_name,
             input_schema: None,
             output_schema: None,
-            runtime: "python".to_string(),
+            runtime,
             lockfile_hash,
             params_schema: serde_json::json!({}),
             reproducible: true,
@@ -440,7 +484,7 @@ fn test_push_pull_roundtrip() {
                 let text = String::from_utf8(buf).unwrap();
                 let canonical = canonicalize_source(&text);
                 let pulled_hash = blake3_hash(canonical.as_bytes());
-                assert_eq!(pulled_hash, commit.transforms["clean"].hash);
+                assert_eq!(pulled_hash, commit.transforms["clean"].source_hash);
                 found_transform = true;
             }
         }
@@ -682,9 +726,10 @@ fn test_pull_manifest_consistency() {
             manifest.data_hashes.get("raw"),
             Some(&commit.data_sources["raw"].hash),
         );
+        // Manifest transform_hashes use source content hash (for content-addressed storage)
         assert_eq!(
             manifest.transform_hashes.get("clean"),
-            Some(&commit.transforms["clean"].hash),
+            Some(&commit.transforms["clean"].source_hash),
         );
         assert!(manifest.total_size_bytes > 0);
     });
@@ -750,5 +795,322 @@ fn test_commit_hash_roundtrip() {
             "Commit hash mismatch after push/pull roundtrip: recomputed={}, original={}",
             recomputed_hash, original_hash
         );
+    });
+}
+
+// ========================================================================
+// Review Series 1 Wrapup Tests
+// ========================================================================
+
+/// Push with path traversal in data file names should be rejected with 400.
+#[test]
+#[ignore] // Requires Docker
+fn test_push_rejects_path_traversal_filenames() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (user, token) = s.create_test_user("traversal").await;
+        let project = "traversal-proj";
+
+        let parquet_data = create_test_parquet(&[(1, "x")]);
+        let commit = build_commit(
+            vec![],
+            "Traversal test",
+            &parquet_data,
+            TRANSFORM_SOURCE,
+            "raw",
+            "clean",
+        );
+
+        // Push with a path traversal filename: ../../../etc/passwd
+        let mut commit_json = serde_json::to_value(&commit).unwrap();
+        commit_json["ref"] = serde_json::json!("refs/heads/main");
+
+        let form = reqwest::multipart::Form::new()
+            .text("commit", serde_json::to_string(&commit_json).unwrap())
+            .part(
+                "data/../../../etc/passwd",
+                reqwest::multipart::Part::bytes(parquet_data.to_vec()),
+            );
+
+        let resp = s.client
+            .post(format!("{}/api/v1/{}/{}/push", s.base_url, user, project))
+            .header("Authorization", format!("Bearer {}", token))
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            400,
+            "Path traversal should be rejected with 400, got {}",
+            resp.status()
+        );
+    });
+}
+
+/// Push without a lockfile should succeed (lockfile sentinel handling from R15).
+#[test]
+#[ignore] // Requires Docker
+fn test_push_without_lockfile_succeeds() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (user, token) = s.create_test_user("nolockfile").await;
+        let project = "nolockfile-proj";
+
+        let parquet_data = create_test_parquet(&[(1, "a"), (2, "b")]);
+        // Build commit with lockfile_hash = blake3(b"") sentinel
+        let commit = build_commit(
+            vec![],
+            "No lockfile",
+            &parquet_data,
+            TRANSFORM_SOURCE,
+            "raw",
+            "clean",
+        );
+
+        // Verify the lockfile_hash is the sentinel
+        assert_eq!(
+            commit.transforms["clean"].lockfile_hash,
+            blake3_hash(b""),
+            "Test setup: transform should have empty lockfile sentinel"
+        );
+
+        let resp = s
+            .push(
+                &user,
+                project,
+                &token,
+                &commit,
+                &[("raw.parquet", parquet_data.as_slice())],
+                &[("clean.py", TRANSFORM_SOURCE.as_bytes())],
+            )
+            .await;
+        let status = resp.status();
+        let body = resp.text().await.unwrap();
+        assert_eq!(status, 200, "Push without lockfile should succeed: {}", body);
+    });
+}
+
+/// Error responses should use the protocol struct format {error, message}.
+#[test]
+#[ignore] // Requires Docker
+fn test_error_responses_use_consistent_format() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        // 401: No auth token on an endpoint that requires auth (push uses WriteAuthUser)
+        let resp = s.client
+            .post(format!("{}/api/v1/nobody/noproject/push", s.base_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body.get("error").is_some(), "401 response should have 'error' field: {:?}", body);
+        assert!(body.get("message").is_some(), "401 response should have 'message' field: {:?}", body);
+
+        // 404: Non-existent project with valid auth on pull (uses MaybeAuthUser)
+        let (_user, token) = s.create_test_user("errformat").await;
+        let resp = s.client
+            .get(format!(
+                "{}/api/v1/nobody/nonexistent/pull?ref=main",
+                s.base_url
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        assert!(status == 403 || status == 404, "Expected 403/404, got {}", status);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body.get("error").is_some(), "Error response should have 'error' field: {:?}", body);
+        assert!(body.get("message").is_some(), "Error response should have 'message' field: {:?}", body);
+    });
+}
+
+/// Project-scoped token should not be able to access account-wide endpoints.
+#[test]
+#[ignore] // Requires Docker
+fn test_project_scoped_token_cannot_access_account_endpoints() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        // Create a user with a project-scoped token
+        let (_user, scoped_token) = s
+            .create_test_user_with_scopes(
+                "scoped_auth",
+                vec!["read:testuser_scoped_auth/myproject".to_string()],
+            )
+            .await;
+
+        // GET /auth/me should be rejected for project-scoped tokens
+        let resp = s.client
+            .get(format!("{}/api/v1/auth/me", s.base_url))
+            .header("Authorization", format!("Bearer {}", scoped_token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            403,
+            "Project-scoped token should not access /auth/me, got {}",
+            resp.status()
+        );
+
+        // GET /auth/token should also be rejected
+        let resp = s.client
+            .get(format!("{}/api/v1/auth/token", s.base_url))
+            .header("Authorization", format!("Bearer {}", scoped_token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            403,
+            "Project-scoped token should not access /auth/token, got {}",
+            resp.status()
+        );
+
+        // Verify that an unscoped token CAN access these
+        let (_user2, owner_token) = s.create_test_user("owner_auth").await;
+        let resp = s.client
+            .get(format!("{}/api/v1/auth/me", s.base_url))
+            .header("Authorization", format!("Bearer {}", owner_token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "Owner token should access /auth/me, got {}",
+            resp.status()
+        );
+    });
+}
+
+/// Two pushes to the same project should advance the ref correctly.
+#[test]
+#[ignore] // Requires Docker
+fn test_second_push_advances_ref() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (user, token) = s.create_test_user("refadv").await;
+        let project = "refadv-proj";
+
+        let parquet_v1 = create_test_parquet(&[(1, "first")]);
+        let commit1 = build_commit(
+            vec![],
+            "First commit",
+            &parquet_v1,
+            TRANSFORM_SOURCE,
+            "raw",
+            "clean",
+        );
+        let hash1 = commit1.hash.clone();
+
+        let resp = s
+            .push(
+                &user, project, &token, &commit1,
+                &[("raw.parquet", parquet_v1.as_slice())],
+                &[("clean.py", TRANSFORM_SOURCE.as_bytes())],
+            )
+            .await;
+        assert_eq!(resp.status(), 200);
+
+        // Second push with different data
+        let parquet_v2 = create_test_parquet(&[(2, "second"), (3, "third")]);
+        let transform_v2 = "import ozzy\n\n@ozzy.transform()\ndef clean_fn(inputs, params):\n    return inputs[\"main\"].head(1)\n";
+        let commit2 = build_commit(
+            vec![hash1.clone()],
+            "Second commit",
+            &parquet_v2,
+            transform_v2,
+            "raw",
+            "clean",
+        );
+        let hash2 = commit2.hash.clone();
+
+        let resp = s
+            .push(
+                &user, project, &token, &commit2,
+                &[("raw.parquet", parquet_v2.as_slice())],
+                &[("clean.py", transform_v2.as_bytes())],
+            )
+            .await;
+        assert_eq!(resp.status(), 200);
+
+        // Pull manifest should show the second commit
+        let resp = s.pull_manifest(&user, project, &token).await;
+        assert_eq!(resp.status(), 200);
+        let manifest: ozzy_core::registry::protocol::PullManifest =
+            resp.json().await.unwrap();
+        assert_eq!(
+            manifest.commit_hash, hash2,
+            "Manifest should show second commit, not first"
+        );
+        assert_ne!(hash1, hash2, "Commits should have different hashes");
+    });
+}
+
+/// Push with tags and verify they're stored correctly.
+#[test]
+#[ignore] // Requires Docker
+fn test_push_with_tags() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (user, token) = s.create_test_user("tagpush").await;
+        let project = "tagpush-proj";
+
+        let parquet_data = create_test_parquet(&[(1, "tagged")]);
+        let commit = build_commit(
+            vec![],
+            "Tagged commit",
+            &parquet_data,
+            TRANSFORM_SOURCE,
+            "raw",
+            "clean",
+        );
+
+        // Push with a tag (tags are objects mapping tag_name -> commit_hash)
+        let mut commit_json = serde_json::to_value(&commit).unwrap();
+        commit_json["ref"] = serde_json::json!("refs/heads/main");
+        commit_json["tags"] = serde_json::json!({"v1.0.0": commit.hash});
+
+        let form = reqwest::multipart::Form::new()
+            .text("commit", serde_json::to_string(&commit_json).unwrap())
+            .part(
+                "data/raw.parquet",
+                reqwest::multipart::Part::bytes(parquet_data.to_vec()),
+            )
+            .part(
+                "transforms/clean.py",
+                reqwest::multipart::Part::bytes(TRANSFORM_SOURCE.as_bytes().to_vec()),
+            );
+
+        let resp = s.client
+            .post(format!("{}/api/v1/{}/{}/push", s.base_url, user, project))
+            .header("Authorization", format!("Bearer {}", token))
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap();
+        assert_eq!(status, 200, "Push with tag should succeed: {}", body);
+
+        // Pull by tag ref should return the same commit
+        let resp = s.client
+            .get(format!(
+                "{}/api/v1/{}/{}/pull/manifest?ref=v1.0.0",
+                s.base_url, user, project
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "Pull by tag should succeed");
+        let manifest: ozzy_core::registry::protocol::PullManifest =
+            resp.json().await.unwrap();
+        assert_eq!(manifest.commit_hash, commit.hash, "Tag should point to the pushed commit");
     });
 }

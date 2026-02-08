@@ -357,11 +357,14 @@ async fn get_dag_svg(
     let endpoint_defs: Vec<Endpoint> = endpoints
         .iter()
         .map(|e| {
-            serde_json::from_value::<Endpoint>(e.definition.clone()).unwrap_or_else(|_| Endpoint {
-                name: e.name.clone(),
-                nodes: Vec::new(),
-                edges: Vec::new(),
-                description: e.description.clone(),
+            serde_json::from_value::<Endpoint>(e.definition.clone()).unwrap_or_else(|err| {
+                tracing::warn!("Failed to parse endpoint '{}': {}", e.name, err);
+                Endpoint {
+                    name: e.name.clone(),
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                    description: e.description.clone(),
+                }
             })
         })
         .collect();

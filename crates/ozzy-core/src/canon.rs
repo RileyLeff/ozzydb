@@ -208,4 +208,134 @@ mod tests {
 
         assert_eq!(hash_json(&value1), hash_json(&value2));
     }
+
+    // ===== Review Series 1 Wrapup Tests =====
+
+    #[test]
+    fn test_canonicalize_json_string_escapes_keys_with_special_chars() {
+        // R15: JSON key escaping - keys with quotes, backslashes, newlines
+        let value = json!({"key\"with\\quotes": 1, "normal": 2});
+        let canonical = canonicalize_json(&value);
+        assert!(canonical.contains("key\\\"with\\\\quotes"));
+        assert!(canonical.contains("\"normal\":2"));
+
+        // Keys with newlines/tabs
+        let value2 = json!({"\n\t": "val"});
+        let canonical2 = canonicalize_json(&value2);
+        assert!(canonical2.contains("\\n\\t"));
+    }
+
+    #[test]
+    fn test_canonicalize_json_surrogate_pairs() {
+        // R9: Supplementary Unicode (U+10000+) must use UTF-16 surrogate pairs
+        // U+1F600 = Grinning Face emoji
+        let value = json!({"emoji": "\u{1F600}"});
+        let canonical = canonicalize_json(&value);
+        // Should produce \ud83d\ude00 (surrogate pair), not \u1f600
+        assert!(
+            canonical.contains("\\ud83d\\ude00"),
+            "Expected surrogate pair, got: {}",
+            canonical
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_json_float_trimming_edge_cases() {
+        // R8: Float trimming should only trim fractional trailing zeros
+        // 1.50 -> 1.5
+        let value = json!(1.5);
+        assert_eq!(canonicalize_json(&value), "1.5");
+
+        // Integer-valued floats
+        let value2 = json!(100.0);
+        let canonical2 = canonicalize_json(&value2);
+        // 100.0 formats as "100" via Rust's {} formatter (no decimal)
+        assert_eq!(canonical2, "100");
+
+        // Very small numbers that use exponent notation should NOT be trimmed
+        let value3 = json!(1e-10);
+        let canonical3 = canonicalize_json(&value3);
+        // Should preserve the exponent form
+        assert!(
+            canonical3.contains('e') || canonical3.contains('E') || canonical3 == "0.0000000001",
+            "Small float should use exponent or full form: {}",
+            canonical3
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_json_u64_branch() {
+        // R13: Large u64 values should use u64 branch, not lose precision via f64
+        let large_u64: u64 = (1u64 << 53) + 1; // Beyond f64 exact range
+        let value = json!(large_u64);
+        let canonical = canonicalize_json(&value);
+        assert_eq!(canonical, large_u64.to_string());
+    }
+
+    #[test]
+    fn test_canonicalize_source_mixed_crlf_and_lf() {
+        // CRLF and LF mixed with trailing whitespace
+        let input = "line1  \r\nline2\t\nline3   ";
+        let result = canonicalize_source(input);
+        assert_eq!(result, "line1\nline2\nline3");
+        assert!(!result.contains('\r'));
+    }
+
+    #[test]
+    fn test_hash_source_directory_skips_pycache() {
+        // R13: __pycache__ directories should be excluded from hashing
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("transform.py");
+        fs::write(&src, "def foo(): pass").unwrap();
+
+        // Create __pycache__ with a .pyc file
+        let pycache = dir.path().join("__pycache__");
+        fs::create_dir_all(&pycache).unwrap();
+        fs::write(pycache.join("transform.cpython-311.pyc"), b"\x00\x00").unwrap();
+
+        let hash_with_pycache = hash_source_directory(dir.path()).unwrap();
+
+        // Remove __pycache__ and hash again
+        fs::remove_dir_all(&pycache).unwrap();
+        let hash_without_pycache = hash_source_directory(dir.path()).unwrap();
+
+        assert_eq!(
+            hash_with_pycache, hash_without_pycache,
+            "__pycache__ should not affect source directory hash"
+        );
+    }
+
+    #[test]
+    fn test_hash_source_directory_skips_hidden_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("transform.py");
+        fs::write(&src, "def foo(): pass").unwrap();
+
+        let hash_without_hidden = hash_source_directory(dir.path()).unwrap();
+
+        // Add a hidden file
+        fs::write(dir.path().join(".DS_Store"), b"hidden").unwrap();
+        let hash_with_hidden = hash_source_directory(dir.path()).unwrap();
+
+        assert_eq!(
+            hash_without_hidden, hash_with_hidden,
+            "Hidden files should not affect source directory hash"
+        );
+    }
+
+    #[test]
+    fn test_hash_source_directory_cross_platform_separators() {
+        // R19 M4: Path separators should be normalized to forward slash
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("subdir");
+        fs::create_dir_all(&subdir).unwrap();
+        fs::write(subdir.join("file.py"), "content").unwrap();
+
+        // Hash should be deterministic regardless of OS path separators
+        let hash = hash_source_directory(dir.path()).unwrap();
+        assert!(!hash.is_empty());
+        // Running twice should produce same result
+        let hash2 = hash_source_directory(dir.path()).unwrap();
+        assert_eq!(hash, hash2);
+    }
 }

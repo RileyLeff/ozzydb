@@ -150,6 +150,18 @@ fn format_data_type(dt: &DataType) -> String {
     }
 }
 
+/// Extract the content between a prefix and its closing delimiter.
+///
+/// Returns `None` if the string doesn't end with the expected closing char
+/// or is too short to contain any inner content.
+fn extract_inner<'a>(s: &'a str, prefix_len: usize, close: char) -> Option<&'a str> {
+    if s.len() > prefix_len && s.ends_with(close) {
+        Some(&s[prefix_len..s.len() - 1])
+    } else {
+        None
+    }
+}
+
 /// Parse a string data type back to Arrow DataType.
 fn parse_data_type(s: &str) -> DataType {
     match s {
@@ -174,37 +186,64 @@ fn parse_data_type(s: &str) -> DataType {
         "date64" => DataType::Date64,
         s if s.starts_with("timestamp[") => {
             // Parse timestamp[unit, tz] or timestamp[unit]
-            let inner = &s[10..s.len() - 1];
-            let parts: Vec<&str> = inner.split(", ").collect();
-            let unit = parse_time_unit(parts[0]);
-            let tz = parts.get(1).map(|s| Arc::from(*s));
-            DataType::Timestamp(unit, tz)
+            if let Some(inner) = extract_inner(s, 10, ']') {
+                let parts: Vec<&str> = inner.split(", ").collect();
+                let unit = parse_time_unit(parts[0]);
+                let tz = parts.get(1).map(|s| Arc::from(*s));
+                DataType::Timestamp(unit, tz)
+            } else {
+                eprintln!("Warning: malformed type '{}', falling back to Utf8", s);
+                DataType::Utf8
+            }
         }
         s if s.starts_with("time32[") => {
-            let inner = &s[7..s.len() - 1];
-            DataType::Time32(parse_time_unit(inner))
+            if let Some(inner) = extract_inner(s, 7, ']') {
+                DataType::Time32(parse_time_unit(inner))
+            } else {
+                eprintln!("Warning: malformed type '{}', falling back to Utf8", s);
+                DataType::Utf8
+            }
         }
         s if s.starts_with("time64[") => {
-            let inner = &s[7..s.len() - 1];
-            DataType::Time64(parse_time_unit(inner))
+            if let Some(inner) = extract_inner(s, 7, ']') {
+                DataType::Time64(parse_time_unit(inner))
+            } else {
+                eprintln!("Warning: malformed type '{}', falling back to Utf8", s);
+                DataType::Utf8
+            }
         }
         s if s.starts_with("duration[") => {
-            let inner = &s[9..s.len() - 1];
-            DataType::Duration(parse_time_unit(inner))
+            if let Some(inner) = extract_inner(s, 9, ']') {
+                DataType::Duration(parse_time_unit(inner))
+            } else {
+                eprintln!("Warning: malformed type '{}', falling back to Utf8", s);
+                DataType::Utf8
+            }
         }
         s if s.starts_with("list<") => {
-            let inner = &s[5..s.len() - 1];
-            let inner_type = parse_data_type(inner);
-            DataType::List(Arc::new(Field::new("item", inner_type, true)))
+            if let Some(inner) = extract_inner(s, 5, '>') {
+                let inner_type = parse_data_type(inner);
+                DataType::List(Arc::new(Field::new("item", inner_type, true)))
+            } else {
+                eprintln!("Warning: malformed type '{}', falling back to Utf8", s);
+                DataType::Utf8
+            }
         }
         s if s.starts_with("large_list<") => {
-            let inner = &s[11..s.len() - 1];
-            let inner_type = parse_data_type(inner);
-            DataType::LargeList(Arc::new(Field::new("item", inner_type, true)))
+            if let Some(inner) = extract_inner(s, 11, '>') {
+                let inner_type = parse_data_type(inner);
+                DataType::LargeList(Arc::new(Field::new("item", inner_type, true)))
+            } else {
+                eprintln!("Warning: malformed type '{}', falling back to Utf8", s);
+                DataType::Utf8
+            }
         }
         s if s.starts_with("fixed_list<") => {
             // fixed_list<type, size>
-            let inner = &s[11..s.len() - 1];
+            let Some(inner) = extract_inner(s, 11, '>') else {
+                eprintln!("Warning: malformed type '{}', falling back to Utf8", s);
+                return DataType::Utf8;
+            };
             if let Some(comma_pos) = inner.rfind(", ") {
                 let type_str = &inner[..comma_pos];
                 let size_str = &inner[comma_pos + 2..];
@@ -224,17 +263,20 @@ fn parse_data_type(s: &str) -> DataType {
         }
         s if s.starts_with("struct<") => {
             // struct<field1: type1, field2: type2>
-            let inner = &s[7..s.len() - 1];
+            let Some(inner) = extract_inner(s, 7, '>') else {
+                eprintln!("Warning: malformed type '{}', falling back to Utf8", s);
+                return DataType::Utf8;
+            };
             let mut fields = Vec::new();
             let mut depth = 0;
             let mut current = String::new();
             for c in inner.chars() {
                 match c {
-                    '<' => {
+                    '<' | '[' => {
                         depth += 1;
                         current.push(c);
                     }
-                    '>' => {
+                    '>' | ']' => {
                         depth -= 1;
                         current.push(c);
                     }
@@ -268,7 +310,10 @@ fn parse_data_type(s: &str) -> DataType {
         }
         s if s.starts_with("dict<") => {
             // dict<key_type, value_type> -- use depth-aware split for nested types
-            let inner = &s[5..s.len() - 1];
+            let Some(inner) = extract_inner(s, 5, '>') else {
+                eprintln!("Warning: malformed type '{}', falling back to Utf8", s);
+                return DataType::Utf8;
+            };
             let mut depth = 0;
             let mut split_pos = None;
             for (i, c) in inner.char_indices() {
@@ -646,5 +691,182 @@ mod tests {
         let formatted = format_data_type(&dict_type);
         let parsed = parse_data_type(&formatted);
         assert_eq!(dict_type, parsed, "Dict with nested struct roundtrip failed");
+    }
+
+    #[test]
+    fn test_struct_with_bracket_types_roundtrip() {
+        // Verifies that timestamp[s, UTC] inside struct<> doesn't split on the inner comma
+        let struct_type = DataType::Struct(
+            vec![
+                Arc::new(Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
+                    true,
+                )),
+                Arc::new(Field::new("val", DataType::Int64, true)),
+            ]
+            .into(),
+        );
+        let formatted = format_data_type(&struct_type);
+        assert_eq!(formatted, "struct<ts: timestamp[s, UTC], val: int64>");
+        let parsed = parse_data_type(&formatted);
+        assert_eq!(struct_type, parsed, "Struct with bracket types roundtrip failed");
+    }
+
+    #[test]
+    fn test_malformed_type_falls_back_to_utf8() {
+        // Missing closing bracket
+        assert_eq!(parse_data_type("timestamp"), DataType::Utf8);
+        assert_eq!(parse_data_type("list"), DataType::Utf8);
+        assert_eq!(parse_data_type("list<"), DataType::Utf8);
+        assert_eq!(parse_data_type("struct<"), DataType::Utf8);
+        assert_eq!(parse_data_type("dict<"), DataType::Utf8);
+        assert_eq!(parse_data_type("time32["), DataType::Utf8);
+        assert_eq!(parse_data_type("duration["), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_extract_inner_helper() {
+        assert_eq!(extract_inner("list<int64>", 5, '>'), Some("int64"));
+        assert_eq!(extract_inner("time32[ms]", 7, ']'), Some("ms"));
+        assert_eq!(extract_inner("list<", 5, '>'), None);
+        assert_eq!(extract_inner("list", 5, '>'), None);
+        assert_eq!(extract_inner("", 5, '>'), None);
+    }
+
+    // ===== Review Series 1 Wrapup Tests =====
+
+    #[test]
+    fn test_list_of_struct_roundtrip() {
+        // Nested: list<struct<a: int64, b: utf8>>
+        let inner = DataType::Struct(
+            vec![
+                Arc::new(Field::new("a", DataType::Int64, true)),
+                Arc::new(Field::new("b", DataType::Utf8, true)),
+            ]
+            .into(),
+        );
+        let list_type = DataType::List(Arc::new(Field::new("item", inner, true)));
+        let formatted = format_data_type(&list_type);
+        let parsed = parse_data_type(&formatted);
+        assert_eq!(list_type, parsed, "list<struct<...>> roundtrip failed");
+    }
+
+    #[test]
+    fn test_struct_with_multiple_bracket_types() {
+        // struct<ts: timestamp[s, UTC], dur: duration[ms], val: int64>
+        let struct_type = DataType::Struct(
+            vec![
+                Arc::new(Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
+                    true,
+                )),
+                Arc::new(Field::new(
+                    "dur",
+                    DataType::Duration(TimeUnit::Millisecond),
+                    true,
+                )),
+                Arc::new(Field::new("val", DataType::Int64, true)),
+            ]
+            .into(),
+        );
+        let formatted = format_data_type(&struct_type);
+        assert_eq!(
+            formatted,
+            "struct<ts: timestamp[s, UTC], dur: duration[ms], val: int64>"
+        );
+        let parsed = parse_data_type(&formatted);
+        assert_eq!(struct_type, parsed);
+    }
+
+    #[test]
+    fn test_dict_with_list_value_roundtrip() {
+        // dict<int32, list<utf8>> - nested type in dict value position
+        let list_type = DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)));
+        let dict_type = DataType::Dictionary(Box::new(DataType::Int32), Box::new(list_type));
+        let formatted = format_data_type(&dict_type);
+        let parsed = parse_data_type(&formatted);
+        assert_eq!(dict_type, parsed, "dict<int32, list<utf8>> roundtrip failed");
+    }
+
+    #[test]
+    fn test_timestamp_all_units_roundtrip() {
+        let units = vec![
+            (TimeUnit::Second, "s"),
+            (TimeUnit::Millisecond, "ms"),
+            (TimeUnit::Microsecond, "us"),
+            (TimeUnit::Nanosecond, "ns"),
+        ];
+        for (unit, _label) in units {
+            // Without timezone
+            let dt = DataType::Timestamp(unit, None);
+            let formatted = format_data_type(&dt);
+            let parsed = parse_data_type(&formatted);
+            assert_eq!(dt, parsed, "timestamp without tz failed for {:?}", unit);
+
+            // With timezone
+            let dt_tz = DataType::Timestamp(unit, Some(Arc::from("America/New_York")));
+            let formatted_tz = format_data_type(&dt_tz);
+            let parsed_tz = parse_data_type(&formatted_tz);
+            assert_eq!(dt_tz, parsed_tz, "timestamp with tz failed for {:?}", unit);
+        }
+    }
+
+    #[test]
+    fn test_time32_time64_duration_roundtrip() {
+        let dt32 = DataType::Time32(TimeUnit::Millisecond);
+        assert_eq!(dt32, parse_data_type(&format_data_type(&dt32)));
+
+        let dt64 = DataType::Time64(TimeUnit::Nanosecond);
+        assert_eq!(dt64, parse_data_type(&format_data_type(&dt64)));
+
+        let dur = DataType::Duration(TimeUnit::Microsecond);
+        assert_eq!(dur, parse_data_type(&format_data_type(&dur)));
+    }
+
+    #[test]
+    fn test_large_list_roundtrip() {
+        let dt = DataType::LargeList(Arc::new(Field::new("item", DataType::Float64, true)));
+        let formatted = format_data_type(&dt);
+        assert_eq!(formatted, "large_list<float64>");
+        let parsed = parse_data_type(&formatted);
+        assert_eq!(dt, parsed);
+    }
+
+    #[test]
+    fn test_schema_diff_detects_changes() {
+        let from = SchemaInfo {
+            fields: vec![
+                FieldInfo { name: "a".into(), dtype: "int64".into(), nullable: false },
+                FieldInfo { name: "b".into(), dtype: "utf8".into(), nullable: true },
+            ],
+        };
+        let to = SchemaInfo {
+            fields: vec![
+                FieldInfo { name: "a".into(), dtype: "float64".into(), nullable: false },
+                FieldInfo { name: "c".into(), dtype: "utf8".into(), nullable: true },
+            ],
+        };
+        let diff = schema_diff(&from, &to);
+        assert_eq!(diff.added.len(), 1); // "c" added
+        assert_eq!(diff.removed.len(), 1); // "b" removed
+        assert_eq!(diff.changed.len(), 1); // "a" type changed
+        assert_eq!(diff.added[0].name, "c");
+        assert_eq!(diff.removed[0].name, "b");
+        assert_eq!(diff.changed[0].name, "a");
+    }
+
+    #[test]
+    fn test_validate_pipeline_missing_column() {
+        let schema = SchemaInfo {
+            fields: vec![
+                FieldInfo { name: "id".into(), dtype: "int64".into(), nullable: false },
+                FieldInfo { name: "value".into(), dtype: "float64".into(), nullable: true },
+            ],
+        };
+        let result = validate_pipeline(&schema, &[("transform1", vec!["id", "missing_col"])]);
+        assert!(!result.valid);
+        assert!(result.errors[0].contains("missing_col"));
     }
 }
