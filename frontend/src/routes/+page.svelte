@@ -1,21 +1,17 @@
 <script>
 	import WavyDivider from '$lib/components/WavyDivider.svelte';
-	import CodeSnippet from '$lib/components/CodeSnippet.svelte';
 
-	const pythonExample = `import ozzydb
-
-# Fetch a remote endpoint as a Polars DataFrame
-df = ozzydb.fetch("alice/weather/daily-forecast")
-print(df.head())`;
-
-	const cliExample = `# Initialize a project and run locally
-ozzy init my-pipeline
-ozzy data add measurements.parquet
-ozzy transform add clean.py
-ozzy endpoint create forecast --pipeline "measurements -> clean"
-ozzy run forecast`;
-
-
+	const languages = [
+		{ name: 'Python', icon: 'devicon-python-plain', runtime: true, client: true },
+		{ name: 'R', icon: 'devicon-r-plain', runtime: false, client: false },
+		{ name: 'Julia', icon: 'devicon-julia-plain', runtime: false, client: false },
+		{ name: 'Rust', icon: 'devicon-rust-plain', runtime: false, client: false },
+		{ name: 'TypeScript', icon: 'devicon-typescript-plain', runtime: false, client: false },
+		{ name: 'Go', icon: 'devicon-go-plain', runtime: false, client: false },
+		{ name: 'C / C++', icon: 'devicon-cplusplus-plain', runtime: false, client: false },
+		{ name: 'Fortran', icon: 'devicon-fortran-original', runtime: false, client: false },
+		{ name: 'MATLAB', icon: 'devicon-matlab-plain', runtime: false, client: false },
+	];
 </script>
 
 <!-- Hero -->
@@ -214,22 +210,32 @@ ozzy run forecast`;
 	</div>
 </section>
 
-<!-- Code examples -->
-<section class="code-examples">
+<!-- Language support -->
+<section class="lang-support">
 	<div class="container">
-		<h2 class="section-heading">See it in action</h2>
+		<h2 class="section-heading">Language support</h2>
+		<p class="section-sub">Write transforms and fetch data in the languages you already use.</p>
 
-		<div class="examples-grid">
-			<div class="example-block">
-				<h3 class="example-label">Python client</h3>
-				<CodeSnippet code={pythonExample} language="python" title="fetch.py" />
-			</div>
-
-			<div class="example-block">
-				<h3 class="example-label">CLI workflow</h3>
-				<CodeSnippet code={cliExample} language="bash" title="terminal" />
-			</div>
+		<div class="lang-grid">
+			{#each languages as lang}
+				<div class="lang-card" class:lang-active={lang.runtime || lang.client}>
+					<i class="{lang.icon} lang-icon" class:lang-icon-active={lang.runtime || lang.client}></i>
+					<span class="lang-name">{lang.name}</span>
+					<div class="lang-badges">
+						<span class="lang-badge" class:badge-active={lang.runtime} class:badge-planned={!lang.runtime}>
+							{lang.runtime ? 'runtime' : 'planned'}
+						</span>
+						<span class="lang-badge" class:badge-active={lang.client} class:badge-planned={!lang.client}>
+							{lang.client ? 'client' : 'planned'}
+						</span>
+					</div>
+				</div>
+			{/each}
 		</div>
+
+		<p class="lang-footnote">
+			Runtime = write transforms in this language. Client = fetch data from this language.
+		</p>
 	</div>
 </section>
 
@@ -543,32 +549,104 @@ ozzy run forecast`;
 		line-height: 1.6;
 	}
 
-	/* ── Code examples ────────────────────────────────────── */
+	/* ── Language support ─────────────────────────────────── */
 
-	.code-examples {
+	.lang-support {
 		padding: var(--space-2xl) 0 var(--space-3xl);
 		background: var(--bg-secondary);
 	}
 
-	.examples-grid {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		gap: var(--space-xl);
+	.section-sub {
+		text-align: center;
+		color: var(--text-secondary);
+		font-size: 1rem;
+		margin-top: calc(-1 * var(--space-lg));
+		margin-bottom: var(--space-2xl);
 	}
 
-	.example-block {
+	.lang-grid {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: var(--space-md);
+		max-width: 720px;
+		margin: 0 auto;
+	}
+
+	.lang-card {
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-md);
-		min-width: 0;
+		align-items: center;
+		gap: var(--space-xs);
+		padding: var(--space-lg) var(--space-md);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-lg);
+		transition: border-color 0.2s, box-shadow 0.2s;
 	}
 
-	.example-label {
+	.lang-card:hover {
+		border-color: var(--border-strong);
+		box-shadow: 0 2px 12px rgba(0, 0, 0, 0.05);
+	}
+
+	.lang-active {
+		border-color: color-mix(in srgb, var(--pink) 40%, transparent);
+		background: color-mix(in srgb, var(--pink) 3%, transparent);
+	}
+
+	.lang-active:hover {
+		border-color: var(--pink);
+	}
+
+	.lang-icon {
+		font-size: 32px;
+		color: var(--text-muted);
+		opacity: 0.4;
+	}
+
+	.lang-icon-active {
+		color: var(--pink);
+		opacity: 1;
+	}
+
+	.lang-name {
 		font-size: 0.875rem;
 		font-weight: 600;
-		color: var(--text-secondary);
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
+		color: var(--text);
+	}
+
+	.lang-badges {
+		display: flex;
+		gap: 6px;
+		margin-top: 2px;
+	}
+
+	.lang-badge {
+		font-family: var(--font-mono);
+		font-size: 10px;
+		font-weight: 500;
+		padding: 2px 7px;
+		border-radius: 999px;
+		line-height: 1.4;
+	}
+
+	.badge-active {
+		background: color-mix(in srgb, var(--pink) 12%, transparent);
+		color: var(--pink);
+		border: 1px solid color-mix(in srgb, var(--pink) 25%, transparent);
+	}
+
+	.badge-planned {
+		background: transparent;
+		color: var(--text-muted);
+		border: 1px solid var(--border);
+	}
+
+	.lang-footnote {
+		text-align: center;
+		font-size: 0.8125rem;
+		color: var(--text-muted);
+		margin-top: var(--space-lg);
+		font-style: italic;
 	}
 
 	/* ── Responsive ───────────────────────────────────────── */
@@ -583,14 +661,13 @@ ozzy run forecast`;
 		.features-grid {
 			grid-template-columns: 1fr;
 		}
+
+		.lang-grid {
+			grid-template-columns: repeat(2, 1fr);
+		}
 	}
 
 	@media (max-width: 768px) {
-
-		.examples-grid {
-			grid-template-columns: 1fr;
-		}
-
 		.hero {
 			padding: var(--space-2xl) 0 calc(var(--space-2xl) + 16px);
 		}
