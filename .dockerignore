@@ -1,0 +1,11 @@
+target/
+.git/
+.github/
+.claude/
+clients/
+docs/
+planning/
+*.md
+.gitignore
+.dockerignore
+Justfile

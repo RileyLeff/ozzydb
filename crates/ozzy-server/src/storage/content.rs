@@ -28,6 +28,11 @@ pub struct ContentStorage {
     cache_dir: PathBuf,
     remote_store: Option<Arc<dyn ObjectStore>>,
     prefix: String,
+    /// When true, `get()` and `get_stream()` verify that the content hash matches
+    /// the requested key. This is correct for content-addressed storage (where the
+    /// key IS the blake3 of the content), but must be false for materialized storage
+    /// (where the key is a composite hash of inputs+transform+params+platform).
+    verify_content_hash: bool,
 }
 
 impl ContentStorage {
@@ -62,12 +67,14 @@ impl ContentStorage {
         cache_dir: PathBuf,
         remote_store: Option<Arc<dyn ObjectStore>>,
         prefix: impl Into<String>,
+        verify_content_hash: bool,
     ) -> Result<Self> {
         std::fs::create_dir_all(&cache_dir)?;
         Ok(Self {
             cache_dir,
             remote_store,
             prefix: prefix.into(),
+            verify_content_hash,
         })
     }
 
@@ -85,10 +92,14 @@ impl ContentStorage {
             PathBuf::from(&config.cache_dir),
             remote_store,
             "content",
+            true, // content-addressed: verify hash on read
         )
     }
 
     /// Create storage from server config with a custom prefix.
+    ///
+    /// Hash verification is disabled because the storage key may not be the
+    /// blake3 of the content (e.g., materialized cache uses composite hashes).
     pub fn from_config_with_prefix(config: &Config, prefix: &str) -> Result<Self> {
         let remote_store = config
             .r2
@@ -99,19 +110,20 @@ impl ContentStorage {
             PathBuf::from(&config.cache_dir),
             remote_store,
             prefix,
+            false, // key-addressed: skip hash verification
         )
     }
 
     /// Create storage with R2-only configuration (used by legacy tests).
     pub fn new(config: &R2Config) -> Result<Self> {
         let remote_store = Some(Self::build_remote_store(config)?);
-        Self::new_with_cache_and_remote(Self::default_cache_dir(), remote_store, "content")
+        Self::new_with_cache_and_remote(Self::default_cache_dir(), remote_store, "content", true)
     }
 
     /// Create storage with custom prefix (used by integration tests).
     pub fn with_prefix(config: &R2Config, prefix: impl Into<String>) -> Result<Self> {
         let remote_store = Some(Self::build_remote_store(config)?);
-        Self::new_with_cache_and_remote(Self::default_cache_dir(), remote_store, prefix)
+        Self::new_with_cache_and_remote(Self::default_cache_dir(), remote_store, prefix, true)
     }
 
     fn object_path(&self, content_hash: &str, extension: &str) -> Result<ObjectPath> {
@@ -298,13 +310,15 @@ impl ContentStorage {
         let local_path = self.local_path(content_hash, extension)?;
         if local_path.exists() {
             let content = std::fs::read(&local_path)?;
-            let actual_hash = hash::blake3_hash(&content);
-            if actual_hash != content_hash {
-                anyhow::bail!(
-                    "Content hash mismatch: expected {}, got {}. Local storage may be corrupted.",
-                    content_hash,
-                    actual_hash
-                );
+            if self.verify_content_hash {
+                let actual_hash = hash::blake3_hash(&content);
+                if actual_hash != content_hash {
+                    anyhow::bail!(
+                        "Content hash mismatch: expected {}, got {}. Local storage may be corrupted.",
+                        content_hash,
+                        actual_hash
+                    );
+                }
             }
             return Ok(Bytes::from(content));
         }
@@ -358,13 +372,15 @@ impl ContentStorage {
             let raw = std::fs::read(&local_path).map_err(|e| {
                 anyhow::anyhow!("Failed to read local file {}: {}", local_path.display(), e)
             })?;
-            let actual_hash = hash::blake3_hash(&raw);
-            if actual_hash != content_hash {
-                anyhow::bail!(
-                    "Content hash mismatch in get_stream: expected {}, got {}. Local storage may be corrupted.",
-                    content_hash,
-                    actual_hash
-                );
+            if self.verify_content_hash {
+                let actual_hash = hash::blake3_hash(&raw);
+                if actual_hash != content_hash {
+                    anyhow::bail!(
+                        "Content hash mismatch in get_stream: expected {}, got {}. Local storage may be corrupted.",
+                        content_hash,
+                        actual_hash
+                    );
+                }
             }
             let bytes = Bytes::from(raw);
             return Ok(Box::pin(futures::stream::once(async move { Ok(bytes) })));

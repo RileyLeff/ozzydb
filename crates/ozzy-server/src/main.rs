@@ -64,6 +64,13 @@ async fn main() -> Result<()> {
         tracing::info!("Server-side compute disabled");
     }
 
+    if !config.allowed_logins.is_empty() {
+        tracing::info!(
+            "Registration restricted to: {}",
+            config.allowed_logins.join(", ")
+        );
+    }
+
     // Build application state
     let state = AppState {
         config: Arc::new(config.clone()),

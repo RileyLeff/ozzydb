@@ -63,6 +63,7 @@ async fn build_test_app() -> Option<Router> {
             timeout_secs: 300,
             tmpfs_size: "1g".to_string(),
         },
+        allowed_logins: vec![],
     };
 
     let storage = ContentStorage::from_config(&config).ok()?;

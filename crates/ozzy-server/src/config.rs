@@ -40,6 +40,11 @@ pub struct Config {
 
     /// Server-side compute configuration.
     pub compute: ComputeConfig,
+
+    /// Optional allowlist of GitHub usernames permitted to log in.
+    /// When empty, registration is open to everyone.
+    /// Set via ALLOWED_LOGINS=rileyleff,collaborator2
+    pub allowed_logins: Vec<String>,
 }
 
 /// Server-side transform compute configuration.
@@ -112,6 +117,12 @@ impl Config {
                 .context("MAX_UPLOAD_SIZE_BYTES must be a number")?,
             cors_origins: std::env::var("CORS_ORIGINS").unwrap_or_else(|_| "*".into()),
             compute: ComputeConfig::from_env(),
+            allowed_logins: std::env::var("ALLOWED_LOGINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
         })
     }
 }
@@ -156,12 +167,12 @@ impl R2Config {
     }
 
     /// Load optional R2 configuration.
-    /// Returns None when required R2 credentials are not all present.
+    /// Returns None when required R2 credentials are not all present (or empty).
     pub fn from_env_optional() -> Option<Self> {
-        let endpoint = std::env::var("R2_ENDPOINT").ok()?;
-        let bucket = std::env::var("R2_BUCKET").ok()?;
-        let access_key_id = std::env::var("R2_ACCESS_KEY_ID").ok()?;
-        let secret_access_key = std::env::var("R2_SECRET_ACCESS_KEY").ok()?;
+        let endpoint = std::env::var("R2_ENDPOINT").ok().filter(|s| !s.is_empty())?;
+        let bucket = std::env::var("R2_BUCKET").ok().filter(|s| !s.is_empty())?;
+        let access_key_id = std::env::var("R2_ACCESS_KEY_ID").ok().filter(|s| !s.is_empty())?;
+        let secret_access_key = std::env::var("R2_SECRET_ACCESS_KEY").ok().filter(|s| !s.is_empty())?;
 
         Some(Self {
             endpoint,

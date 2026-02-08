@@ -74,6 +74,19 @@ async fn github_poll(
     // Get GitHub user info
     let gh_user = github::get_github_user(&access_token).await?;
 
+    // Check registration allowlist
+    if !state.config.allowed_logins.is_empty()
+        && !state
+            .config
+            .allowed_logins
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(&gh_user.login))
+    {
+        return Err(ApiError::forbidden(
+            "Registration is currently restricted. Your GitHub account is not on the allowlist.",
+        ));
+    }
+
     // Upsert user in database
     let user = state
         .db
