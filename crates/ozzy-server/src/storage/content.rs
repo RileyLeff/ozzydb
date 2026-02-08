@@ -88,6 +88,20 @@ impl ContentStorage {
         )
     }
 
+    /// Create storage from server config with a custom prefix.
+    pub fn from_config_with_prefix(config: &Config, prefix: &str) -> Result<Self> {
+        let remote_store = config
+            .r2
+            .as_ref()
+            .map(Self::build_remote_store)
+            .transpose()?;
+        Self::new_with_cache_and_remote(
+            PathBuf::from(&config.cache_dir),
+            remote_store,
+            prefix,
+        )
+    }
+
     /// Create storage with R2-only configuration (used by legacy tests).
     pub fn new(config: &R2Config) -> Result<Self> {
         let remote_store = Some(Self::build_remote_store(config)?);
@@ -235,6 +249,42 @@ impl ContentStorage {
         }
 
         Ok(content_hash)
+    }
+
+    /// Store content with a pre-determined hash (e.g., a materialized cache key).
+    ///
+    /// Unlike `store()`, this does not compute the hash from the content — the
+    /// caller provides the hash to use as the storage key.
+    pub async fn store_with_hash(
+        &self,
+        content_hash: &str,
+        content: &[u8],
+        extension: &str,
+    ) -> Result<()> {
+        if self.remote_store.is_some() {
+            self.upload_remote(content_hash, extension, content).await?;
+            self.cache_local_best_effort(content_hash, extension, content).await;
+        } else {
+            let local_path = self.local_path(content_hash, extension)?;
+            if !local_path.exists() {
+                Self::ensure_parent(&local_path)?;
+                let tmp_path = local_path.with_extension(format!(
+                    "{}.{}.tmp",
+                    extension,
+                    uuid::Uuid::new_v4()
+                ));
+                tokio::fs::write(&tmp_path, content).await?;
+                match tokio::fs::rename(&tmp_path, &local_path).await {
+                    Ok(()) => {}
+                    Err(e) if local_path.exists() => {
+                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                        tracing::debug!("concurrent store race for {}: {}", content_hash, e);
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Store content from bytes.

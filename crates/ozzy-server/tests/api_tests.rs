@@ -55,13 +55,23 @@ async fn build_test_app() -> Option<Router> {
         max_tar_size_bytes: 1_073_741_824,
         max_upload_size_bytes: 104_857_600,
         cors_origins: "*".to_string(),
+        compute: ozzy_server::config::ComputeConfig {
+            enabled: false,
+            docker_runtime: "runc".to_string(),
+            memory_limit: "4g".to_string(),
+            cpu_limit: "2".to_string(),
+            timeout_secs: 300,
+            tmpfs_size: "1g".to_string(),
+        },
     };
 
     let storage = ContentStorage::from_config(&config).ok()?;
+    let materialized_storage = ContentStorage::from_config_with_prefix(&config, "materialized").ok()?;
     let state = AppState {
         config: Arc::new(config),
         db: Database::new(pool),
         storage,
+        materialized_storage,
     };
 
     let app = Router::new().merge(api::router()).with_state(state);

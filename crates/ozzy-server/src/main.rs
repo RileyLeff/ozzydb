@@ -42,6 +42,7 @@ async fn main() -> Result<()> {
 
     // Initialize storage (R2 primary when configured, local cache for reads)
     let storage = ContentStorage::from_config(&config)?;
+    let materialized_storage = ContentStorage::from_config_with_prefix(&config, "materialized")?;
     if let Some(r2) = &config.r2 {
         tracing::info!("R2 storage: {}/{}", r2.endpoint, r2.bucket);
         tracing::info!("Local cache at {}", config.cache_dir);
@@ -50,11 +51,25 @@ async fn main() -> Result<()> {
         tracing::info!("Local storage at {}", config.cache_dir);
     }
 
+    // Log compute config
+    if config.compute.enabled {
+        tracing::info!(
+            "Server-side compute enabled (runtime={}, mem={}, cpu={}, timeout={}s)",
+            config.compute.docker_runtime,
+            config.compute.memory_limit,
+            config.compute.cpu_limit,
+            config.compute.timeout_secs,
+        );
+    } else {
+        tracing::info!("Server-side compute disabled");
+    }
+
     // Build application state
     let state = AppState {
         config: Arc::new(config.clone()),
         db: Database::new(pool),
         storage,
+        materialized_storage,
     };
 
     // Build router

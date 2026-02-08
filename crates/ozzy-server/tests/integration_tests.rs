@@ -112,15 +112,27 @@ impl TestServer {
             max_tar_size_bytes: 1_073_741_824,
             max_upload_size_bytes: 104_857_600,
             cors_origins: "*".to_string(),
+            compute: ozzy_server::config::ComputeConfig {
+                enabled: false,
+                docker_runtime: "runc".to_string(),
+                memory_limit: "4g".to_string(),
+                cpu_limit: "2".to_string(),
+                timeout_secs: 300,
+                tmpfs_size: "1g".to_string(),
+            },
         };
 
         let storage =
             ContentStorage::from_config(&config).expect("Failed to create content storage");
+        let materialized_storage =
+            ContentStorage::from_config_with_prefix(&config, "materialized")
+                .expect("Failed to create materialized storage");
 
         let state = AppState {
             config: Arc::new(config),
             db: db.clone(),
             storage,
+            materialized_storage,
         };
 
         let app = axum::Router::new()

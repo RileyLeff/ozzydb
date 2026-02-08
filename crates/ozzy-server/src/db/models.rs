@@ -130,6 +130,22 @@ pub struct ApiToken {
     pub created_at: DateTime<Utc>,
 }
 
+/// Materialized cache entry (server-side compute result).
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct MaterializedCacheEntry {
+    pub materialized_hash: String,
+    pub project_id: Uuid,
+    pub endpoint_name: String,
+    pub commit_hash: String,
+    pub platform_hash: String,
+    pub byte_size: i64,
+    pub row_count: Option<i64>,
+    pub access_count: i32,
+    pub pinned: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_accessed: DateTime<Utc>,
+}
+
 /// Content reference (for deduplication tracking).
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct ContentRef {

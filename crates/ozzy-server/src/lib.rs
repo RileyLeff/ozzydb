@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod compute;
 pub mod config;
 pub mod db;
 pub mod storage;
@@ -20,4 +21,6 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub db: Database,
     pub storage: ContentStorage,
+    /// Storage for materialized transform outputs (separate R2 prefix).
+    pub materialized_storage: ContentStorage,
 }

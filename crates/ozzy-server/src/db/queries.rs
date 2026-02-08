@@ -680,6 +680,58 @@ impl Database {
     }
 
     // ========================================================================
+    // Materialized Cache Operations
+    // ========================================================================
+
+    /// Look up a materialized cache entry by hash.
+    pub async fn get_materialized_cache_entry(
+        &self,
+        materialized_hash: &str,
+    ) -> Result<Option<MaterializedCacheEntry>> {
+        let entry = sqlx::query_as::<_, MaterializedCacheEntry>(
+            "SELECT * FROM materialized_cache WHERE materialized_hash = $1",
+        )
+        .bind(materialized_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(entry)
+    }
+
+    /// Insert or update a materialized cache entry.
+    /// On conflict (cache hit), bumps access_count and last_accessed.
+    pub async fn upsert_materialized_cache_entry(
+        &self,
+        materialized_hash: &str,
+        project_id: Uuid,
+        endpoint_name: &str,
+        commit_hash: &str,
+        platform_hash: &str,
+        byte_size: i64,
+        row_count: Option<i64>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO materialized_cache
+                (materialized_hash, project_id, endpoint_name, commit_hash, platform_hash, byte_size, row_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (materialized_hash) DO UPDATE SET
+                access_count = materialized_cache.access_count + 1,
+                last_accessed = NOW()
+            "#,
+        )
+        .bind(materialized_hash)
+        .bind(project_id)
+        .bind(endpoint_name)
+        .bind(commit_hash)
+        .bind(platform_hash)
+        .bind(byte_size)
+        .bind(row_count)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ========================================================================
     // Content Deduplication
     // ========================================================================
 

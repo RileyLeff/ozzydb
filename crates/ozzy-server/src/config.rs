@@ -37,6 +37,31 @@ pub struct Config {
 
     /// Allowed CORS origins (comma-separated, or "*" for any)
     pub cors_origins: String,
+
+    /// Server-side compute configuration.
+    pub compute: ComputeConfig,
+}
+
+/// Server-side transform compute configuration.
+#[derive(Debug, Clone)]
+pub struct ComputeConfig {
+    /// Whether server-side compute is enabled.
+    pub enabled: bool,
+
+    /// Docker runtime to use (e.g., "runsc" for gVisor, "runc" for plain Docker).
+    pub docker_runtime: String,
+
+    /// Memory limit for transform containers (e.g., "4g").
+    pub memory_limit: String,
+
+    /// CPU limit for transform containers (e.g., "2").
+    pub cpu_limit: String,
+
+    /// Timeout in seconds for transform execution.
+    pub timeout_secs: u64,
+
+    /// tmpfs size for transform containers (e.g., "1g").
+    pub tmpfs_size: String,
 }
 
 /// R2/S3 storage configuration.
@@ -86,7 +111,31 @@ impl Config {
                 .parse()
                 .context("MAX_UPLOAD_SIZE_BYTES must be a number")?,
             cors_origins: std::env::var("CORS_ORIGINS").unwrap_or_else(|_| "*".into()),
+            compute: ComputeConfig::from_env(),
         })
+    }
+}
+
+impl ComputeConfig {
+    /// Load compute configuration from environment variables.
+    pub fn from_env() -> Self {
+        Self {
+            enabled: std::env::var("COMPUTE_ENABLED")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            docker_runtime: std::env::var("COMPUTE_DOCKER_RUNTIME")
+                .unwrap_or_else(|_| "runsc".into()),
+            memory_limit: std::env::var("COMPUTE_MEMORY_LIMIT")
+                .unwrap_or_else(|_| "4g".into()),
+            cpu_limit: std::env::var("COMPUTE_CPU_LIMIT")
+                .unwrap_or_else(|_| "2".into()),
+            timeout_secs: std::env::var("COMPUTE_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "300".into())
+                .parse()
+                .unwrap_or(300),
+            tmpfs_size: std::env::var("COMPUTE_TMPFS_SIZE")
+                .unwrap_or_else(|_| "1g".into()),
+        }
     }
 }
 

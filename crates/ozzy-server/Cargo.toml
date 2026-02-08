@@ -79,6 +79,9 @@ rand.workspace = true
 # Base64 encoding
 base64.workspace = true
 
+# Temp files (for compute pipeline staging)
+tempfile.workspace = true
+
 [dev-dependencies]
 # Testing
 tempfile.workspace = true

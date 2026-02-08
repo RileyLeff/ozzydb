@@ -1019,23 +1019,70 @@ async fn fetch_endpoint(
         .await?
         .ok_or_else(|| ApiError::not_found("Commit not found"))?;
 
-    let endpoint = state
+    let db_endpoint = state
         .db
         .get_endpoint(commit.id, &endpoint_name)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Endpoint not found: {}", endpoint_name)))?;
 
-    // Track total size for memory protection
+    let data_sources = state.db.get_data_sources(commit.id).await?;
+    let transforms = state.db.get_transforms(commit.id).await?;
+
+    // Server-side compute: execute pipeline and return materialized parquet
+    if state.config.compute.enabled {
+        let endpoint: ozzy_core::project::Endpoint =
+            serde_json::from_value(db_endpoint.definition.clone()).map_err(|e| {
+                ApiError::from(anyhow::anyhow!("Failed to parse endpoint definition: {}", e))
+            })?;
+
+        let materialized_hash = crate::compute::pipeline::execute_endpoint(
+            &state,
+            project.id,
+            &commit.hash,
+            &endpoint,
+            &data_sources,
+            &transforms,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Compute failed for {}/{}/{}@{}: {}", owner, project_slug, endpoint_name, ref_name, e);
+            ApiError::from(anyhow::anyhow!("Transform execution failed: {}", e))
+        })?;
+
+        // Stream the materialized parquet from storage
+        let stream = state
+            .materialized_storage
+            .get_stream(&materialized_hash, "parquet")
+            .await
+            .map_err(|e| {
+                ApiError::from(anyhow::anyhow!("Failed to read materialized output: {}", e))
+            })?;
+
+        return Response::builder()
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"{}-{}-{}.parquet\"",
+                    sanitize_header_value(&project_slug),
+                    sanitize_header_value(&endpoint_name),
+                    sanitize_header_value(&ref_name),
+                ),
+            )
+            .body(Body::from_stream(stream))
+            .map_err(|e| ApiError::from(anyhow::anyhow!("Failed to build response: {}", e)));
+    }
+
+    // Fallback: tar archive with raw source data + transforms (compute disabled)
     let max_size = state.config.max_tar_size_bytes;
     let mut total_size: u64 = 0;
 
-    // Build tar archive
     let mut tar_data = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_data);
 
         // Add endpoint definition
-        let endpoint_json = serde_json::to_vec_pretty(&endpoint.definition)?;
+        let endpoint_json = serde_json::to_vec_pretty(&db_endpoint.definition)?;
         total_size += endpoint_json.len() as u64;
         let mut header = tar::Header::new_gnu();
         header.set_size(endpoint_json.len() as u64);
@@ -1044,7 +1091,6 @@ async fn fetch_endpoint(
         builder.append_data(&mut header, "endpoint.json", endpoint_json.as_slice())?;
 
         // Add data files
-        let data_sources = state.db.get_data_sources(commit.id).await?;
         for ds in data_sources {
             let content = state.storage.get(&ds.content_hash, "parquet").await?;
             total_size += content.len() as u64;
@@ -1068,7 +1114,6 @@ async fn fetch_endpoint(
         // Add transform files
         let mut seen_transform_paths = std::collections::HashSet::new();
         let mut seen_lockfile_paths = std::collections::HashSet::new();
-        let transforms = state.db.get_transforms(commit.id).await?;
         for t in transforms {
             let source_path = sanitize_relative_path(&t.source_storage_key).map_err(|e| {
                 ApiError::bad_request(format!("Invalid transform path in commit: {}", e))

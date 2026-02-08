@@ -97,14 +97,13 @@ fn extract_transform_info(transform_source: &Path) -> Result<(String, String)> {
     Ok((transform_dir, module_name))
 }
 
-fn lockfile_requirements(lockfile_path: &Path) -> Result<Vec<String>> {
-    let content = fs::read_to_string(lockfile_path)?;
-    let lockfile: toml::Value = toml::from_str(&content).map_err(|e| {
-        Error::PythonError(format!(
-            "Failed to parse uv.lock at {}: {}",
-            lockfile_path.display(),
-            e
-        ))
+/// Parse a uv.lock file's content into a list of `name==version` requirements.
+///
+/// This is useful for building Docker images from lockfile content without
+/// needing the lockfile on disk.
+pub fn parse_lockfile_requirements(content: &str) -> Result<Vec<String>> {
+    let lockfile: toml::Value = toml::from_str(content).map_err(|e| {
+        Error::PythonError(format!("Failed to parse uv.lock content: {}", e))
     })?;
 
     let mut requirements = std::collections::BTreeSet::new();
@@ -124,6 +123,11 @@ fn lockfile_requirements(lockfile_path: &Path) -> Result<Vec<String>> {
     }
 
     Ok(requirements.into_iter().collect())
+}
+
+fn lockfile_requirements(lockfile_path: &Path) -> Result<Vec<String>> {
+    let content = fs::read_to_string(lockfile_path)?;
+    parse_lockfile_requirements(&content)
 }
 
 fn normalized_python_version(raw: Option<&str>) -> String {
