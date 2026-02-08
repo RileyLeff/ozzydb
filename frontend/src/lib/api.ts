@@ -33,7 +33,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 		headers.set('Authorization', `Bearer ${auth.token}`);
 	}
 
-	const res = await fetch(`${API_BASE}/v1${path}`, { ...options, headers });
+	const res = await fetch(`${API_BASE}/api/v1${path}`, { ...options, headers });
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({ error: 'unknown', message: res.statusText }));
 		throw new ApiError(res.status, body.error, body.message);
@@ -49,7 +49,7 @@ async function requestRaw(path: string, options: RequestInit = {}): Promise<Resp
 	if (auth.token) {
 		headers.set('Authorization', `Bearer ${auth.token}`);
 	}
-	return fetch(`${API_BASE}/v1${path}`, { ...options, headers });
+	return fetch(`${API_BASE}/api/v1${path}`, { ...options, headers });
 }
 
 // Auth

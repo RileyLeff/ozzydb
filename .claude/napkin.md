@@ -32,6 +32,24 @@
 - Opus subagent reading entire dirgrab file (500KB+) uses most of its context on file reading, leaving little for analysis
 - Assuming empty review output means "no bugs found" - could be tool/rate limit failure
 
+## Deployment Notes
+
+### Caddy 404 after frontend rebuild (RECURRING)
+**Problem:** After rebuilding the frontend on the VPS (`npm run build`), ozzydb.com returns 404.
+**Root cause:** The Caddy Docker container bind-mounts `/opt/ozzydb/frontend/build:/srv/frontend:ro`. Docker resolves bind mounts at container *creation* time. If the `build/` directory was empty or nonexistent when the container was first created, the mount points to a stale inode. Rebuilding creates a new `build/` directory but Caddy still sees the old (empty) mount.
+**Fix:** After every frontend rebuild, restart Caddy:
+```
+cd /opt/ozzydb/crates/ozzy-server/docker && docker compose -f docker-compose.prod.yml --env-file .env.prod restart caddy
+```
+**Prevention:** Always run this restart after `npm run build` on the VPS. Consider adding a deploy script.
+
+### VPS Access
+- **Public IP:** 46.225.111.110
+- **SSH:** `ssh root@46.225.111.110`
+- **Tailscale:** `ssh root@ozzydb` (once authenticated, hostname is `ozzydb`)
+- **Deploy frontend:** `cd /opt/ozzydb && git pull && cd frontend && npm run build && cd /opt/ozzydb/crates/ozzy-server/docker && docker compose -f docker-compose.prod.yml --env-file .env.prod restart caddy`
+- **Deploy server:** `cd /opt/ozzydb && git pull && cd crates/ozzy-server/docker && docker compose -f docker-compose.prod.yml --env-file .env.prod build server && docker compose -f docker-compose.prod.yml --env-file .env.prod up -d`
+
 ## Domain Notes
 - Cargo workspace: ozzy-core, ozzy-cli, ozzy-server
 - 108 Rust tests + 18 Python tests (as of R10)
