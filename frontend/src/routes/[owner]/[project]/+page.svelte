@@ -303,15 +303,17 @@
 							{:else}
 								<div class="card-list">
 									{#each transforms as transform (transform.name)}
-										<div class="card">
+										<a class="card" href="/{owner}/{projectSlug}/transform/{transform.name}">
 											<div class="card-header">
 												<h4 class="card-title">{transform.name}</h4>
 												<span class="badge badge-runtime">{transform.runtime}</span>
 											</div>
 											<div class="card-meta">
 												<span class="mono">{transform.function_name}</span>
+												<span class="dot-sep"></span>
+												<span class="mono">{transform.hash.slice(0, 7)}</span>
 											</div>
-										</div>
+										</a>
 									{/each}
 								</div>
 							{/if}

@@ -64,6 +64,10 @@ pub fn router() -> Router<AppState> {
             "/{owner}/{project}/schemas/{name}",
             get(get_schema_definition),
         )
+        .route(
+            "/{owner}/{project}/transforms/{name}/source",
+            get(get_transform_source),
+        )
         .route("/{owner}/{project}/refs", get(list_refs))
         .route("/{owner}/{project}/collaborators", get(list_collaborators))
         .route("/{owner}/{project}/collaborators", post(add_collaborator))
@@ -455,6 +459,46 @@ async fn list_transforms_at_ref(
         "commit_hash": commit.hash,
         "transforms": items,
     })))
+}
+
+/// Get transform source code.
+async fn get_transform_source(
+    auth: MaybeAuthUser,
+    State(state): State<AppState>,
+    Path((owner, project_slug, name)): Path<(String, String, String)>,
+    Query(ref_params): Query<RefParams>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (_, commit, _) = resolve_project_ref_commit(
+        &state,
+        &auth,
+        &owner,
+        &project_slug,
+        ref_params.ref_name.as_deref(),
+    )
+    .await?;
+
+    let transforms = state.db.get_transforms(commit.id).await?;
+    let transform = transforms
+        .into_iter()
+        .find(|t| t.name == name)
+        .ok_or_else(|| ApiError::NotFound(format!("Transform '{}' not found", name)))?;
+
+    let content = state
+        .storage
+        .get(&transform.content_hash, "py")
+        .await
+        .map_err(|e| {
+            ApiError::NotFound(format!("Transform source not found in storage: {}", e))
+        })?;
+
+    let source = String::from_utf8(content.to_vec()).map_err(|_| {
+        ApiError::Internal(anyhow::anyhow!("Transform source is not valid UTF-8"))
+    })?;
+
+    Ok((
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        source,
+    ))
 }
 
 /// Get a schema definition by name at a ref.

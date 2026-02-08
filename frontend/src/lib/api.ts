@@ -108,6 +108,23 @@ export function listTransforms(owner: string, project: string, ref?: string) {
 	return request<TransformsAtRefResponse>(`/${owner}/${project}/transforms${q}`);
 }
 
+export async function getTransformSource(
+	owner: string,
+	project: string,
+	name: string,
+	ref?: string
+): Promise<string> {
+	const q = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+	const res = await requestRaw(
+		`/${owner}/${project}/transforms/${encodeURIComponent(name)}/source${q}`
+	);
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({ error: 'unknown', message: res.statusText }));
+		throw new ApiError(res.status, body.error, body.message);
+	}
+	return res.text();
+}
+
 // Refs
 export function listRefs(owner: string, project: string) {
 	return request<ListRefsResponse>(`/${owner}/${project}/refs`);
