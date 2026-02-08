@@ -1,5 +1,6 @@
 <script>
 	import WavyDivider from '$lib/components/WavyDivider.svelte';
+	import GraphBackground from '$lib/components/GraphBackground.svelte';
 
 	const languages = [
 		{ name: 'Python', icon: 'devicon-python-plain', runtime: true, client: true },
@@ -16,6 +17,7 @@
 
 <!-- Hero -->
 <section class="hero">
+	<GraphBackground />
 	<div class="container hero-inner">
 		<img src="/logo.png" alt="OzzyDB" class="hero-logo" width="160" height="178" />
 		<h1 class="hero-tagline">Data as functions, not files</h1>
@@ -243,12 +245,16 @@
 	/* ── Hero ─────────────────────────────────────────────── */
 
 	.hero {
+		position: relative;
+		overflow: hidden;
 		background: var(--black);
 		color: var(--white);
 		padding: var(--space-3xl) 0 calc(var(--space-3xl) + 24px);
 	}
 
 	.hero-inner {
+		position: relative;
+		z-index: 1;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
