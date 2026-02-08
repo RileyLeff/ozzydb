@@ -26,7 +26,30 @@
       "Skill(codex-review)",
       "Skill(gemini-review)",
       "Bash(find:*)",
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "Bash(hcloud context list:*)",
+      "Bash(hcloud server list:*)",
+      "Bash(hcloud server ssh:*)",
+      "Bash(ssh:*)",
+      "Bash(git status:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(dig:*)",
+      "Bash(nslookup:*)",
+      "Bash(rustc:*)",
+      "Bash(curl:*)",
+      "Bash(cargo run:*)",
+      "Bash(npx sv create:*)",
+      "Bash(npm install:*)",
+      "mcp__plugin_svelte_svelte__get-documentation",
+      "Bash(node:*)",
+      "mcp__plugin_svelte_svelte__svelte-autofixer",
+      "Bash(npm run build:*)",
+      "mcp__plugin_playwright_playwright__browser_navigate",
+      "mcp__plugin_playwright_playwright__browser_take_screenshot",
+      "Bash(npx svelte-check:*)",
+      "mcp__plugin_playwright_playwright__browser_run_code"
     ]
   }
 }
