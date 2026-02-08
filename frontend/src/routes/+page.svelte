@@ -15,8 +15,9 @@ ozzy transform add clean.py
 ozzy endpoint create forecast --pipeline "measurements -> clean"
 ozzy run forecast`;
 
-	const quickStart = `pip install ozzydb
-ozzy fetch alice/weather/daily-forecast`;
+	const quickStart = `uv add ozzydb
+python -c "import ozzydb; print(ozzydb.fetch('alice/weather/daily-forecast'))"`;
+
 </script>
 
 <!-- Hero -->
