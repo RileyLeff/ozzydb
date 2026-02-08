@@ -176,6 +176,7 @@ fn detect_blas() -> Option<String> {
         {
             return Some("openblas".to_string());
         }
+        return None;
     }
 
     #[cfg(target_os = "macos")]
