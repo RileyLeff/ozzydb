@@ -336,6 +336,15 @@ import json
 import polars as pl
 
 # Load the transform module
+class _OzzyStub:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
+import builtins
+builtins.ozzy = _OzzyStub()
+
 sys.path.insert(0, "{escaped_transform_dir}")
 import {module_name}
 
@@ -430,6 +439,15 @@ print("SUCCESS")
 import sys
 import json
 import polars as pl
+
+class _OzzyStub:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
+import builtins
+builtins.ozzy = _OzzyStub()
 
 sys.path.insert(0, "{escaped_transform_dir}")
 import {module_name}
@@ -540,6 +558,15 @@ import sys
 import json
 import polars as pl
 
+class _OzzyStub:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
+import builtins
+builtins.ozzy = _OzzyStub()
+
 sys.path.insert(0, "{escaped_transform_dir}")
 import {module_name}
 
@@ -635,6 +662,15 @@ import sys
 import json
 import polars as pl
 
+class _OzzyStub:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
+import builtins
+builtins.ozzy = _OzzyStub()
+
 sys.path.insert(0, "{escaped_transform_dir}")
 import {module_name}
 
@@ -721,6 +757,15 @@ pub fn execute_transform_multi(
 import sys
 import json
 import polars as pl
+
+class _OzzyStub:
+    @staticmethod
+    def transform(**kwargs):
+        def decorator(fn):
+            return fn
+        return decorator
+import builtins
+builtins.ozzy = _OzzyStub()
 
 sys.path.insert(0, "{escaped_transform_dir}")
 import {module_name}
