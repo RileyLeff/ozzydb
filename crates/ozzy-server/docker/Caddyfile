@@ -1,7 +1,8 @@
 # Caddy reverse proxy configuration for ozzy-server
 # Automatically handles HTTPS certificates via Let's Encrypt
 
-{$DOMAIN} {
+# API server
+{$API_DOMAIN} {
     # Reverse proxy to ozzy-server
     reverse_proxy server:3000 {
         # Health checks
@@ -35,6 +36,38 @@
         Referrer-Policy strict-origin-when-cross-origin
         -Server
     }
+
+    # Enable compression
+    encode gzip zstd
+}
+
+# Frontend (SPA)
+{$FRONTEND_DOMAIN} {
+    root * /srv/frontend
+
+    # SPA fallback: try the requested file, then fall back to index.html
+    try_files {path} /index.html
+
+    file_server
+
+    # Logging
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+
+    # Security headers
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
+    # Cache immutable assets aggressively
+    @immutable path /_app/immutable/*
+    header @immutable Cache-Control "public, max-age=31536000, immutable"
 
     # Enable compression
     encode gzip zstd

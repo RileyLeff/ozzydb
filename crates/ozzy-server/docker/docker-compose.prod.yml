@@ -89,8 +89,10 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+      - /opt/ozzydb/frontend/build:/srv/frontend:ro
     environment:
-      DOMAIN: ${DOMAIN:?DOMAIN required}
+      API_DOMAIN: ${API_DOMAIN:?API_DOMAIN required}
+      FRONTEND_DOMAIN: ${FRONTEND_DOMAIN:?FRONTEND_DOMAIN required}
 
 volumes:
   postgres_data:
