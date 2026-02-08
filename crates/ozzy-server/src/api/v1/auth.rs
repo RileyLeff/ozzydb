@@ -47,6 +47,10 @@ async fn github_device(
 #[derive(Deserialize)]
 struct PollRequest {
     device_code: String,
+    /// Optional client identifier. "web" creates a separate "web-session" token
+    /// so web and CLI logins don't invalidate each other.
+    #[serde(default)]
+    client: Option<String>,
 }
 
 /// Poll for device flow completion.
@@ -102,7 +106,13 @@ async fn github_poll(
     let (plaintext_token, token_hash) = tokens::generate_api_token();
     let token_prefix = &plaintext_token[..12.min(plaintext_token.len())];
 
-    // Upsert the cli-session token atomically to avoid race conditions
+    // Use different token names for web vs CLI so they don't invalidate each other
+    let token_name = match req.client.as_deref() {
+        Some("web") => "web-session",
+        _ => "cli-session",
+    };
+
+    // Upsert the session token atomically to avoid race conditions
     // from concurrent login attempts. INSERT ... ON CONFLICT is safe under
     // PostgreSQL READ COMMITTED unlike DELETE + INSERT in a transaction.
     {
@@ -119,7 +129,7 @@ async fn github_poll(
         )
         .bind(token_id)
         .bind(user.id)
-        .bind("cli-session")
+        .bind(token_name)
         .bind(&token_hash)
         .bind(token_prefix)
         .bind(&vec!["owner".to_string()])

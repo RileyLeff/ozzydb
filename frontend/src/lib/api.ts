@@ -60,7 +60,7 @@ export function initiateDeviceFlow() {
 export function pollDeviceFlow(deviceCode: string) {
 	return request<AuthResponse>('/auth/github/poll', {
 		method: 'POST',
-		body: JSON.stringify({ device_code: deviceCode })
+		body: JSON.stringify({ device_code: deviceCode, client: 'web' })
 	});
 }
 
