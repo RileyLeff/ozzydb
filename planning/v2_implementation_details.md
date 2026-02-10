@@ -56,8 +56,8 @@ ozzydb-store/
 
 Fly Machines need to read inputs from R2 and write outputs to R2. Rather than giving containers R2 credentials:
 
-1. OzzyDB server generates **presigned GET URLs** for each input blob (time-limited, e.g., 1 hour)
-2. OzzyDB server generates a **presigned PUT URL** for the output tarball
+1. OzzyDB server generates **presigned GET URLs** for each input blob (4-hour TTL)
+2. OzzyDB server generates a **presigned PUT URL** for the output tarball (4-hour TTL)
 3. These URLs are passed to the Fly Machine as environment variables
 4. The Fly Machine's init script downloads inputs from the presigned URLs before running the transform
 5. After the transform completes, the init script tars everything in `/workspace/output/` and uploads the tarball via the presigned PUT URL
@@ -65,9 +65,11 @@ Fly Machines need to read inputs from R2 and write outputs to R2. Rather than gi
 
 **Why a tarball, not per-file presigned PUTs:** A presigned PUT URL maps to exactly one R2 object. Transforms that produce collections (multiple output files) or include a manifest alongside data can't use a single PUT URL per file without knowing the exact number of outputs in advance. The tar-stream approach is simple and universal — one PUT URL always works, regardless of how many files the transform produces. The server unpacks, hashes, and stores each file individually after receiving the tar.
 
+**Presigned URL TTL:** 4 hours. R2 supports up to 7 days, but 4 hours is generous for even large transforms while limiting the window if a URL leaks. Transforms that exceed this are killed with a timeout error — if a transform genuinely needs 4+ hours, the machine tier should be bumped up, not the TTL.
+
 This means:
 - No R2 credentials in the container
-- URLs are scoped to specific objects and time-limited
+- URLs are scoped to specific objects and time-limited (4h)
 - The transform code never touches R2 directly — the init script handles I/O
 - Works identically for single-file and collection outputs
 
@@ -941,9 +943,15 @@ Runs an endpoint locally using Docker. Same container, same I/O contract, same d
 $ ozzy run corrected_readings --param qc_threshold=12.0
 ```
 
+**Critical DX principle: `ozzy run` uses the local working directory, not a git SHA.**
+
+During development, the edit-run-debug loop must be fast. `ozzy run` reads `ozzy.toml` and transform source files directly from the local filesystem — no commit required. This means you can edit a transform, save, and immediately `ozzy run` to see the result.
+
+The git SHA is only relevant for `ozzy push` (which registers a committed snapshot with the registry) and `ozzy fetch` (which runs a committed version server-side). Local dev is intentionally loose; production is strict.
+
 **Steps:**
 
-1. Parse `ozzy.toml` from local working directory
+1. Parse `ozzy.toml` from local working directory (current filesystem, not git)
 2. Resolve data references:
    - `data:raw_readings` → fetch from OzzyDB registry to local cache (`~/.ozzy/cache/data/{hash}`)
    - `collection:all_readings` → fetch collection manifest + member data
@@ -952,14 +960,17 @@ $ ozzy run corrected_readings --param qc_threshold=12.0
 4. Build execution plan (topological sort, cache check at each node)
 5. For each uncached node:
    a. Pull environment image (from GHCR or local Docker cache)
-   b. Mount inputs from local cache
-   c. Run container via `docker run` with:
+   b. Mount transform source from local working directory (bind mount, not from git)
+   c. Mount inputs from local cache
+   d. Run container via `docker run` with:
       - `--network none` (unless `network = true`)
       - Determinism env vars
       - Input mounts + output volume
       - Runner script
-   d. Collect output to local cache (`~/.ozzy/cache/materialized/{hash}`)
+   e. Collect output to local cache (`~/.ozzy/cache/materialized/{hash}`)
 6. Display or write final output
+
+**Note:** Because local source may differ from the last commit, `ozzy run` results are inherently Tier 2 (client-computed). They become Tier 1 only when `ozzy push` + `ozzy fetch` runs the committed version server-side.
 
 **Local cache layout:**
 

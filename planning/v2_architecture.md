@@ -582,9 +582,11 @@ $ ozzy push
 4. Registry calls the git provider API to fetch `ozzy.toml` at that commit
 5. Registry parses `ozzy.toml`, validates transform sources exist, records the commit
 6. Registry fetches and caches the source tarball (for execution)
-7. Registry builds or caches environment images (see section 6)
+7. Registry builds or locates environment images (see section 6). **Environment builds are asynchronous** — push returns immediately with a `"status": "building"` for any environments that need to be built. The first `ozzy fetch` after a lockfile change will block until the environment image is ready. This keeps push fast (seconds) while front-loading the build work.
 
 The canonical source is always git. The cached tarball is for performance. If the cache is evicted, the registry re-fetches from the git provider.
+
+**Dirty state and local dev:** `ozzy push` requires a clean git state (all changes committed). It reads the HEAD commit SHA and registers that exact snapshot. For iterating on transforms locally without committing, use `ozzy run` — see implementation details, section 6.
 
 ### 5.4 Source caching
 
