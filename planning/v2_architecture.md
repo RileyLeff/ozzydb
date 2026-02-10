@@ -855,12 +855,14 @@ Secret values are **NOT part of the hash** — the hash includes the transform s
 
 However, **secret rotation must invalidate the cache.** If a transform calls an LLM API and you rotate the API key to point at a different account or model version, cached results from the old key may be stale.
 
-Solution: the materialized hash for transforms that declare `secrets = [...]` includes `blake3(sorted secret names + secret rotation counter)`. The rotation counter is a per-secret integer that increments every time `ozzy secret set` is called (even if the value happens to be the same). This means:
-- Setting a new secret value → counter increments → new materialized hash → cache miss → re-execution
-- Same secret names, same counter → same hash → cache hit
+Solution: the materialized hash for transforms that declare `secrets = [...]` includes `blake3(sorted secret names + secret version_id)`. The `version_id` is a UUID that is regenerated every time `ozzy secret set` is called (even if the value happens to be the same). This means:
+- Setting a new secret value → new version_id → new materialized hash → cache miss → re-execution
+- Same secret names, same version_ids → same hash → cache hit
 - No secret values ever appear in hashes
 
-The rotation counter lives in the `secrets` table. Transforms without `secrets = [...]` are unaffected.
+Why UUID instead of an integer counter: if a secret is deleted and recreated with the same name, an integer counter would reset to 1, potentially colliding with a previous version's cached results. A UUID is globally unique and collision-proof.
+
+The `version_id` lives in the `secrets` table. Transforms without `secrets = [...]` are unaffected.
 
 ---
 
@@ -1057,7 +1059,7 @@ Materialized hash    = blake3(
                          secrets_hash           # only if transform declares secrets
                        )
 
-Secrets hash         = blake3(sorted(secret_name + rotation_counter) pairs)
+Secrets hash         = blake3(sorted(secret_name + version_id) pairs)
                        # empty/zero if no secrets declared
 
 Platform fingerprint = blake3(os + arch + libc + cpu_features + blas + runtime_version)

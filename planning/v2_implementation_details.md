@@ -57,15 +57,19 @@ ozzydb-store/
 Fly Machines need to read inputs from R2 and write outputs to R2. Rather than giving containers R2 credentials:
 
 1. OzzyDB server generates **presigned GET URLs** for each input blob (time-limited, e.g., 1 hour)
-2. OzzyDB server generates a **presigned PUT URL** for the output location
+2. OzzyDB server generates a **presigned PUT URL** for the output tarball
 3. These URLs are passed to the Fly Machine as environment variables
 4. The Fly Machine's init script downloads inputs from the presigned URLs before running the transform
-5. After the transform completes, the init script uploads the output via the presigned PUT URL
+5. After the transform completes, the init script tars everything in `/workspace/output/` and uploads the tarball via the presigned PUT URL
+6. The server unpacks the tarball, hashes individual outputs, and stores them in R2
+
+**Why a tarball, not per-file presigned PUTs:** A presigned PUT URL maps to exactly one R2 object. Transforms that produce collections (multiple output files) or include a manifest alongside data can't use a single PUT URL per file without knowing the exact number of outputs in advance. The tar-stream approach is simple and universal — one PUT URL always works, regardless of how many files the transform produces. The server unpacks, hashes, and stores each file individually after receiving the tar.
 
 This means:
 - No R2 credentials in the container
 - URLs are scoped to specific objects and time-limited
 - The transform code never touches R2 directly — the init script handles I/O
+- Works identically for single-file and collection outputs
 
 **Init script** (injected by OzzyDB, runs before the transform):
 
@@ -83,10 +87,9 @@ done
 # Run the transform (runner script or command)
 $OZZY_TRANSFORM_CMD
 
-# Upload output via presigned URL
-for output_file in /workspace/output/*; do
-    curl -sf -X PUT -T "$output_file" "$OZZY_OUTPUT_UPLOAD_URL"
-done
+# Tar output directory and upload via presigned URL
+tar -cf /tmp/output.tar -C /workspace/output .
+curl -sf -X PUT -T /tmp/output.tar "$OZZY_OUTPUT_UPLOAD_URL"
 ```
 
 ### R2 configuration
@@ -323,8 +326,9 @@ CREATE TABLE secrets (
     project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     name            TEXT NOT NULL,              -- "GEMINI_API_KEY"
     encrypted_value BYTEA NOT NULL,            -- encrypted with server-side key
-    rotation_counter INT NOT NULL DEFAULT 1,   -- incremented on every set (even if value unchanged)
+    version_id      UUID NOT NULL DEFAULT gen_random_uuid(),  -- regenerated on every set (even if value unchanged)
                                                 -- included in materialized hash to invalidate cache on rotation
+                                                -- UUID prevents collisions if a secret is deleted and recreated with the same name
     set_by          UUID NOT NULL REFERENCES users(id),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
