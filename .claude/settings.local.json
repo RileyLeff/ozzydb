@@ -49,7 +49,27 @@
       "mcp__plugin_playwright_playwright__browser_navigate",
       "mcp__plugin_playwright_playwright__browser_take_screenshot",
       "Bash(npx svelte-check:*)",
-      "mcp__plugin_playwright_playwright__browser_run_code"
+      "mcp__plugin_playwright_playwright__browser_run_code",
+      "WebSearch",
+      "Bash(sips:*)",
+      "Bash(tailscale status:*)",
+      "Bash(tailscale up:*)",
+      "Bash(ssh-keygen:*)",
+      "Bash(ls:*)",
+      "Bash(git rm:*)",
+      "Bash(ozzy:*)",
+      "Bash(cargo install:*)",
+      "Bash(uv init:*)",
+      "Bash(uv add:*)",
+      "Bash(uv run:*)",
+      "Bash(OZZY_TOKEN=fake_token ozzy auth status:*)",
+      "Bash(OZZY_TOKEN=\"\" ozzy auth:*)",
+      "Bash(OZZY_TOKEN=\"\" ozzy auth status:*)",
+      "Bash(OZZY_TOKEN=bad ozzy auth:*)",
+      "Bash(wc:*)",
+      "Bash(identify:*)",
+      "mcp__plugin_playwright_playwright__browser_resize",
+      "WebFetch(domain:cdn.jsdelivr.net)"
     ]
   }
 }
