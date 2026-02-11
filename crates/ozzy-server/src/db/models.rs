@@ -31,73 +31,6 @@ pub struct Project {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Commit record (metadata only, content in storage).
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct DbCommit {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub hash: String,
-    pub parent_hashes: Vec<String>,
-    pub author_id: Option<Uuid>,
-    pub author_name: String,
-    pub message: String,
-    pub commit_timestamp: String,
-    pub created_at: DateTime<Utc>,
-}
-
-/// Data source record.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct DbDataSource {
-    pub id: Uuid,
-    pub commit_id: Uuid,
-    pub name: String,
-    pub content_hash: String,
-    pub schema_hash: String,
-    pub storage_key: String,
-    pub schema_json: serde_json::Value,
-    pub row_count: Option<i64>,
-    pub byte_size: Option<i64>,
-}
-
-/// Transform record.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct DbTransform {
-    pub id: Uuid,
-    pub commit_id: Uuid,
-    pub name: String,
-    pub content_hash: String,
-    pub runtime: String,
-    pub source_storage_key: String,
-    pub function_name: String,
-    pub lockfile_hash: String,
-    pub params_schema: serde_json::Value,
-    pub input_schema: Option<serde_json::Value>,
-    pub output_schema: Option<serde_json::Value>,
-    pub reproducible: bool,
-}
-
-/// Endpoint record.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct DbEndpoint {
-    pub id: Uuid,
-    pub commit_id: Uuid,
-    pub name: String,
-    pub description: Option<String>,
-    pub definition: serde_json::Value,
-}
-
-/// Ref record (branch or tag).
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct DbRef {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub name: String,
-    pub ref_type: String,
-    pub commit_id: Uuid,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
 /// Project collaborator record.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct ProjectCollaborator {
@@ -127,32 +60,5 @@ pub struct ApiToken {
     pub scopes: Vec<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-}
-
-/// Materialized cache entry (server-side compute result).
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct MaterializedCacheEntry {
-    pub materialized_hash: String,
-    pub project_id: Uuid,
-    pub endpoint_name: String,
-    pub commit_hash: String,
-    pub platform_hash: String,
-    pub byte_size: i64,
-    pub row_count: Option<i64>,
-    pub access_count: i32,
-    pub pinned: bool,
-    pub created_at: DateTime<Utc>,
-    pub last_accessed: DateTime<Utc>,
-}
-
-/// Content reference (for deduplication tracking).
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct ContentRef {
-    pub content_hash: String,
-    pub storage_key: String,
-    pub content_type: String,
-    pub byte_size: i64,
-    pub ref_count: i32,
     pub created_at: DateTime<Utc>,
 }

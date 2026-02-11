@@ -1,17 +1,2 @@
-pub mod auth;
-pub mod cache;
-pub mod commit;
-pub mod dag;
-pub mod data;
-pub mod endpoint;
-pub mod fetch;
-pub mod init;
-pub mod log;
-pub mod pull;
-pub mod push;
-pub mod remote;
-pub mod run;
-pub mod shared;
-pub mod status;
-pub mod tag;
-pub mod transform;
+// v2 CLI commands - stubs for initial scaffolding
+// Each module will be implemented during v2 development.

@@ -1,10 +1,11 @@
 //! OzzyDB Registry Server Library
 //!
-//! This module exposes the server's components for use by the binary and tests.
+//! v2: The server stores data atoms, manages environments, orchestrates compute,
+//! and caches materialized results. Auth, storage, and project ownership survive
+//! from v1; compute and the wire protocol are being rebuilt.
 
 pub mod api;
 pub mod auth;
-pub mod compute;
 pub mod config;
 pub mod db;
 pub mod storage;
@@ -21,6 +22,4 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub db: Database,
     pub storage: ContentStorage,
-    /// Storage for materialized transform outputs (separate R2 prefix).
-    pub materialized_storage: ContentStorage,
 }

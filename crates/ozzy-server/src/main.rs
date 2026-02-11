@@ -1,6 +1,6 @@
 //! OzzyDB Registry Server
 //!
-//! A content-addressed registry for sharing OzzyDB projects across teams.
+//! v2: Data management platform for scientific computing.
 
 use anyhow::Result;
 use axum::Router;
@@ -40,28 +40,14 @@ async fn main() -> Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("Database migrations complete");
 
-    // Initialize storage (R2 primary when configured, local cache for reads)
+    // Initialize storage
     let storage = ContentStorage::from_config(&config)?;
-    let materialized_storage = ContentStorage::from_config_with_prefix(&config, "materialized")?;
     if let Some(r2) = &config.r2 {
         tracing::info!("R2 storage: {}/{}", r2.endpoint, r2.bucket);
         tracing::info!("Local cache at {}", config.cache_dir);
     } else {
         tracing::info!("Running in local-only mode (no R2 configured)");
         tracing::info!("Local storage at {}", config.cache_dir);
-    }
-
-    // Log compute config
-    if config.compute.enabled {
-        tracing::info!(
-            "Server-side compute enabled (runtime={}, mem={}, cpu={}, timeout={}s)",
-            config.compute.docker_runtime,
-            config.compute.memory_limit,
-            config.compute.cpu_limit,
-            config.compute.timeout_secs,
-        );
-    } else {
-        tracing::info!("Server-side compute disabled");
     }
 
     if !config.allowed_logins.is_empty() {
@@ -76,7 +62,6 @@ async fn main() -> Result<()> {
         config: Arc::new(config.clone()),
         db: Database::new(pool),
         storage,
-        materialized_storage,
     };
 
     // Build router

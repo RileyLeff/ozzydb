@@ -1,18 +1,12 @@
-//! OzzyDB Core - Version control for data transformations
+//! OzzyDB Core - Data management platform for scientific computing
 //!
-//! OzzyDB versions data transformations rather than data itself. Raw data is immutable.
-//! Derived data is always reproducible from `(raw, transforms, params, dependencies, platform)`.
+//! v2: OzzyDB is a switchboard. Git owns code, container registries own environments,
+//! OzzyDB owns data, wires everything together, orchestrates compute, and caches results.
 
-pub mod cache;
 pub mod canon;
-pub mod commit;
 pub mod error;
 pub mod hash;
 pub mod platform;
-pub mod project;
-pub mod registry;
-pub mod runtime;
 pub mod schema;
 
 pub use error::{Error, Result};
-pub use project::{Project, validate_path_within, validate_safe_name};

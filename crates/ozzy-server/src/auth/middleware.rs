@@ -9,9 +9,9 @@ use axum::{
 use chrono::Utc;
 
 use crate::AppState;
+use crate::api::v1::auth::ErrorBody;
 use crate::db::{Database, User};
 use ozzy_core::hash::blake3_hash;
-use ozzy_core::registry::protocol::ApiError;
 
 /// Authenticated user extracted from request (any valid token).
 #[derive(Debug, Clone)]
@@ -384,7 +384,7 @@ impl IntoResponse for AuthError {
             ),
         };
 
-        (status, Json(ApiError::new(error, message))).into_response()
+        (status, Json(ErrorBody::new(error, message))).into_response()
     }
 }
 

@@ -29,44 +29,16 @@ pub struct Config {
     /// Optional R2/S3 storage backend (primary when configured).
     pub r2: Option<R2Config>,
 
-    /// Maximum tar archive size in bytes (default: 1GB)
-    pub max_tar_size_bytes: u64,
-
     /// Maximum multipart upload size in bytes (default: 100MB)
     pub max_upload_size_bytes: u64,
 
     /// Allowed CORS origins (comma-separated, or "*" for any)
     pub cors_origins: String,
 
-    /// Server-side compute configuration.
-    pub compute: ComputeConfig,
-
     /// Optional allowlist of GitHub usernames permitted to log in.
     /// When empty, registration is open to everyone.
     /// Set via ALLOWED_LOGINS=rileyleff,collaborator2
     pub allowed_logins: Vec<String>,
-}
-
-/// Server-side transform compute configuration.
-#[derive(Debug, Clone)]
-pub struct ComputeConfig {
-    /// Whether server-side compute is enabled.
-    pub enabled: bool,
-
-    /// Docker runtime to use (e.g., "runsc" for gVisor, "runc" for plain Docker).
-    pub docker_runtime: String,
-
-    /// Memory limit for transform containers (e.g., "4g").
-    pub memory_limit: String,
-
-    /// CPU limit for transform containers (e.g., "2").
-    pub cpu_limit: String,
-
-    /// Timeout in seconds for transform execution.
-    pub timeout_secs: u64,
-
-    /// tmpfs size for transform containers (e.g., "1g").
-    pub tmpfs_size: String,
 }
 
 /// R2/S3 storage configuration.
@@ -107,16 +79,11 @@ impl Config {
             cache_dir: std::env::var("LOCAL_STORAGE_PATH")
                 .unwrap_or_else(|_| "/tmp/ozzydb-content".into()),
             r2: R2Config::from_env_optional(),
-            max_tar_size_bytes: std::env::var("MAX_TAR_SIZE_BYTES")
-                .unwrap_or_else(|_| "1073741824".into()) // 1GB default
-                .parse()
-                .context("MAX_TAR_SIZE_BYTES must be a number")?,
             max_upload_size_bytes: std::env::var("MAX_UPLOAD_SIZE_BYTES")
                 .unwrap_or_else(|_| "104857600".into()) // 100MB default
                 .parse()
                 .context("MAX_UPLOAD_SIZE_BYTES must be a number")?,
             cors_origins: std::env::var("CORS_ORIGINS").unwrap_or_else(|_| "*".into()),
-            compute: ComputeConfig::from_env(),
             allowed_logins: std::env::var("ALLOWED_LOGINS")
                 .unwrap_or_default()
                 .split(',')
@@ -124,29 +91,6 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect(),
         })
-    }
-}
-
-impl ComputeConfig {
-    /// Load compute configuration from environment variables.
-    pub fn from_env() -> Self {
-        Self {
-            enabled: std::env::var("COMPUTE_ENABLED")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false),
-            docker_runtime: std::env::var("COMPUTE_DOCKER_RUNTIME")
-                .unwrap_or_else(|_| "runsc".into()),
-            memory_limit: std::env::var("COMPUTE_MEMORY_LIMIT")
-                .unwrap_or_else(|_| "4g".into()),
-            cpu_limit: std::env::var("COMPUTE_CPU_LIMIT")
-                .unwrap_or_else(|_| "2".into()),
-            timeout_secs: std::env::var("COMPUTE_TIMEOUT_SECS")
-                .unwrap_or_else(|_| "300".into())
-                .parse()
-                .unwrap_or(300),
-            tmpfs_size: std::env::var("COMPUTE_TMPFS_SIZE")
-                .unwrap_or_else(|_| "1g".into()),
-        }
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "ozzy-core"
-description = "Core library for OzzyDB - version control for data transformations"
+description = "Core library for OzzyDB - data management platform for scientific computing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,26 +9,16 @@ keywords = ["data", "versioning", "reproducibility", "science"]
 categories = ["science", "database"]
 
 [dependencies]
-tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 blake3.workspace = true
 arrow.workspace = true
 parquet.workspace = true
-rusqlite.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 walkdir.workspace = true
-tempfile.workspace = true
-dirs.workspace = true
 sysinfo.workspace = true
-chrono.workspace = true
-uuid.workspace = true
-which.workspace = true
-
-# HTTP client for registry
-reqwest.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

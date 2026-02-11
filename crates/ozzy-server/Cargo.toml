@@ -29,21 +29,14 @@ tower-http.workspace = true
 # Database
 sqlx.workspace = true
 
-# OAuth
-oauth2.workspace = true
-
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
-
-# Hashing
-blake3.workspace = true
 
 # Object storage
 object_store.workspace = true
 bytes.workspace = true
 futures.workspace = true
-async-trait.workspace = true
 
 # Time
 chrono.workspace = true
@@ -59,28 +52,14 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-# Streaming
-tokio-stream.workspace = true
-tokio-util.workspace = true
-
 # HTTP client
 reqwest.workspace = true
-
-# Data formats (schema extraction from uploaded parquet)
-arrow.workspace = true
-parquet.workspace = true
-
-# Tar archives
-tar.workspace = true
 
 # Random number generation
 rand.workspace = true
 
 # Base64 encoding
 base64.workspace = true
-
-# Temp files (for compute pipeline staging)
-tempfile.workspace = true
 
 [dev-dependencies]
 # Testing

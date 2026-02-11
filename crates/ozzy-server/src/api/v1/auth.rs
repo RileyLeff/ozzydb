@@ -5,10 +5,9 @@ use axum::{
     extract::State,
     routing::{get, post},
 };
-use ozzy_core::registry::protocol::{
-    AuthResponse, CreateTokenRequest, CreateTokenResponse, DeviceCodeResponse, TokenInfo, UserInfo,
-};
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     AppState,
@@ -18,6 +17,82 @@ use crate::{
         tokens,
     },
 };
+
+// ============================================================================
+// Wire types (were in ozzy_core::registry::protocol, now inline)
+// ============================================================================
+
+#[derive(Serialize)]
+pub struct DeviceCodeResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+#[derive(Serialize)]
+pub struct AuthResponse {
+    pub access_token: Option<String>,
+    pub token_type: Option<String>,
+    pub user: Option<UserInfo>,
+    pub pending: bool,
+}
+
+#[derive(Serialize)]
+pub struct UserInfo {
+    pub id: Uuid,
+    pub username: String,
+    pub email: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateTokenRequest {
+    pub name: String,
+    pub scopes: Vec<String>,
+    pub expires_in_days: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct CreateTokenResponse {
+    pub token: String,
+    pub id: Uuid,
+    pub name: String,
+    pub scopes: Vec<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+pub struct TokenInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub scopes: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Standardized JSON error body for all API error responses.
+#[derive(Serialize)]
+pub struct ErrorBody {
+    pub error: String,
+    pub message: String,
+}
+
+impl ErrorBody {
+    pub fn new(error: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            message: message.into(),
+        }
+    }
+}
+
+// ============================================================================
+// Routes
+// ============================================================================
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -244,6 +319,10 @@ async fn get_me(AccountAuthUser { user, .. }: AccountAuthUser) -> Json<UserInfo>
     })
 }
 
+// ============================================================================
+// Error handling
+// ============================================================================
+
 /// API error type with proper HTTP status codes.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -338,7 +417,6 @@ impl axum::response::IntoResponse for ApiError {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg),
             ApiError::Internal(err) => {
-                // Log internal errors but don't expose details to clients
                 tracing::error!("Internal error: {:?}", err);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -348,7 +426,7 @@ impl axum::response::IntoResponse for ApiError {
             }
         };
 
-        let body = ozzy_core::registry::protocol::ApiError::new(error_code, message);
+        let body = ErrorBody::new(error_code, message);
 
         (status, axum::Json(body)).into_response()
     }
