@@ -332,6 +332,9 @@ pub enum ApiError {
     /// 409 Conflict - resource already exists
     #[error("{0}")]
     Conflict(String),
+    /// 410 Gone - resource has been yanked/retracted
+    #[error("{0}")]
+    Gone(String),
     /// 500 Internal Server Error - unexpected error
     #[error(transparent)]
     Internal(anyhow::Error),
@@ -356,6 +359,10 @@ impl ApiError {
 
     pub fn conflict(msg: impl Into<String>) -> Self {
         Self::Conflict(msg.into())
+    }
+
+    pub fn gone(msg: impl Into<String>) -> Self {
+        Self::Gone(msg.into())
     }
 }
 
@@ -407,6 +414,7 @@ impl axum::response::IntoResponse for ApiError {
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", msg),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg),
+            ApiError::Gone(msg) => (StatusCode::GONE, "gone", msg),
             ApiError::Internal(err) => {
                 tracing::error!("Internal error: {:?}", err);
                 (

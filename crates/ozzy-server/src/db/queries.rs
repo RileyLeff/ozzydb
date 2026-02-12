@@ -700,6 +700,39 @@ impl Database {
         Ok(entries)
     }
 
+    /// Get the latest metadata entry for each field on a data atom.
+    pub async fn get_all_latest_metadata(
+        &self,
+        data_atom_id: Uuid,
+    ) -> Result<Vec<DataMetadataEntry>> {
+        let entries = sqlx::query_as::<_, DataMetadataEntry>(
+            r#"
+            SELECT DISTINCT ON (field) *
+            FROM data_metadata_log
+            WHERE data_atom_id = $1
+            ORDER BY field, created_at DESC
+            "#,
+        )
+        .bind(data_atom_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(entries)
+    }
+
+    /// Get full metadata history across all fields for a data atom.
+    pub async fn get_full_metadata_history(
+        &self,
+        data_atom_id: Uuid,
+    ) -> Result<Vec<DataMetadataEntry>> {
+        let entries = sqlx::query_as::<_, DataMetadataEntry>(
+            "SELECT * FROM data_metadata_log WHERE data_atom_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(data_atom_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(entries)
+    }
+
     // ========================================================================
     // GitHub Installation Operations
     // ========================================================================

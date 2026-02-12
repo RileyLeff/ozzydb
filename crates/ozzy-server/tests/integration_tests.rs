@@ -20,6 +20,7 @@ use ozzy_server::storage::ContentStorage;
 use ozzy_server::{AppState, api};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::LazyLock;
+use testcontainers::core::ImageExt;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 
@@ -60,6 +61,7 @@ impl TestServer {
             .try_init();
 
         let container = Postgres::default()
+            .with_tag("17-alpine")
             .start()
             .await
             .expect("Failed to start PostgreSQL container (is Docker running?)");
@@ -347,5 +349,274 @@ fn test_project_scoped_token_cannot_access_account_endpoints() {
             "Account token should access /auth/me, got {}",
             resp.status()
         );
+    });
+}
+
+// ========================================================================
+// Data API Tests
+// ========================================================================
+
+/// Helper: create a user + project + token, returning (username, slug, bearer_token).
+async fn setup_data_test(s: &TestServer, suffix: &str) -> (String, String, String) {
+    let github_id = rand::random::<i64>() & i64::MAX;
+    let username = format!("datauser_{}", suffix);
+    let slug = format!("dataproj_{}", suffix);
+    let user = s
+        .db
+        .upsert_user_from_github(github_id, &username, None, None)
+        .await
+        .unwrap();
+
+    s.db.get_or_create_project(user.id, &slug, "private")
+        .await
+        .unwrap();
+
+    let (plaintext, token_hash) = ozzy_server::auth::tokens::generate_api_token();
+    s.db.create_token(user.id, "test-token", &token_hash, "account", None, None)
+        .await
+        .unwrap();
+
+    (username, slug, plaintext)
+}
+
+/// Full data atom lifecycle: upload → list → get → download → describe → metadata → yank → download returns 410.
+#[test]
+#[ignore] // Requires Docker
+fn test_data_atom_lifecycle() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (owner, slug, token) = setup_data_test(s, &format!("lifecycle_{}", rand::random::<u32>())).await;
+
+        // 1. Upload a CSV data atom
+        let csv_content = b"col_a,col_b\n1,hello\n2,world\n";
+        let file_part = reqwest::multipart::Part::bytes(csv_content.to_vec())
+            .file_name("readings.csv")
+            .mime_str("text/csv")
+            .unwrap();
+        let form = reqwest::multipart::Form::new()
+            .part("file", file_part)
+            .text("project", format!("{}/{}", owner, slug))
+            .text("description", "Test CSV data");
+
+        let resp = s.client
+            .post(format!("{}/api/v1/data/upload", s.base_url))
+            .header("Authorization", format!("Bearer {}", token))
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "Upload failed: {}", resp.text().await.unwrap_or_default());
+
+        // Re-upload to check response (need fresh request)
+        let file_part2 = reqwest::multipart::Part::bytes(csv_content.to_vec())
+            .file_name("readings.csv")
+            .mime_str("text/csv")
+            .unwrap();
+        let form2 = reqwest::multipart::Form::new()
+            .part("file", file_part2)
+            .text("project", format!("{}/{}", owner, slug))
+            .text("name", "readings2");
+        let resp = s.client
+            .post(format!("{}/api/v1/data/upload", s.base_url))
+            .header("Authorization", format!("Bearer {}", token))
+            .multipart(form2)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let upload_body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(upload_body["name"], "readings2");
+        assert_eq!(upload_body["content_type"], "text/csv");
+        assert!(upload_body["deduplicated"].as_bool().unwrap(), "Same content should be deduplicated");
+
+        // 2. List data atoms
+        let resp = s.client
+            .get(format!("{}/api/v1/data/{}/{}", s.base_url, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let list_body: Vec<serde_json::Value> = resp.json().await.unwrap();
+        assert_eq!(list_body.len(), 2);
+
+        // 3. Get data atom detail
+        let resp = s.client
+            .get(format!("{}/api/v1/data/{}/{}/readings", s.base_url, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let detail: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(detail["name"], "readings");
+        assert_eq!(detail["content_type"], "text/csv");
+        assert_eq!(detail["yanked"], false);
+        // Should have the description metadata we set during upload
+        assert_eq!(detail["metadata"]["description"], "Test CSV data");
+
+        // 4. Download data atom
+        let resp = s.client
+            .get(format!("{}/api/v1/data/{}/{}/readings/download", s.base_url, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+        assert_eq!(ct, "text/csv");
+        let disp = resp.headers().get("content-disposition").unwrap().to_str().unwrap();
+        assert!(disp.contains("readings.csv"), "Content-Disposition should have filename");
+        let body_bytes = resp.bytes().await.unwrap();
+        assert_eq!(&body_bytes[..], csv_content);
+
+        // 5. Describe (append metadata)
+        let resp = s.client
+            .post(format!("{}/api/v1/data/{}/{}/readings/describe", s.base_url, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"field": "source", "value": "sensor-42"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let desc_body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(desc_body["field"], "source");
+        assert_eq!(desc_body["value"], "sensor-42");
+
+        // 6. Get metadata history
+        let resp = s.client
+            .get(format!("{}/api/v1/data/{}/{}/readings/metadata", s.base_url, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let meta_body: Vec<serde_json::Value> = resp.json().await.unwrap();
+        assert!(meta_body.len() >= 2, "Should have description + source metadata entries");
+
+        // 7. Yank the data atom
+        let resp = s.client
+            .post(format!("{}/api/v1/data/{}/{}/readings/yank", s.base_url, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"reason": "data quality issue"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let yank_body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(yank_body["yanked"], true);
+
+        // 8. Download after yank should return 410 Gone
+        let resp = s.client
+            .get(format!("{}/api/v1/data/{}/{}/readings/download", s.base_url, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 410, "Yanked atom download should return 410 Gone");
+    });
+}
+
+/// Upload requires authentication.
+#[test]
+#[ignore] // Requires Docker
+fn test_data_upload_requires_auth() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let file_part = reqwest::multipart::Part::bytes(b"test".to_vec())
+            .file_name("test.csv");
+        let form = reqwest::multipart::Form::new()
+            .part("file", file_part)
+            .text("project", "someone/something");
+
+        let resp = s.client
+            .post(format!("{}/api/v1/data/upload", s.base_url))
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+    });
+}
+
+/// List data for nonexistent project returns 404.
+#[test]
+#[ignore] // Requires Docker
+fn test_data_list_nonexistent_project() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (_, _, token) = setup_data_test(s, &format!("noproject_{}", rand::random::<u32>())).await;
+
+        let resp = s.client
+            .get(format!("{}/api/v1/data/nobody/nonexistent", s.base_url))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    });
+}
+
+/// Upload with invalid name returns 400.
+#[test]
+#[ignore] // Requires Docker
+fn test_data_upload_invalid_name() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (owner, slug, token) = setup_data_test(s, &format!("badname_{}", rand::random::<u32>())).await;
+
+        let file_part = reqwest::multipart::Part::bytes(b"test data".to_vec())
+            .file_name("test.csv");
+        let form = reqwest::multipart::Form::new()
+            .part("file", file_part)
+            .text("project", format!("{}/{}", owner, slug))
+            .text("name", "has.dot");
+
+        let resp = s.client
+            .post(format!("{}/api/v1/data/upload", s.base_url))
+            .header("Authorization", format!("Bearer {}", token))
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+    });
+}
+
+/// Yank with empty reason returns 400.
+#[test]
+#[ignore] // Requires Docker
+fn test_data_yank_empty_reason() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (owner, slug, token) = setup_data_test(s, &format!("emptyyank_{}", rand::random::<u32>())).await;
+
+        // Upload first
+        let file_part = reqwest::multipart::Part::bytes(b"some data".to_vec())
+            .file_name("thing.csv");
+        let form = reqwest::multipart::Form::new()
+            .part("file", file_part)
+            .text("project", format!("{}/{}", owner, slug));
+
+        s.client
+            .post(format!("{}/api/v1/data/upload", s.base_url))
+            .header("Authorization", format!("Bearer {}", token))
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+
+        // Yank with empty reason
+        let resp = s.client
+            .post(format!("{}/api/v1/data/{}/{}/thing/yank", s.base_url, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"reason": ""}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
     });
 }
