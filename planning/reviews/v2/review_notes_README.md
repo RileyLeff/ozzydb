@@ -33,3 +33,9 @@ Data atom upload and optional collection-add are two separate DB operations. If 
 
 ### Streaming reads don't verify content hash
 `get_stream()` remote branch returns the stream without hash verification. Hash verification requires consuming the entire stream first, which defeats the purpose of streaming. A hash-verifying stream wrapper could be added in the future if needed, but the primary use case (serving large files) benefits from streaming without full buffering.
+
+### Phase 2 uploads/downloads are memory-buffered (not streaming)
+Data upload reads the entire file into memory via `field.bytes()`, and download returns the full content via `storage.get()`. This is bounded by the `DefaultBodyLimit` (100MB default) to prevent OOM. True streaming upload (streaming BLAKE3 hash + streaming store) and streaming download (via `get_stream()`) are future enhancements beyond Phase 2 scope.
+
+### N+1 queries in collection listing
+`list_collections` does 2 queries per collection (latest version + member count). This is a performance optimization opportunity for later — can be replaced with a single JOIN query. Not a correctness issue.
