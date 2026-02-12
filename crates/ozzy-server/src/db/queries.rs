@@ -8,6 +8,15 @@ use ozzy_core::hash::collection_hash;
 
 use super::models::*;
 
+/// Result of an atomic collection mutation.
+/// Separates business-logic rejections (yanked, cycle) from internal errors
+/// so the API handler can map to the correct HTTP status code.
+pub enum CollectionMutResult<T> {
+    Ok(T),
+    Yanked(String),
+    CycleDetected(String),
+}
+
 /// Database operations wrapper.
 #[derive(Clone)]
 pub struct Database {
@@ -949,22 +958,53 @@ impl Database {
     }
 
     /// Add members to a collection atomically.
-    /// Locks the collection row, reads current members, merges (deduplicating by
-    /// type+ref), computes the collection hash, and creates a new version — all
-    /// inside a single transaction to prevent lost updates from concurrent mutations.
+    ///
+    /// Acquires a project-level advisory lock to serialize all collection mutations
+    /// within a project (prevents cycle TOCTOU), locks the collection row, re-checks
+    /// yanked status, performs cycle detection (for collection-type members), reads
+    /// current members, merges (deduplicating by type+ref), computes the collection
+    /// hash, and creates a new version — all inside a single transaction.
     pub async fn add_to_collection_atomically(
         &self,
+        project_id: Uuid,
         collection_id: Uuid,
+        collection_name: &str,
         created_by: Uuid,
         new_members: &[(String, String, String)], // (member_type, member_ref, member_hash)
-    ) -> Result<(CollectionVersion, Vec<CollectionMember>)> {
+    ) -> Result<CollectionMutResult<(CollectionVersion, Vec<CollectionMember>)>> {
         let mut tx = self.pool.begin().await?;
 
-        // Lock the collection row
-        sqlx::query("SELECT id FROM collections WHERE id = $1 FOR UPDATE")
-            .bind(collection_id)
-            .fetch_one(&mut *tx)
+        // Advisory lock serializes all collection mutations within a project,
+        // preventing TOCTOU on cycle detection and yank checks.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
+            .bind(project_id)
+            .execute(&mut *tx)
             .await?;
+
+        // Lock collection row and re-check yanked status
+        let coll = sqlx::query_as::<_, Collection>(
+            "SELECT * FROM collections WHERE id = $1 FOR UPDATE",
+        )
+        .bind(collection_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if coll.yanked {
+            return Ok(CollectionMutResult::Yanked(coll.name));
+        }
+
+        // Cycle detection for collection-type members (reads from pool — safe
+        // because advisory lock ensures no concurrent mutation is in-flight)
+        for (mtype, mref, _) in new_members {
+            if mtype == "collection" {
+                if self
+                    .would_create_collection_cycle(project_id, collection_name, mref)
+                    .await?
+                {
+                    return Ok(CollectionMutResult::CycleDetected(mref.clone()));
+                }
+            }
+        }
 
         // Read current members inside the lock
         let latest_ver = sqlx::query_as::<_, CollectionVersion>(
@@ -1042,26 +1082,40 @@ impl Database {
         }
 
         tx.commit().await?;
-        Ok((ver, results))
+        Ok(CollectionMutResult::Ok((ver, results)))
     }
 
     /// Remove members from a collection atomically.
-    /// Locks the collection row, reads current members, filters out the specified
-    /// refs, computes the new collection hash, and creates a new version — all
-    /// inside a single transaction to prevent lost updates.
+    ///
+    /// Acquires a project-level advisory lock, locks the collection row, re-checks
+    /// yanked status, reads current members, filters out the specified refs,
+    /// computes the new collection hash, and creates a new version.
     pub async fn remove_from_collection_atomically(
         &self,
+        project_id: Uuid,
         collection_id: Uuid,
         created_by: Uuid,
         refs_to_remove: &[(String, String)], // (member_type, member_ref)
-    ) -> Result<Option<(CollectionVersion, Vec<CollectionMember>)>> {
+    ) -> Result<CollectionMutResult<Option<(CollectionVersion, Vec<CollectionMember>)>>> {
         let mut tx = self.pool.begin().await?;
 
-        // Lock the collection row
-        sqlx::query("SELECT id FROM collections WHERE id = $1 FOR UPDATE")
-            .bind(collection_id)
-            .fetch_one(&mut *tx)
+        // Advisory lock serializes all collection mutations within a project
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
+            .bind(project_id)
+            .execute(&mut *tx)
             .await?;
+
+        // Lock collection row and re-check yanked status
+        let coll = sqlx::query_as::<_, Collection>(
+            "SELECT * FROM collections WHERE id = $1 FOR UPDATE",
+        )
+        .bind(collection_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if coll.yanked {
+            return Ok(CollectionMutResult::Yanked(coll.name));
+        }
 
         // Read current members inside the lock
         let latest_ver = sqlx::query_as::<_, CollectionVersion>(
@@ -1074,7 +1128,7 @@ impl Database {
         let Some(ref prev_ver) = latest_ver else {
             // No versions to remove from
             tx.commit().await?;
-            return Ok(None);
+            return Ok(CollectionMutResult::Ok(None));
         };
 
         let current = sqlx::query_as::<_, CollectionMember>(
@@ -1139,7 +1193,49 @@ impl Database {
         }
 
         tx.commit().await?;
-        Ok(Some((ver, results)))
+        Ok(CollectionMutResult::Ok(Some((ver, results))))
+    }
+
+    /// DFS cycle detection: check if adding `target_name` as a sub-collection
+    /// of `parent_name` would create a cycle.
+    async fn would_create_collection_cycle(
+        &self,
+        project_id: Uuid,
+        parent_name: &str,
+        target_name: &str,
+    ) -> Result<bool> {
+        if parent_name == target_name {
+            return Ok(true);
+        }
+
+        let mut stack = vec![target_name.to_string()];
+        let mut visited = std::collections::HashSet::new();
+
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+
+            let Some(coll) = self.get_collection(project_id, &current).await? else {
+                continue;
+            };
+
+            let Some(ver) = self.get_latest_collection_version(coll.id).await? else {
+                continue;
+            };
+
+            let members = self.get_collection_members(ver.id).await?;
+            for member in members {
+                if member.member_type == "collection" {
+                    if member.member_ref == parent_name {
+                        return Ok(true);
+                    }
+                    stack.push(member.member_ref);
+                }
+            }
+        }
+
+        Ok(false)
     }
 
     pub async fn get_latest_collection_version(

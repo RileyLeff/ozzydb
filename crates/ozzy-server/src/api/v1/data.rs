@@ -21,6 +21,7 @@ use super::auth::ApiError;
 use crate::{
     AppState,
     auth::middleware::{AuthUser, MaybeAuthUser},
+    db::queries::CollectionMutResult,
 };
 
 // ============================================================================
@@ -282,16 +283,17 @@ async fn upload_data(
         state.storage.store(&file_bytes, "bin").await?;
     }
 
+    // Insert data atom record BEFORE upserting content_refs.
+    // If this fails (e.g., duplicate name), ref_count won't be incremented.
+    let atom = state
+        .db
+        .insert_data_atom(project.id, &name, &hash, &content_type, byte_size, &r2_key, user.id)
+        .await?;
+
     // Upsert content_refs (increments ref_count if already exists)
     state
         .db
         .upsert_content_ref(&hash, &r2_key, &content_type, byte_size)
-        .await?;
-
-    // Insert data atom record
-    let atom = state
-        .db
-        .insert_data_atom(project.id, &name, &hash, &content_type, byte_size, &r2_key, user.id)
         .await?;
 
     // Append metadata if provided
@@ -330,11 +332,24 @@ async fn upload_data(
             .ok_or_else(|| ApiError::not_found(format!("Collection '{}'", coll_name)))?;
 
         let new_member = vec![("data".to_string(), name.clone(), hash.clone())];
-        let (ver, _) = state
+        match state
             .db
-            .add_to_collection_atomically(coll.id, user.id, &new_member)
-            .await?;
-        collection_version = Some(ver.version_number);
+            .add_to_collection_atomically(project.id, coll.id, coll_name, user.id, &new_member)
+            .await?
+        {
+            CollectionMutResult::Ok((ver, _)) => {
+                collection_version = Some(ver.version_number);
+            }
+            CollectionMutResult::Yanked(coll_name) => {
+                return Err(ApiError::gone(format!(
+                    "Collection '{}' has been yanked",
+                    coll_name
+                )));
+            }
+            CollectionMutResult::CycleDetected(_) => {
+                unreachable!("data atoms cannot create collection cycles")
+            }
+        }
     }
 
     Ok(Json(UploadResponse {

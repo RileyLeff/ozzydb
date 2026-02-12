@@ -343,13 +343,15 @@ impl ContentStorage {
             .await
             .context("Failed to read content from remote storage")?;
 
-        let actual_hash = hash::blake3_hash(&content);
-        if actual_hash != content_hash {
-            anyhow::bail!(
-                "Content hash mismatch: expected {}, got {}. Remote storage may be corrupted.",
-                content_hash,
-                actual_hash
-            );
+        if self.verify_content_hash {
+            let actual_hash = hash::blake3_hash(&content);
+            if actual_hash != content_hash {
+                anyhow::bail!(
+                    "Content hash mismatch: expected {}, got {}. Remote storage may be corrupted.",
+                    content_hash,
+                    actual_hash
+                );
+            }
         }
 
         // Hydrate local cache for future reads (atomic: write to temp, then rename).

@@ -18,6 +18,7 @@ use super::auth::ApiError;
 use crate::{
     AppState,
     auth::middleware::{AuthUser, MaybeAuthUser},
+    db::queries::CollectionMutResult,
 };
 
 // ============================================================================
@@ -163,51 +164,6 @@ async fn resolve_member_hash(
     }
 }
 
-/// DFS cycle detection: check if adding `target_name` as a sub-collection of
-/// `parent_collection_id` would create a cycle.
-async fn would_create_cycle(
-    state: &AppState,
-    project_id: Uuid,
-    parent_collection_name: &str,
-    target_name: &str,
-) -> Result<bool, ApiError> {
-    // If we're adding a collection as a member of itself, that's a cycle
-    if parent_collection_name == target_name {
-        return Ok(true);
-    }
-
-    // DFS: walk the target collection's sub-collections to see if any
-    // eventually reference the parent
-    let mut stack = vec![target_name.to_string()];
-    let mut visited = HashSet::new();
-
-    while let Some(current) = stack.pop() {
-        if !visited.insert(current.clone()) {
-            continue;
-        }
-
-        let Some(coll) = state.db.get_collection(project_id, &current).await? else {
-            continue;
-        };
-
-        let Some(ver) = state.db.get_latest_collection_version(coll.id).await? else {
-            continue;
-        };
-
-        let members = state.db.get_collection_members(ver.id).await?;
-        for member in members {
-            if member.member_type == "collection" {
-                if member.member_ref == parent_collection_name {
-                    return Ok(true);
-                }
-                stack.push(member.member_ref);
-            }
-        }
-    }
-
-    Ok(false)
-}
-
 /// Flatten a collection: recursively resolve all leaf data atoms.
 fn flatten_collection<'a>(
     state: &'a AppState,
@@ -236,23 +192,25 @@ fn flatten_collection<'a>(
     let members = state.db.get_collection_members(ver.id).await?;
     let mut atoms = Vec::new();
 
+    // Current path includes this collection
+    let mut current_path = path.to_vec();
+    current_path.push(collection_name.to_string());
+
     for member in members {
         match member.member_type.as_str() {
             "data" => {
                 atoms.push(FlattenedAtom {
                     name: member.member_ref,
                     hash: member.member_hash,
-                    path: path.to_vec(),
+                    path: current_path.clone(),
                 });
             }
             "collection" => {
-                let mut child_path = path.to_vec();
-                child_path.push(collection_name.to_string());
                 let child_atoms = flatten_collection(
                     state,
                     project_id,
                     &member.member_ref,
-                    &child_path,
+                    &current_path,
                     visited,
                 )
                 .await?;
@@ -499,36 +457,31 @@ async fn add_members(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Collection '{}'", name)))?;
 
-    if coll.yanked {
-        return Err(ApiError::gone(format!(
-            "Collection '{}' has been yanked",
-            name
-        )));
-    }
-
-    // Resolve hashes for new members and check for cycles (read-only, safe outside tx)
+    // Resolve hashes for new members (read-only validation)
     let mut new_members = Vec::new();
     for input in &req.members {
-        // Cycle detection for collection members
-        if input.member_type == "collection" {
-            if would_create_cycle(&state, project.id, &name, &input.member_ref).await? {
-                return Err(ApiError::bad_request(format!(
-                    "Adding collection '{}' would create a circular reference",
-                    input.member_ref
-                )));
-            }
-        }
-
         let (mtype, mref, mhash) =
             resolve_member_hash(&state, project.id, input).await?;
         new_members.push((mtype, mref, mhash));
     }
 
-    // Atomically: read current members + merge + create new version (prevents lost updates)
-    let (ver, members) = state
+    // Atomically: advisory lock + yanked check + cycle check + read + merge + create version
+    let (ver, members) = match state
         .db
-        .add_to_collection_atomically(coll.id, user.id, &new_members)
-        .await?;
+        .add_to_collection_atomically(project.id, coll.id, &name, user.id, &new_members)
+        .await?
+    {
+        CollectionMutResult::Ok(result) => result,
+        CollectionMutResult::Yanked(coll_name) => {
+            return Err(ApiError::gone(format!("Collection '{}' has been yanked", coll_name)));
+        }
+        CollectionMutResult::CycleDetected(ref_name) => {
+            return Err(ApiError::bad_request(format!(
+                "Adding collection '{}' would create a circular reference",
+                ref_name
+            )));
+        }
+    };
 
     Ok(Json(VersionDetail {
         version_number: ver.version_number,
@@ -572,13 +525,6 @@ async fn remove_members(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Collection '{}'", name)))?;
 
-    if coll.yanked {
-        return Err(ApiError::gone(format!(
-            "Collection '{}' has been yanked",
-            name
-        )));
-    }
-
     // Parse and validate removal refs: "data:name" or "collection:name"
     let valid_types = ["data", "collection"];
     let mut refs_to_remove = Vec::new();
@@ -599,14 +545,24 @@ async fn remove_members(
         refs_to_remove.push((mtype.to_string(), mref.to_string()));
     }
 
-    // Atomically: read current members + filter + create new version (prevents lost updates)
-    let (ver, members) = state
+    // Atomically: advisory lock + yanked check + read + filter + create version
+    let (ver, members) = match state
         .db
-        .remove_from_collection_atomically(coll.id, user.id, &refs_to_remove)
+        .remove_from_collection_atomically(project.id, coll.id, user.id, &refs_to_remove)
         .await?
-        .ok_or_else(|| {
-            ApiError::bad_request(format!("Collection '{}' has no versions", name))
-        })?;
+    {
+        CollectionMutResult::Ok(Some(result)) => result,
+        CollectionMutResult::Ok(None) => {
+            return Err(ApiError::bad_request(format!(
+                "Collection '{}' has no versions",
+                name
+            )));
+        }
+        CollectionMutResult::Yanked(coll_name) => {
+            return Err(ApiError::gone(format!("Collection '{}' has been yanked", coll_name)));
+        }
+        CollectionMutResult::CycleDetected(_) => unreachable!("remove does not check cycles"),
+    };
 
     Ok(Json(VersionDetail {
         version_number: ver.version_number,
