@@ -1,6 +1,8 @@
 # OzzyDB v2 Implementation Details
 
-Companion to `v2_architecture.md`. This document covers the concrete implementation details for items marked "designed but needs detail."
+Companion to `v2_architecture.md`. This document covers the concrete implementation details.
+
+**v2 is a clean slate. No backwards compatibility with v1.** The deployed v1 Postgres database gets dropped and recreated. All v1 migration files are dead. All surviving v1 code is rewritten to match v2. When in doubt, rewrite.
 
 ---
 
@@ -13,6 +15,9 @@ Companion to `v2_architecture.md`. This document covers the concrete implementat
 5. [`ozzy init` experience](#5-ozzy-init-experience)
 6. [Local vs remote execution](#6-local-vs-remote-execution)
 7. [Frontend changes](#7-frontend-changes)
+8. [`ozzy.toml` parser](#8-ozzytoml-parser)
+9. [GitHub App](#9-github-app)
+10. [Fly Machines compute backend](#10-fly-machines-compute-backend)
 
 ---
 
@@ -79,12 +84,22 @@ This means:
 #!/bin/bash
 set -euo pipefail
 
-# Download inputs from presigned URLs
-for input_spec in $OZZY_INPUT_SPECS; do
-    name=$(echo "$input_spec" | cut -d'=' -f1)
-    url=$(echo "$input_spec" | cut -d'=' -f2-)
-    curl -sf "$url" -o "/workspace/inputs/$name"
+# Download inputs from presigned URLs.
+# OZZY_INPUT_DOWNLOADS is a JSON array: [{"name": "readings", "url": "https://...", "path": "/workspace/inputs/readings.parquet"}, ...]
+# Parsed with jq (included in all OzzyDB base images).
+echo "$OZZY_INPUT_DOWNLOADS" | jq -r '.[] | "\(.path) \(.url)"' | while read -r path url; do
+    curl -sf "$url" -o "$path"
 done
+
+# For collections, download the member manifest, then each member.
+if [ -n "${OZZY_COLLECTION_DOWNLOADS:-}" ]; then
+    echo "$OZZY_COLLECTION_DOWNLOADS" | jq -r '.[] | "\(.manifest_path) \(.manifest_url)"' | while read -r mpath murl; do
+        curl -sf "$murl" -o "$mpath"
+        jq -r '.[] | "\(.path) \(.url)"' "$mpath" | while read -r fpath furl; do
+            curl -sf "$furl" -o "$fpath"
+        done
+    done
+fi
 
 # Run the transform (runner script or command)
 $OZZY_TRANSFORM_CMD
@@ -93,6 +108,8 @@ $OZZY_TRANSFORM_CMD
 tar -cf /tmp/output.tar -C /workspace/output .
 curl -sf -X PUT -T /tmp/output.tar "$OZZY_OUTPUT_UPLOAD_URL"
 ```
+
+Note: `OZZY_INPUT_DOWNLOADS` provides presigned URLs for fetching from R2. `OZZY_INPUT_MANIFEST` (the JSON blob used by runner scripts) describes the local paths and content types after download. Both are set by the server before the init script runs.
 
 ### R2 configuration
 
@@ -135,9 +152,9 @@ Local storage implements presigned URLs as direct server proxy URLs (the server 
 CREATE TABLE users (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     github_id       BIGINT UNIQUE,
-    gitlab_id       BIGINT UNIQUE,
     username        TEXT NOT NULL UNIQUE,
     display_name    TEXT,
+    email           TEXT,
     avatar_url      TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -327,7 +344,7 @@ CREATE TABLE secrets (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     name            TEXT NOT NULL,              -- "GEMINI_API_KEY"
-    encrypted_value BYTEA NOT NULL,            -- encrypted with server-side key
+    encrypted_value BYTEA NOT NULL,            -- AES-256-GCM encrypted; key from SECRETS_ENCRYPTION_KEY env var
     version_id      UUID NOT NULL DEFAULT gen_random_uuid(),  -- regenerated on every set (even if value unchanged)
                                                 -- included in materialized hash to invalidate cache on rotation
                                                 -- UUID prevents collisions if a secret is deleted and recreated with the same name
@@ -949,11 +966,26 @@ During development, the edit-run-debug loop must be fast. `ozzy run` reads `ozzy
 
 The git SHA is only relevant for `ozzy push` (which registers a committed snapshot with the registry) and `ozzy fetch` (which runs a committed version server-side). Local dev is intentionally loose; production is strict.
 
+**Local data override (`--local-data`):**
+
+During early development, data may not be uploaded to OzzyDB yet. `ozzy run` accepts `--local-data` to bind local files to data references:
+
+```bash
+# Use a local file as the 'raw_readings' data atom
+ozzy run corrected_readings --local-data raw_readings=./data/readings.parquet
+
+# Mix local and remote data
+ozzy run analysis --local-data new_batch=./batch.parquet --param qc_threshold=12.0
+```
+
+When `--local-data name=path` is specified, that file is mounted directly as the named input (skipping registry fetch). Other data references resolve normally from the registry. This is a dev-only shortcut — `ozzy push` and `ozzy fetch` always use registry data.
+
 **Steps:**
 
 1. Parse `ozzy.toml` from local working directory (current filesystem, not git)
 2. Resolve data references:
-   - `data:raw_readings` → fetch from OzzyDB registry to local cache (`~/.ozzy/cache/data/{hash}`)
+   - If `--local-data name=path` was given for this name, use the local file directly
+   - Otherwise: `data:raw_readings` → fetch from OzzyDB registry to local cache (`~/.ozzy/cache/data/{hash}`)
    - `collection:all_readings` → fetch collection manifest + member data
    - `endpoint:other/project/name` → recursive remote fetch
 3. Resolve endpoint params (apply user overrides + defaults)
@@ -1075,3 +1107,396 @@ print(meta.verification) # verification tier
 - Theme (tuxedo cat: black/white + pink #e8657a + green #a3b86c)
 - SvelteKit 5 SPA with `@sveltejs/adapter-static`
 - Caddy serving static files for `ozzydb.com`, reverse proxy for `api.ozzydb.com`
+
+---
+
+## 8. `ozzy.toml` parser
+
+The `ozzy.toml` spec (architecture doc section 4) is the declarative heart of v2. It needs a dedicated parser module in `ozzy-core` that produces well-typed structs with clear validation errors.
+
+### Structs
+
+```rust
+// ozzy-core/src/toml_spec.rs
+
+/// Top-level ozzy.toml
+pub struct OzzyToml {
+    pub project: ProjectSection,
+    pub git: Option<GitSection>,
+    pub remote: Option<RemoteSection>,
+    pub environments: HashMap<String, EnvironmentDef>,
+    pub transforms: HashMap<String, TransformDef>,
+    pub endpoints: HashMap<String, EndpointDef>,
+}
+
+pub struct ProjectSection {
+    pub name: String,
+    pub owner: String,
+    pub description: Option<String>,
+}
+
+pub struct GitSection {
+    pub provider: String,       // "github" | "gitlab"
+    pub repo: String,           // "owner/repo"
+}
+
+pub struct RemoteSection {
+    pub url: String,
+}
+
+/// Environment definition (three tiers are mutually exclusive)
+pub enum EnvironmentDef {
+    BaseLockfile { base: String, lockfile: String },
+    Dockerfile { dockerfile: String },
+    Prebuilt { image: String },
+}
+
+pub struct TransformDef {
+    pub source: Option<String>,     // "path:function" (function-based)
+    pub command: Option<String>,    // shell command (command-based)
+    pub environment: String,
+    pub description: Option<String>,
+    pub inputs: HashMap<String, String>,    // name → content type
+    pub output: String,                     // content type
+    pub params: HashMap<String, ParamDef>,
+    pub output_schema: Option<OutputSchemaDef>,
+    pub network: bool,
+    pub secrets: Vec<String>,
+}
+
+pub struct ParamDef {
+    pub type_: String,              // "float", "int", "string", "bool"
+    pub description: Option<String>,
+    pub default: Option<serde_json::Value>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub enum_values: Option<Vec<serde_json::Value>>,
+}
+
+pub struct EndpointDef {
+    pub description: Option<String>,
+    pub params: HashMap<String, EndpointParamDef>,
+    pub nodes: HashMap<String, NodeDef>,
+    pub edges: Vec<EdgeDef>,
+}
+
+pub struct EndpointParamDef {
+    pub type_: String,
+    pub default: Option<serde_json::Value>,
+    pub binds: String,              // "node_name.param_name"
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub enum_values: Option<Vec<serde_json::Value>>,
+    pub description: Option<String>,
+}
+
+pub struct NodeDef {
+    pub transform: String,
+    pub params: HashMap<String, serde_json::Value>,  // hardcoded params
+    pub machine: Option<String>,    // "cpu-small", "gpu-large", etc.
+}
+
+pub struct EdgeDef {
+    pub from: String,   // "data:name", "collection:name", "endpoint:ref", or "node_name"
+    pub to: String,     // "node_name.input_name"
+}
+```
+
+### Validation rules
+
+`OzzyToml::validate()` checks:
+
+1. **Name format**: All names match `[a-zA-Z0-9_-]+`. Reject dots, colons, slashes, whitespace.
+2. **Environment refs**: Every `transform.environment` references a declared environment.
+3. **Transform exclusivity**: Each transform has exactly one of `source` or `command`, not both, not neither.
+4. **Node transform refs**: Every `node.transform` references a declared transform.
+5. **Edge targets**: Every `to` field is `node_name.input_name` where the node exists and the input is declared on the transform.
+6. **Edge sources**: Every `from` field is one of: `data:name`, `collection:name`, `endpoint:ref`, or a bare node name that exists in the same endpoint.
+7. **Input coverage**: Every node input has exactly one incoming edge (no missing, no duplicates).
+8. **No cycles**: Topological sort of nodes succeeds (Kahn's algorithm).
+9. **Param binds**: Every `endpoint.params[x].binds` references `node_name.param_name` where the node and param exist.
+10. **Cross-project pinning**: `endpoint:owner/project/name` refs (containing `/`) must have `@sha_or_tag` suffix.
+11. **Content type compatibility**: Edge source content types match the destination transform's declared input types. `collection<type>` matches a collection whose members match `type`.
+
+Validation returns `Vec<ValidationError>` with file location info, not just the first error. Print all problems at once so the user can fix them in one pass.
+
+### Error messages
+
+```
+ozzy.toml:15: transform 'quality_control' references unknown environment 'scipy'
+  Did you mean 'scipy-stack'?
+
+ozzy.toml:32: endpoint 'analysis' node 'qc' input 'readings' has no incoming edge
+
+ozzy.toml:38: cycle detected in endpoint 'analysis': qc → cal → qc
+
+ozzy.toml:45: cross-project endpoint reference must be pinned:
+  endpoint:vcr-lter/shared/constants
+  Add @tag or @sha: endpoint:vcr-lter/shared/constants@v1.0
+```
+
+---
+
+## 9. GitHub App
+
+### Why a GitHub App (not OAuth tokens)
+
+v1 uses the user's OAuth token to authenticate API calls, but never accesses repo content. v2 needs to fetch source code from private repos during `ozzy push`. Options:
+
+- **Forward user's OAuth token** — Bad: the user's token has broad access to all their repos. The server shouldn't hold it.
+- **Deploy keys** — Bad: per-repo, doesn't scale, can't handle cross-project endpoint references.
+- **GitHub App** — Good: per-installation tokens, scoped to repos the user chooses, short-lived, no user token forwarding.
+
+### Setup
+
+1. **Register the app** at `https://github.com/settings/apps/new`:
+   - Name: `OzzyDB`
+   - Homepage: `https://ozzydb.com`
+   - Webhook URL: `https://api.ozzydb.com/v1/webhooks/github` (for installation events)
+   - Permissions: `Contents: Read` (only permission needed — fetch files and tarballs)
+   - Events: `Installation` (to track when users install/uninstall)
+
+2. **Generate a private key** — used to sign JWTs for GitHub API auth. Store as `GITHUB_APP_PRIVATE_KEY` env var (PEM-encoded).
+
+3. **Store the App ID** — `GITHUB_APP_ID` env var.
+
+### Token flow
+
+```
+User installs OzzyDB app on their repo(s)
+  → GitHub sends installation webhook
+  → Server stores installation_id for the user/org
+
+ozzy push (needs to fetch repo content):
+  1. Server looks up installation_id for the repo owner
+  2. Server creates a JWT: { iss: APP_ID, iat: now, exp: now+10min }, signed with private key
+  3. Server calls POST https://api.github.com/app/installations/{id}/access_tokens
+     with the JWT as Bearer token
+  4. GitHub returns a short-lived installation token (1 hour)
+  5. Server uses the installation token to call:
+     GET https://api.github.com/repos/{owner}/{repo}/contents/ozzy.toml?ref={sha}
+     GET https://api.github.com/repos/{owner}/{repo}/tarball/{sha}
+  6. Installation token expires after 1 hour (not stored long-term)
+```
+
+### GitProvider trait implementation
+
+```rust
+pub struct GitHubProvider {
+    app_id: u64,
+    private_key: String,      // PEM
+    http_client: reqwest::Client,
+}
+
+impl GitProvider for GitHubProvider {
+    async fn fetch_archive(&self, repo: &str, commit_sha: &str) -> Result<Vec<u8>> {
+        let token = self.get_installation_token(repo).await?;
+        let url = format!("https://api.github.com/repos/{}/tarball/{}", repo, commit_sha);
+        let resp = self.http_client.get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "OzzyDB")
+            .send().await?;
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    async fn get_file(&self, repo: &str, commit_sha: &str, path: &str) -> Result<Vec<u8>> {
+        let token = self.get_installation_token(repo).await?;
+        let url = format!(
+            "https://api.github.com/repos/{}/contents/{}?ref={}",
+            repo, path, commit_sha
+        );
+        let resp = self.http_client.get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/vnd.github.raw+json")
+            .header("User-Agent", "OzzyDB")
+            .send().await?;
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    async fn resolve_ref(&self, repo: &str, ref_name: &str) -> Result<String> {
+        let token = self.get_installation_token(repo).await?;
+        let url = format!(
+            "https://api.github.com/repos/{}/git/ref/heads/{}",
+            repo, ref_name
+        );
+        let resp: serde_json::Value = self.http_client.get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "OzzyDB")
+            .send().await?
+            .json().await?;
+        Ok(resp["object"]["sha"].as_str().unwrap().to_string())
+    }
+}
+```
+
+### What if the app isn't installed?
+
+When `ozzy push` registers a commit for a private repo and the server can't get an installation token:
+
+```
+Error: OzzyDB cannot access repo 'rileyleff/my-project'.
+Install the OzzyDB GitHub App: https://github.com/apps/ozzydb/installations/new
+```
+
+For public repos, no installation is needed — the server uses unauthenticated GitHub API calls (with rate limiting).
+
+### DB table for installations
+
+```sql
+CREATE TABLE github_installations (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    installation_id BIGINT NOT NULL UNIQUE,     -- GitHub's installation ID
+    account_type    TEXT NOT NULL,               -- "User" or "Organization"
+    account_login   TEXT NOT NULL,               -- GitHub username or org name
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_gh_installs_login ON github_installations (account_login);
+```
+
+---
+
+## 10. Fly Machines compute backend
+
+### Why Fly Machines
+
+- Firecracker micro-VMs: stronger isolation than Docker/gVisor. Each job runs in its own VM.
+- GPU support (L40S, A100).
+- Pay-per-second, scale to zero.
+- Docker-native: `fly machine run <image> <command>`.
+- Global regions: run compute near the data.
+
+### API integration
+
+Fly Machines API: `https://api.machines.dev/v1/apps/{app}/machines`
+
+Auth: `FLY_API_TOKEN` env var, passed as `Authorization: Bearer` header.
+
+### Lifecycle of a compute job
+
+```
+1. Server prepares the job:
+   a. Resolve environment → container image reference
+   b. Generate presigned GET URLs for all inputs (4h TTL)
+   c. Generate presigned PUT URL for output tarball (4h TTL)
+   d. Generate the runner script (Python/R/command)
+   e. Generate the init script (download inputs, run transform, upload output)
+
+2. Server creates a Fly Machine:
+   POST /v1/apps/ozzydb-compute/machines
+   {
+     "config": {
+       "image": "ghcr.io/ozzydb/envs/{env_hash}",
+       "guest": { "cpus": 2, "memory_mb": 4096 },  // from machine tier
+       "env": {
+         "OZZY_INPUT_DOWNLOADS": "[{\"name\": \"readings\", \"url\": \"https://...\", \"path\": \"/workspace/inputs/readings.parquet\"}]",
+         "OZZY_INPUT_MANIFEST": "{\"readings\": {\"path\": \"/workspace/inputs/readings.parquet\", \"content_type\": \"application/vnd.apache.parquet\"}}",
+         "OZZY_PARAMS": "{\"threshold\": 11.5}",
+         "OZZY_PARAM_threshold": "11.5",
+         "OZZY_OUTPUT_UPLOAD_URL": "https://presigned-put-url...",
+         "OZZY_TRANSFORM_CMD": "python3 /workspace/runner.py",
+         "PYTHONHASHSEED": "0",
+         "OMP_NUM_THREADS": "1"
+       },
+       "processes": [{ "cmd": ["/bin/bash", "/workspace/init.sh"] }],
+       "auto_destroy": true,
+       "restart": { "policy": "no" }
+     }
+   }
+
+3. Server polls machine status:
+   GET /v1/apps/ozzydb-compute/machines/{id}/wait?state=stopped&timeout=300
+   (blocks until the machine exits or times out)
+
+4. On success (exit code 0):
+   a. Server downloads the output tarball from the presigned PUT URL
+   b. Unpacks, hashes each output file
+   c. Stores outputs in R2 at cache/{materialized_hash}
+   d. Inserts materialized_cache record
+   e. Machine auto-destroys (auto_destroy: true)
+
+5. On failure (exit code != 0 or timeout):
+   a. Server fetches machine logs: GET /v1/apps/ozzydb-compute/machines/{id}/logs
+   b. Returns error to consumer with stderr output
+   c. Machine auto-destroys
+```
+
+### Machine tier mapping
+
+| Tier | Fly config |
+|------|-----------|
+| `cpu-small` | `{ cpus: 2, memory_mb: 4096 }` |
+| `cpu-medium` | `{ cpus: 4, memory_mb: 16384 }` |
+| `cpu-large` | `{ cpus: 8, memory_mb: 65536 }` |
+| `gpu-small` | `{ cpus: 4, memory_mb: 16384, gpus: 1, gpu_kind: "l40s" }` |
+| `gpu-large` | `{ cpus: 8, memory_mb: 65536, gpus: 1, gpu_kind: "a100-80gb" }` |
+
+### Environment image registry
+
+Built environment images are pushed to GHCR under the `ozzydb` org:
+
+- Tier 1 (base + lockfile): `ghcr.io/ozzydb/envs/{env_hash}`
+- Tier 2 (Dockerfile): `ghcr.io/ozzydb/envs/{env_hash}`
+- Tier 3 (pre-built): user's image ref directly (e.g., `ghcr.io/rileyleff/legacy:v2.1`)
+
+Build happens on the server using Docker (or Fly's remote builder). The `env_hash` ensures deduplication — two projects with the same base + lockfile get the same image.
+
+### Init script and runner injection
+
+The init script and runner script are not baked into the environment image. They're injected via Fly Machine volumes or base64-encoded env vars:
+
+```
+OZZY_INIT_SCRIPT_B64 = <base64 of init.sh>
+OZZY_RUNNER_SCRIPT_B64 = <base64 of runner.py>
+```
+
+The entrypoint decodes and writes them:
+
+```bash
+echo "$OZZY_INIT_SCRIPT_B64" | base64 -d > /workspace/init.sh
+echo "$OZZY_RUNNER_SCRIPT_B64" | base64 -d > /workspace/runner.py
+chmod +x /workspace/init.sh
+exec /workspace/init.sh
+```
+
+This keeps environment images clean (just the language runtime + packages) and allows the server to customize the runner per-transform without rebuilding images.
+
+### Network isolation
+
+- Default: `--network none` equivalent. Fly Machines have no public IP and no outbound by default when configured with `services: []`.
+- When `network = true`: machine gets outbound access. The server configures this per-machine based on the transform's `network` flag.
+
+### Secrets injection
+
+For transforms that declare `secrets = ["GEMINI_API_KEY"]`:
+
+1. Server loads encrypted secret values from Postgres
+2. Decrypts with `SECRETS_ENCRYPTION_KEY`
+3. Passes as env vars to the Fly Machine: `GEMINI_API_KEY=sk-...`
+4. Secret values live only in the machine's memory — not in logs, not in R2, not in any hash
+
+### Timeout and cleanup
+
+- Default timeout: 30 minutes. Configurable per machine tier (GPU jobs get longer).
+- The `wait` API call has a `timeout` parameter. If exceeded, server destroys the machine.
+- `auto_destroy: true` ensures machines don't linger if the server crashes mid-orchestration.
+- Orphan cleanup: periodic job scans for machines older than 1 hour in the `ozzydb-compute` app and destroys them.
+
+### ComputeBackend trait
+
+```rust
+#[async_trait]
+pub trait ComputeBackend: Send + Sync {
+    async fn run(&self, request: ComputeRequest) -> Result<ComputeResult>;
+    fn available_machines(&self) -> Vec<MachineConfig>;
+}
+
+pub struct FlyComputeBackend {
+    api_token: String,
+    app_name: String,       // "ozzydb-compute"
+    http_client: reqwest::Client,
+}
+```
+
+This trait allows swapping Fly for local Docker (for `ozzy run`) or other providers later.

@@ -785,7 +785,23 @@ When an endpoint wires a collection to a typed input like `collection<parquet>`,
 
 If the transform declares `inputs.data = "collection"` (no type parameter), it accepts any collection regardless of member types. The function handles type dispatch internally.
 
-### 6.5 Pseudorandom processes
+### 6.5 Local dev with files not yet uploaded
+
+`ozzy run` fetches data from the registry by default (`data:raw_readings` → download from OzzyDB). But during early development, data may not be uploaded yet. To support offline/local iteration:
+
+`ozzy run` accepts `--local-data name=path` to bind a local file to a data reference:
+
+```bash
+# Use a local file instead of fetching from the registry
+ozzy run corrected_readings --local-data raw_readings=./data/readings.parquet
+
+# Mix local and remote data
+ozzy run analysis --local-data new_batch=./batch.parquet
+```
+
+When `--local-data` is used, the specified file is mounted directly as the named input. Other data references still resolve from the registry. This is a dev-only shortcut — `ozzy push` and `ozzy fetch` always use registry data.
+
+### 6.6 Pseudorandom processes
 
 For transforms with stochastic behavior, the random seed MUST be a declared parameter:
 
@@ -965,29 +981,32 @@ The runner script chains the transforms within a single process, passing data in
 
 ## 9. What survives from v1
 
-### Keep as-is or with minor changes
+### Clean slate
 
-| Component | Why it survives |
-|-----------|----------------|
-| `hash.rs` — BLAKE3 infrastructure | Core concept unchanged. `hash_bytes`, `hash_reader`, `hash_file` all reusable. |
-| `platform.rs` — PlatformFingerprint | Still needed for materialized hashes. os, arch, libc, cpu_features, blas, python_version. |
-| `canon.rs` — Canonicalization | UTF-8, LF endings, sorted JSON keys. Still needed for deterministic hashing. |
-| `schema.rs` — Arrow schema parsing | Parquet is still the dominant tabular format. Schema validation logic reusable. |
-| Auth system — GitHub OAuth device flow, JWT, API tokens | Solid, battle-tested. AccountAuthUser extractor carries forward. |
-| Server scaffolding — Axum router, middleware, Postgres pool | Good foundation. Routes change, but the infrastructure stays. |
-| R2/local storage abstraction — ContentStorage | Content-addressed storage works the same. verify_content_hash flag useful. |
-| Frontend skeleton — SvelteKit 5 SPA | Pages need redesign for new data model, but auth flow, routing, and theme survive. |
-| CLI scaffolding — clap command structure | Command names change, but the infrastructure stays. |
-| Python client — subprocess pattern | The shell-out-to-CLI pattern is simple and correct. API surface changes. |
-| Deterministic env vars | PYTHONHASHSEED=0, OMP_NUM_THREADS=1, etc. Still enforced. |
+**v2 is a clean break. There is no backwards compatibility with v1.**
 
-### Keep the concept, rewrite the implementation
+The deployed v1 database will be dropped and recreated from the v2 DDL. The v2 Postgres schema (in `v2_implementation_details.md`) is the single source of truth. All v1 migration files are dead — a fresh `001_v2_initial.sql` replaces them.
 
-| Component | What changes |
-|-----------|-------------|
-| `cache/` — local SQLite cache | Concept is the same (materialized hash → cached file). Implementation needs update for new hash scheme and content types beyond parquet. |
-| Commit model | Now references git commits instead of storing source blobs. Much simpler. |
-| Push/pull protocol | Push registers a git commit reference. Pull is replaced by git clone + data fetch. |
+Surviving v1 code is **conceptually reusable** — same ideas, same patterns — but gets rewritten to match the v2 schema and API. Nothing is assumed to compile or work as-is against v2. When in doubt, rewrite rather than adapt.
+
+### Concepts that carry forward (rewrite the code)
+
+| Concept | What carries forward | What changes |
+|---------|---------------------|-------------|
+| BLAKE3 hashing (`hash.rs`) | `blake3_hash`, `blake3_hash_file`, `blake3_hash_components`, `materialized_hash_multi_input` | `transform_hash()` signature adds `environment_image_hash`. |
+| Platform fingerprint (`platform.rs`) | Detection logic, canonical hash. | For server-side execution the platform is the container platform, not the user's machine. |
+| Canonicalization (`canon.rs`) | UTF-8, LF endings, sorted JSON, `hash_source_directory`. | No conceptual changes. |
+| Arrow schema parsing (`schema.rs`) | Parquet schema validation. | May extend for non-parquet content type validation. |
+| Auth concepts | GitHub OAuth device flow, JWT, API tokens, scope-based access control. | Token schema changes: `scopes TEXT[]` → `scope TEXT` (singular: `"account"` or `"project:{owner}/{slug}"`). All auth code rewritten to match v2 DDL. |
+| Server scaffolding | Axum router, middleware pattern, Postgres pool, `AppState`. | Routes rebuilt. AppState gains new fields (git provider client, compute backend). |
+| Storage pattern | R2-primary with local fallback, content-addressed store/get. | Needs `presigned_get()`/`presigned_put()` for Fly. Bucket layout changes to `data/{hash}`, `cache/{hash}`, `source/{provider}/{repo}/{sha}.tar.gz`. |
+| Frontend skeleton | SvelteKit 5 SPA, auth flow, routing, theme. | All pages rebuilt for v2 data model. |
+| CLI scaffolding | clap command structure. | All commands rebuilt for v2. |
+| Python client | Subprocess pattern (`ozzy run` / `ozzy fetch`). | API surface completely new. |
+| Deterministic env vars | `PYTHONHASHSEED=0`, `OMP_NUM_THREADS=1`, etc. | Still enforced inside containers. |
+| Local cache | Materialized hash → cached file. | Rewritten for new hash scheme and arbitrary content types. |
+| Commit model | Concept of commits as snapshots. | Now references git commits (SHA + provider) instead of storing source blobs. |
+| Push protocol | Registering project state with the server. | Sends `{git_provider, git_repo, git_commit_sha}` instead of uploading tarballs. |
 
 ---
 
@@ -1011,15 +1030,20 @@ The runner script chains the transforms within a single process, passing data in
 
 ## 11. Open items / deferred
 
-### Designed but needs detail during implementation
+### Detailed in the implementation doc
 
-- **Object storage (R2)** — Essential infrastructure. Data atoms, cached outputs, environment build artifacts all need to live in Cloudflare R2 (or equivalent), not on the Hetzner box's local disk. Local disk is limited, not redundant, and not accessible from Fly Machines where compute happens. v1 has R2 support in the code (`ContentStorage` with R2-primary, local fallback) but never configured a bucket. v2 requires it from day one.
-- **Postgres schema for v2** — Tables for: projects, commits (git-referenced), data atoms, collections, collection membership, collection versions, metadata log, endpoints, materialized cache, secrets. Needs concrete DDL.
-- **Push/fetch wire protocols** — Exact HTTP API contract for push (register commit), fetch (resolve + execute + stream result), data upload, collection management.
-- **Runner implementations** — Python runner is designed. R runner is sketched. Julia, command-based need implementation. Each language needs its own bridge from the container I/O contract to function call.
-- **Frontend changes** — Project page needs: data management UI (upload, browse, collections), endpoint explorer with param inputs, verification badges, DAG visualization. Auth and routing can carry forward.
-- **`ozzy init` experience** — What happens when a new user runs `ozzy init` in their repo? Scaffolding: generate ozzy.toml template, detect existing lockfiles, suggest environment config.
-- **Local vs remote execution** — `ozzy run` for local dev (runs in local Docker), `ozzy fetch` for remote (server dispatches to Fly). Same transform, same container, different orchestrator.
+These items are designed in `v2_implementation_details.md`:
+
+- **Object storage (R2)** — Bucket structure, presigned URLs for Fly Machines, access patterns. See impl doc section 1.
+- **Postgres schema** — Full DDL with indexes. See impl doc section 2.
+- **Push/fetch wire protocols** — HTTP API contracts for all operations. See impl doc section 3.
+- **Runner implementations** — Python, R, and command runners. See impl doc section 4.
+- **`ozzy init` experience** — Scaffolding flow and `transform scaffold` helper. See impl doc section 5.
+- **Local vs remote execution** — `ozzy run` (local Docker) and `ozzy fetch` (remote Fly). See impl doc section 6.
+- **Frontend changes** — New pages and updated pages. See impl doc section 7.
+- **`ozzy.toml` parser** — Structs, validation rules, error messages. See impl doc section 8.
+- **GitHub App** — Permissions, token management, installation flow. See impl doc section 9.
+- **Fly Machines** — API integration, init script, image registry, lifecycle. See impl doc section 10.
 
 ### Deferred to post-v2
 
@@ -1044,6 +1068,11 @@ Data atom hash       = blake3(raw bytes)
 
 Collection hash      = blake3(sorted member reference hashes)
                        (recursive for sub-collections)
+                       For data atoms: the atom's blake3 hash.
+                       For endpoint outputs: the materialized hash of the endpoint
+                         (endpoint must have been executed at least once; if not,
+                         adding it to the collection fails with a clear error).
+                       For sub-collections: the sub-collection's version hash.
 
 Transform hash       = blake3(
                          source_hash +

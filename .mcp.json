@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "docker": {
+      "command": "npx",
+      "args": ["-y", "@docker/mcp"]
+    },
+    "hetzner": {
+      "command": "uvx",
+      "args": ["mcp-hetzner"]
+    }
+  }
+}
