@@ -28,6 +28,12 @@ enum Commands {
         command: CollectionCommands,
     },
 
+    /// Inspect endpoints
+    Endpoint {
+        #[command(subcommand)]
+        command: EndpointCommands,
+    },
+
     /// Execute an endpoint locally (uses local working directory)
     Run {
         /// Endpoint name
@@ -44,6 +50,10 @@ enum Commands {
         /// Endpoint parameters (key=value, can be repeated)
         #[arg(short, long = "param")]
         params: Vec<String>,
+
+        /// Bind local files to data references (name=path, can be repeated)
+        #[arg(long = "local-data")]
+        local_data: Vec<String>,
     },
 
     /// Fetch and execute a remote endpoint
@@ -61,7 +71,15 @@ enum Commands {
     },
 
     /// Push current commit to registry
-    Push,
+    Push {
+        /// Update this ref (defaults to current branch)
+        #[arg(long, short)]
+        r#ref: Option<String>,
+
+        /// Commit message
+        #[arg(short, long)]
+        message: Option<String>,
+    },
 
     /// Manage secrets
     Secret {
@@ -93,18 +111,26 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum DataCommands {
-    /// Upload a dataset
+    /// Upload one or more datasets
     Upload {
-        /// File to upload
-        file: String,
+        /// Files to upload (supports globs)
+        files: Vec<String>,
 
-        /// Dataset name (defaults to filename stem)
+        /// Dataset name (only valid with a single file; defaults to filename stem)
         #[arg(long)]
         name: Option<String>,
 
         /// Description
         #[arg(long)]
         description: Option<String>,
+
+        /// Tags (comma-separated)
+        #[arg(long)]
+        tags: Option<String>,
+
+        /// Metadata sidecar TOML file
+        #[arg(long)]
+        meta: Option<String>,
 
         /// Add to collection after upload
         #[arg(long)]
@@ -142,6 +168,16 @@ enum DataCommands {
         /// Reason for yanking
         #[arg(long)]
         reason: String,
+    },
+
+    /// Download a dataset
+    Download {
+        /// Dataset name
+        name: String,
+
+        /// Output file path (defaults to original filename)
+        #[arg(short, long)]
+        output: Option<String>,
     },
 }
 
@@ -191,6 +227,54 @@ enum CollectionCommands {
 }
 
 #[derive(Subcommand)]
+enum EndpointCommands {
+    /// List endpoints in the current project
+    Ls {
+        /// Ref to inspect (defaults to current branch)
+        #[arg(long, short)]
+        r#ref: Option<String>,
+    },
+
+    /// Show endpoint details (params, DAG, verification status)
+    Show {
+        /// Endpoint name
+        name: String,
+
+        /// Ref to inspect (defaults to current branch)
+        #[arg(long, short)]
+        r#ref: Option<String>,
+    },
+
+    /// Yank an endpoint version
+    Yank {
+        /// Endpoint name
+        name: String,
+
+        /// Ref or commit SHA of the version to yank
+        #[arg(long, short)]
+        r#ref: String,
+
+        /// Reason for yanking
+        #[arg(long)]
+        reason: String,
+    },
+
+    /// Show endpoint DAG
+    Dag {
+        /// Endpoint name
+        name: String,
+
+        /// Output format
+        #[arg(long, default_value = "ascii")]
+        format: String,
+
+        /// Ref to inspect (defaults to current branch)
+        #[arg(long, short)]
+        r#ref: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum SecretCommands {
     /// Set a secret
     Set {
@@ -233,9 +317,9 @@ enum TokenCommands {
         /// Token name
         name: String,
 
-        /// Scopes (comma-separated)
-        #[arg(long, default_value = "read,write")]
-        scopes: String,
+        /// Token scope: "account" or "project:owner/slug"
+        #[arg(long, default_value = "account")]
+        scope: String,
 
         /// Expiration in days
         #[arg(long)]

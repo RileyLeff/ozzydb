@@ -371,7 +371,7 @@ pub fn extract_parquet_schema(path: &Path) -> Result<SchemaInfo> {
         File::open(path).map_err(|e| Error::FileNotFound(format!("{}: {}", path.display(), e)))?;
 
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| Error::InvalidParquet(format!("{}: {}", path.display(), e)))?;
+        .map_err(|e| Error::SchemaError(format!("{}: {}", path.display(), e)))?;
 
     let schema = reader.schema();
     Ok(SchemaInfo::from(schema.as_ref()))
@@ -395,7 +395,7 @@ pub fn validate_schema_compatibility(
 ) -> Result<()> {
     for col in required_columns {
         if !output_schema.fields.iter().any(|f| f.name == *col) {
-            return Err(Error::SchemaMismatch(format!(
+            return Err(Error::SchemaError(format!(
                 "Required column '{}' not found in schema. Available columns: {:?}",
                 col,
                 output_schema.column_names()
