@@ -1,8 +1,8 @@
 # v2 Workflow State
 
 **Current Phase:** 3 — Git Integration & Push
-**Current Step:** 3.1 — GitHub App integration
-**Status:** Phase 2 exhaustive review complete (6 rounds, 2 consecutive clean). Starting Phase 3.
+**Current Step:** Phase 3 exhaustive review
+**Status:** All Phase 3 steps complete. Running exhaustive review.
 
 ## Progress
 
@@ -15,11 +15,11 @@
 | 2 | 2.1 | Data upload API + CLI | Done (server) |
 | 2 | 2.2 | Collections API + CLI | Done (server) |
 | 2 | 2.3 | Secrets API + CLI | Done (server) |
-| 3 | 3.1 | GitHub App integration | In Progress |
-| 3 | 3.2 | Push endpoint | Pending |
-| 3 | 3.3 | Endpoint inspection + project API | Pending |
-| 3 | 3.4 | CLI init + transform scaffold | Pending |
-| 3 | 3.5 | Auth CLI commands | Pending |
+| 3 | 3.1 | GitHub App integration | Done |
+| 3 | 3.2 | Push endpoint | Done |
+| 3 | 3.3 | Endpoint inspection + project API | Done |
+| 3 | 3.4 | CLI init + transform scaffold | Done |
+| 3 | 3.5 | Auth CLI commands | Done |
 | 4 | 4.1 | Environment building | Pending |
 | 4 | 4.2 | Runner generation | Pending |
 | 4 | 4.3 | Compute backend + Fly Machines | Pending |
@@ -36,20 +36,28 @@ None.
 
 ## Recent Activity
 
-- Step 2.1 complete (db7cb23): Data atom API
-  - 7 routes: upload, list, get, download, yank, describe, metadata
-  - Multipart upload with content dedup via content_refs
-  - 410 Gone on yanked download
-  - 5 Docker integration tests + 4 unit tests
-  - Fixed testcontainers to use Postgres 17 (was 11)
-- Step 2.2 complete (f918621): Collections API
-  - 8 routes: create, list, get, log, flatten, add, remove, yank
-  - DFS cycle detection, recursive flatten, member dedup
-  - 2 Docker integration tests (lifecycle + cycle detection) + 1 unit test
-- Step 2.3 complete (575dd6f): Secrets API
-  - 3 routes: set, list, delete
-  - AES-256-GCM encryption, values write-only
-  - Config: SECRETS_ENCRYPTION_KEY env var
-  - 3 Docker integration tests + 3 unit tests
-- **Phase 2 server-side complete.** Exhaustive review passed (6 rounds, 2 clean).
-- Phase 3 starting: Git Integration & Push
+- Phase 3 implementation complete:
+  - Step 3.1 (74c6eb9): GitHub App integration
+    - GitHubProvider with JWT RS256 signing, installation token flow
+    - fetch_archive, get_file, resolve_ref methods
+    - Webhook handler (installation events, HMAC verification)
+    - 10 unit tests
+  - Step 3.2 (44e70cd): Push endpoint
+    - POST /v1/push registers git commits
+    - Validates ozzy.toml from git, verifies transform sources
+    - Source tarball caching, idempotent push
+    - 1 unit test
+  - Step 3.3 (02204e1): Endpoint inspection + project API
+    - GET /v1/projects/{owner}, /v1/projects/{owner}/{slug}
+    - GET /v1/endpoints/{owner}/{slug}, /{name}, /{name}/dag
+    - resolve_commit_state helper, Mermaid DAG rendering
+  - Step 3.4 (2f483b9): CLI init + transform scaffold
+    - `ozzy init` with git/language auto-detection
+    - `ozzy transform scaffold` for Python and R
+    - 15 unit tests + 2 integration tests
+  - Step 3.5 (3cd9207): Auth CLI commands
+    - login (GitHub device flow), logout, status
+    - token create/ls/revoke
+    - Credentials at ~/.config/ozzy/credentials.json
+    - 3 unit tests
+- Running Phase 3 exhaustive review
