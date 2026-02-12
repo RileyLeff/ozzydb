@@ -87,16 +87,17 @@ fn test_init_project() {
 
     ozzy()
         .current_dir(dir.path())
-        .args(["init", "--name", "test-project", "--owner", "testuser"])
+        .args(["init"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Initialized OzzyDB project"));
+        .stdout(predicate::str::contains("Created ozzy.toml"));
 
     // Verify files were created
     assert!(dir.path().join("ozzy.toml").exists());
-    assert!(dir.path().join(".ozzy/commits").exists());
-    assert!(dir.path().join("data").exists());
     assert!(dir.path().join("transforms").exists());
+    let toml = fs::read_to_string(dir.path().join("ozzy.toml")).unwrap();
+    assert!(toml.contains("[project]"));
+    assert!(toml.contains("[remote]"));
     let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
     assert!(gitignore.contains(".ozzy/"));
     assert!(gitignore.contains("data/*.parquet"));
@@ -109,14 +110,14 @@ fn test_init_already_exists() {
     // First init should succeed
     ozzy()
         .current_dir(dir.path())
-        .args(["init", "--name", "test-project", "--owner", "testuser"])
+        .args(["init"])
         .assert()
         .success();
 
     // Second init should indicate already initialized
     ozzy()
         .current_dir(dir.path())
-        .args(["init", "--name", "test-project", "--owner", "testuser"])
+        .args(["init"])
         .assert()
         .success()
         .stdout(predicate::str::contains("already initialized"));

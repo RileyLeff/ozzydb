@@ -368,12 +368,23 @@ enum TransformCommands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let cwd = std::env::current_dir()?;
 
     match cli.command {
+        Commands::Init => {
+            commands::init::run(&cwd)?;
+        }
+        Commands::Transform { command } => match command {
+            TransformCommands::Scaffold { name, lang } => {
+                commands::transform::scaffold(&cwd, &name, &lang)?;
+            }
+        },
         _ => {
             eprintln!("ozzy v2 - command not yet implemented");
             eprintln!("See planning/v2_architecture.md for the design.");
             std::process::exit(1);
         }
     }
+
+    Ok(())
 }
