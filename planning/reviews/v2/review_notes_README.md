@@ -18,3 +18,9 @@ Tables that reference both `project_id` and `commit_id` (refs, endpoint_yanks, m
 
 ### Collection members use set semantics
 `collection_members` has `UNIQUE (collection_version_id, member_hash)` to prevent duplicate members per version. `collection_hash()` also deduplicates defensively. Ordinals provide deterministic ordering for display.
+
+### set_secret.created flag is cosmetically race-prone
+The `created` field in `SetSecretResponse` is derived from a pre-upsert existence check. Two concurrent `set_secret` calls for the same name could both report `created: true`. The actual upsert is atomic and correct — only the informational response field may be misleading. Not worth adding a separate transaction for a cosmetic field.
+
+### Endpoint collection members deferred
+Endpoint members in collections are rejected in Phase 2 with a clear error message. They require materialized hash resolution at execution time, which depends on compute pipeline work in Phase 4. When implemented, `resolve_member_hash` will need to look up the endpoint's latest materialized hash.
