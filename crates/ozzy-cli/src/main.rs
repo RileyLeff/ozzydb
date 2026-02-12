@@ -379,6 +379,32 @@ async fn main() -> Result<()> {
                 commands::transform::scaffold(&cwd, &name, &lang)?;
             }
         },
+        Commands::Auth { command } => match command {
+            AuthCommands::Login => {
+                commands::auth::login().await?;
+            }
+            AuthCommands::Logout => {
+                commands::auth::logout()?;
+            }
+            AuthCommands::Status => {
+                commands::auth::status().await?;
+            }
+            AuthCommands::Token { command } => match command {
+                TokenCommands::Create {
+                    name,
+                    scope,
+                    expires,
+                } => {
+                    commands::auth::token_create(&name, &scope, expires).await?;
+                }
+                TokenCommands::Ls => {
+                    commands::auth::token_list().await?;
+                }
+                TokenCommands::Revoke { name } => {
+                    commands::auth::token_revoke(&name).await?;
+                }
+            },
+        },
         _ => {
             eprintln!("ozzy v2 - command not yet implemented");
             eprintln!("See planning/v2_architecture.md for the design.");
