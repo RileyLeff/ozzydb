@@ -62,9 +62,10 @@ pub fn can_delegate_scope(granter: &str, requested: &str) -> bool {
         // Account scope can delegate anything
         return true;
     }
-    if let (Some(granter_target), Some(requested_target)) =
-        (granter.strip_prefix("project:"), requested.strip_prefix("project:"))
-    {
+    if let (Some(granter_target), Some(requested_target)) = (
+        granter.strip_prefix("project:"),
+        requested.strip_prefix("project:"),
+    ) {
         // Project scope can only delegate to the same project
         return granter_target == requested_target;
     }
@@ -150,10 +151,7 @@ fn extract_token(parts: &Parts) -> Result<String, AuthError> {
 /// Minimum interval between token touch updates (5 minutes).
 const TOKEN_TOUCH_INTERVAL_SECS: i64 = 300;
 
-async fn validate_token(
-    db: &Database,
-    token: &str,
-) -> Result<(User, String), AuthError> {
+async fn validate_token(db: &Database, token: &str) -> Result<(User, String), AuthError> {
     let token_hash = blake3_hash(token.as_bytes());
 
     let api_token = db

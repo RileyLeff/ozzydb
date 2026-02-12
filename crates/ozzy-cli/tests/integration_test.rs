@@ -1739,10 +1739,7 @@ fn test_commit_applies_staged_deletions_and_additions() {
         .args(["endpoint", "ls"])
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("new_ep")
-                .and(predicate::str::contains("old_ep").not()),
-        );
+        .stdout(predicate::str::contains("new_ep").and(predicate::str::contains("old_ep").not()));
 }
 
 #[test]
@@ -1762,7 +1759,13 @@ fn test_endpoint_rm_of_staged_override_marks_committed_for_deletion() {
     ozzy()
         .current_dir(dir.path())
         .args([
-            "endpoint", "create", "ep1", "--input", "raw", "--transforms", "filter_by_value",
+            "endpoint",
+            "create",
+            "ep1",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
         ])
         .assert()
         .success();
@@ -1777,7 +1780,13 @@ fn test_endpoint_rm_of_staged_override_marks_committed_for_deletion() {
     ozzy()
         .current_dir(dir.path())
         .args([
-            "endpoint", "create", "ep1", "--input", "raw", "--transforms", "filter_by_value",
+            "endpoint",
+            "create",
+            "ep1",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
         ])
         .assert()
         .success();
@@ -1824,7 +1833,13 @@ fn test_status_shows_modified_vs_new_endpoints() {
     create_test_parquet(&parquet_path);
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
         .assert()
         .success();
 
@@ -1840,7 +1855,15 @@ fn test_status_shows_modified_vs_new_endpoints() {
     // Create and commit first endpoint
     ozzy()
         .current_dir(dir.path())
-        .args(["endpoint", "create", "ep1", "--input", "raw", "--transforms", "filter_by_value"])
+        .args([
+            "endpoint",
+            "create",
+            "ep1",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
         .assert()
         .success();
 
@@ -1853,13 +1876,29 @@ fn test_status_shows_modified_vs_new_endpoints() {
     // Now create a staged override of ep1 (modified) and a new endpoint ep2
     ozzy()
         .current_dir(dir.path())
-        .args(["endpoint", "create", "ep1", "--input", "raw", "--transforms", "add_prefix"])
+        .args([
+            "endpoint",
+            "create",
+            "ep1",
+            "--input",
+            "raw",
+            "--transforms",
+            "add_prefix",
+        ])
         .assert()
         .success();
 
     ozzy()
         .current_dir(dir.path())
-        .args(["endpoint", "create", "ep2", "--input", "raw", "--transforms", "filter_by_value"])
+        .args([
+            "endpoint",
+            "create",
+            "ep2",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
         .assert()
         .success();
 
@@ -1897,7 +1936,13 @@ fn test_commit_with_no_changes_shows_nothing_to_commit() {
     create_test_parquet(&parquet_path);
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
         .assert()
         .success();
 
@@ -1920,7 +1965,9 @@ fn test_commit_with_no_changes_shows_nothing_to_commit() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("Nothing to commit")|| combined.contains("nothing to commit") || combined.contains("No changes"),
+        combined.contains("Nothing to commit")
+            || combined.contains("nothing to commit")
+            || combined.contains("No changes"),
         "Should indicate nothing to commit, got: {}",
         combined
     );
@@ -1950,20 +1997,42 @@ fn test_multiple_transforms_same_file_distinct_hashes() {
     create_test_parquet(&parquet_path);
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
         .assert()
         .success();
 
     // Create two endpoints using different transforms from the same file
     ozzy()
         .current_dir(dir.path())
-        .args(["endpoint", "create", "ep_filter", "--input", "raw", "--transforms", "filter_by_value"])
+        .args([
+            "endpoint",
+            "create",
+            "ep_filter",
+            "--input",
+            "raw",
+            "--transforms",
+            "filter_by_value",
+        ])
         .assert()
         .success();
 
     ozzy()
         .current_dir(dir.path())
-        .args(["endpoint", "create", "ep_prefix", "--input", "raw", "--transforms", "add_prefix"])
+        .args([
+            "endpoint",
+            "create",
+            "ep_prefix",
+            "--input",
+            "raw",
+            "--transforms",
+            "add_prefix",
+        ])
         .assert()
         .success();
 
@@ -1973,13 +2042,23 @@ fn test_multiple_transforms_same_file_distinct_hashes() {
 
     ozzy()
         .current_dir(dir.path())
-        .args(["run", "ep_filter", "--output", output_filter.to_str().unwrap()])
+        .args([
+            "run",
+            "ep_filter",
+            "--output",
+            output_filter.to_str().unwrap(),
+        ])
         .assert()
         .success();
 
     ozzy()
         .current_dir(dir.path())
-        .args(["run", "ep_prefix", "--output", output_prefix.to_str().unwrap()])
+        .args([
+            "run",
+            "ep_prefix",
+            "--output",
+            output_prefix.to_str().unwrap(),
+        ])
         .assert()
         .success();
 
@@ -2011,7 +2090,13 @@ fn test_data_rm() {
     create_test_parquet(&parquet_path);
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
         .assert()
         .success();
 
@@ -2121,7 +2206,13 @@ fn test_tag_operations() {
     create_test_parquet(&parquet_path);
     ozzy()
         .current_dir(dir.path())
-        .args(["data", "add", parquet_path.to_str().unwrap(), "--name", "raw"])
+        .args([
+            "data",
+            "add",
+            parquet_path.to_str().unwrap(),
+            "--name",
+            "raw",
+        ])
         .assert()
         .success();
 

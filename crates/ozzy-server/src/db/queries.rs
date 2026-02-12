@@ -407,11 +407,7 @@ impl Database {
         Ok(commit)
     }
 
-    pub async fn get_commit_by_sha(
-        &self,
-        project_id: Uuid,
-        sha: &str,
-    ) -> Result<Option<Commit>> {
+    pub async fn get_commit_by_sha(&self, project_id: Uuid, sha: &str) -> Result<Option<Commit>> {
         let commit = sqlx::query_as::<_, Commit>(
             "SELECT * FROM commits WHERE project_id = $1 AND git_commit_sha = $2",
         )
@@ -505,38 +501,31 @@ impl Database {
         Ok(r)
     }
 
-    pub async fn resolve_ref(
-        &self,
-        project_id: Uuid,
-        ref_name: &str,
-    ) -> Result<Option<Ref>> {
-        let r = sqlx::query_as::<_, Ref>(
-            "SELECT * FROM refs WHERE project_id = $1 AND ref_name = $2",
-        )
-        .bind(project_id)
-        .bind(ref_name)
-        .fetch_optional(&self.pool)
-        .await?;
+    pub async fn resolve_ref(&self, project_id: Uuid, ref_name: &str) -> Result<Option<Ref>> {
+        let r =
+            sqlx::query_as::<_, Ref>("SELECT * FROM refs WHERE project_id = $1 AND ref_name = $2")
+                .bind(project_id)
+                .bind(ref_name)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(r)
     }
 
     pub async fn list_refs(&self, project_id: Uuid) -> Result<Vec<Ref>> {
-        let refs = sqlx::query_as::<_, Ref>(
-            "SELECT * FROM refs WHERE project_id = $1 ORDER BY ref_name",
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let refs =
+            sqlx::query_as::<_, Ref>("SELECT * FROM refs WHERE project_id = $1 ORDER BY ref_name")
+                .bind(project_id)
+                .fetch_all(&self.pool)
+                .await?;
         Ok(refs)
     }
 
     pub async fn delete_ref(&self, project_id: Uuid, ref_name: &str) -> Result<bool> {
-        let result =
-            sqlx::query("DELETE FROM refs WHERE project_id = $1 AND ref_name = $2")
-                .bind(project_id)
-                .bind(ref_name)
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query("DELETE FROM refs WHERE project_id = $1 AND ref_name = $2")
+            .bind(project_id)
+            .bind(ref_name)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -574,11 +563,7 @@ impl Database {
         Ok(atom)
     }
 
-    pub async fn get_data_atom(
-        &self,
-        project_id: Uuid,
-        name: &str,
-    ) -> Result<Option<DataAtom>> {
+    pub async fn get_data_atom(&self, project_id: Uuid, name: &str) -> Result<Option<DataAtom>> {
         let atom = sqlx::query_as::<_, DataAtom>(
             "SELECT * FROM data_atoms WHERE project_id = $1 AND name = $2",
         )
@@ -599,12 +584,7 @@ impl Database {
         Ok(atoms)
     }
 
-    pub async fn yank_data_atom(
-        &self,
-        project_id: Uuid,
-        name: &str,
-        reason: &str,
-    ) -> Result<bool> {
+    pub async fn yank_data_atom(&self, project_id: Uuid, name: &str, reason: &str) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE data_atoms SET yanked = true, yank_reason = $3, yanked_at = now() WHERE project_id = $1 AND name = $2",
         )
@@ -788,11 +768,10 @@ impl Database {
     }
 
     pub async fn delete_github_installation(&self, installation_id: i64) -> Result<bool> {
-        let result =
-            sqlx::query("DELETE FROM github_installations WHERE installation_id = $1")
-                .bind(installation_id)
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query("DELETE FROM github_installations WHERE installation_id = $1")
+            .bind(installation_id)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -855,11 +834,7 @@ impl Database {
         Ok(coll)
     }
 
-    pub async fn get_collection(
-        &self,
-        project_id: Uuid,
-        name: &str,
-    ) -> Result<Option<Collection>> {
+    pub async fn get_collection(&self, project_id: Uuid, name: &str) -> Result<Option<Collection>> {
         let coll = sqlx::query_as::<_, Collection>(
             "SELECT * FROM collections WHERE project_id = $1 AND name = $2",
         )
@@ -982,12 +957,11 @@ impl Database {
             .await?;
 
         // Lock collection row and re-check yanked status
-        let coll = sqlx::query_as::<_, Collection>(
-            "SELECT * FROM collections WHERE id = $1 FOR UPDATE",
-        )
-        .bind(collection_id)
-        .fetch_one(&mut *tx)
-        .await?;
+        let coll =
+            sqlx::query_as::<_, Collection>("SELECT * FROM collections WHERE id = $1 FOR UPDATE")
+                .bind(collection_id)
+                .fetch_one(&mut *tx)
+                .await?;
 
         if coll.yanked {
             return Ok(CollectionMutResult::Yanked(coll.name));
@@ -997,13 +971,8 @@ impl Database {
         // connection to avoid pool exhaustion deadlocks under contention.
         for (mtype, mref, _) in new_members {
             if mtype == "collection" {
-                if Self::would_create_collection_cycle(
-                    &mut *tx,
-                    project_id,
-                    collection_name,
-                    mref,
-                )
-                .await?
+                if Self::would_create_collection_cycle(&mut *tx, project_id, collection_name, mref)
+                    .await?
                 {
                     return Ok(CollectionMutResult::CycleDetected(mref.clone()));
                 }
@@ -1032,7 +1001,14 @@ impl Database {
         // Merge: keep existing, append new (skip duplicates by type+ref)
         let mut all: Vec<(String, String, String, i32)> = current
             .iter()
-            .map(|m| (m.member_type.clone(), m.member_ref.clone(), m.member_hash.clone(), m.ordinal))
+            .map(|m| {
+                (
+                    m.member_type.clone(),
+                    m.member_ref.clone(),
+                    m.member_hash.clone(),
+                    m.ordinal,
+                )
+            })
             .collect();
 
         let mut next_ordinal = all.iter().map(|(_, _, _, o)| *o).max().unwrap_or(-1) + 1;
@@ -1111,12 +1087,11 @@ impl Database {
             .await?;
 
         // Lock collection row and re-check yanked status
-        let coll = sqlx::query_as::<_, Collection>(
-            "SELECT * FROM collections WHERE id = $1 FOR UPDATE",
-        )
-        .bind(collection_id)
-        .fetch_one(&mut *tx)
-        .await?;
+        let coll =
+            sqlx::query_as::<_, Collection>("SELECT * FROM collections WHERE id = $1 FOR UPDATE")
+                .bind(collection_id)
+                .fetch_one(&mut *tx)
+                .await?;
 
         if coll.yanked {
             return Ok(CollectionMutResult::Yanked(coll.name));
@@ -1152,7 +1127,14 @@ impl Database {
                     .any(|(t, r)| t == &m.member_type && r == &m.member_ref)
             })
             .enumerate()
-            .map(|(i, m)| (m.member_type.clone(), m.member_ref.clone(), m.member_hash.clone(), i as i32))
+            .map(|(i, m)| {
+                (
+                    m.member_type.clone(),
+                    m.member_ref.clone(),
+                    m.member_hash.clone(),
+                    i as i32,
+                )
+            })
             .collect();
 
         // Compute hash and create version
@@ -1292,10 +1274,7 @@ impl Database {
         Ok(vers)
     }
 
-    pub async fn get_collection_members(
-        &self,
-        version_id: Uuid,
-    ) -> Result<Vec<CollectionMember>> {
+    pub async fn get_collection_members(&self, version_id: Uuid) -> Result<Vec<CollectionMember>> {
         let members = sqlx::query_as::<_, CollectionMember>(
             "SELECT * FROM collection_members WHERE collection_version_id = $1 ORDER BY ordinal",
         )
@@ -1426,11 +1405,7 @@ impl Database {
     }
 
     /// Get a secret by name (includes encrypted value — for server-side decryption only).
-    pub async fn get_secret(
-        &self,
-        project_id: Uuid,
-        name: &str,
-    ) -> Result<Option<Secret>> {
+    pub async fn get_secret(&self, project_id: Uuid, name: &str) -> Result<Option<Secret>> {
         let secret = sqlx::query_as::<_, Secret>(
             "SELECT * FROM secrets WHERE project_id = $1 AND name = $2",
         )
@@ -1442,13 +1417,11 @@ impl Database {
     }
 
     pub async fn delete_secret(&self, project_id: Uuid, name: &str) -> Result<bool> {
-        let result = sqlx::query(
-            "DELETE FROM secrets WHERE project_id = $1 AND name = $2",
-        )
-        .bind(project_id)
-        .bind(name)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("DELETE FROM secrets WHERE project_id = $1 AND name = $2")
+            .bind(project_id)
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -1676,12 +1649,10 @@ impl Database {
     }
 
     pub async fn delete_materialized_cache(&self, materialized_hash: &str) -> Result<bool> {
-        let result = sqlx::query(
-            "DELETE FROM materialized_cache WHERE materialized_hash = $1",
-        )
-        .bind(materialized_hash)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("DELETE FROM materialized_cache WHERE materialized_hash = $1")
+            .bind(materialized_hash)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 }

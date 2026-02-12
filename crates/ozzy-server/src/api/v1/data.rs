@@ -246,7 +246,11 @@ async fn upload_data(
 
     // Infer content type and validate it's a valid HTTP header value
     let content_type = infer_content_type(fname, explicit_content_type.as_deref());
-    if content_type.as_bytes().iter().any(|&b| b < 0x20 || b == 0x7f) {
+    if content_type
+        .as_bytes()
+        .iter()
+        .any(|&b| b < 0x20 || b == 0x7f)
+    {
         return Err(ApiError::bad_request(format!(
             "Invalid content_type '{}': contains control characters",
             content_type
@@ -275,7 +279,9 @@ async fn upload_data(
     let deduplicated = existing_ref.is_some();
 
     // Compute the actual storage key
-    let r2_key = state.storage.storage_key(&hash, "bin")
+    let r2_key = state
+        .storage
+        .storage_key(&hash, "bin")
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("Invalid hash: {}", e)))?;
 
     // Store content if this is a new hash
@@ -287,7 +293,15 @@ async fn upload_data(
     // If this fails (e.g., duplicate name), ref_count won't be incremented.
     let atom = state
         .db
-        .insert_data_atom(project.id, &name, &hash, &content_type, byte_size, &r2_key, user.id)
+        .insert_data_atom(
+            project.id,
+            &name,
+            &hash,
+            &content_type,
+            byte_size,
+            &r2_key,
+            user.id,
+        )
         .await?;
 
     // Upsert content_refs (increments ref_count if already exists)
@@ -614,7 +628,10 @@ mod tests {
         assert_eq!(infer_content_type("data.json", None), "application/json");
         assert_eq!(infer_content_type("data.pdf", None), "application/pdf");
         assert_eq!(infer_content_type("data.png", None), "image/png");
-        assert_eq!(infer_content_type("data.PARQUET", None), "application/vnd.apache.parquet");
+        assert_eq!(
+            infer_content_type("data.PARQUET", None),
+            "application/vnd.apache.parquet"
+        );
         assert_eq!(
             infer_content_type("data.unknown", None),
             "application/octet-stream"

@@ -625,9 +625,8 @@ mod tests {
 
     #[test]
     fn test_nested_struct_roundtrip() {
-        let inner_struct = DataType::Struct(
-            vec![Arc::new(Field::new("x", DataType::Float64, true))].into(),
-        );
+        let inner_struct =
+            DataType::Struct(vec![Arc::new(Field::new("x", DataType::Float64, true))].into());
         let outer_struct = DataType::Struct(
             vec![
                 Arc::new(Field::new("id", DataType::Int64, true)),
@@ -669,8 +668,7 @@ mod tests {
 
     #[test]
     fn test_dict_roundtrip() {
-        let dict_type =
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+        let dict_type = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
         let formatted = format_data_type(&dict_type);
         assert_eq!(formatted, "dict<int32, utf8>");
         let parsed = parse_data_type(&formatted);
@@ -686,11 +684,13 @@ mod tests {
             ]
             .into(),
         );
-        let dict_type =
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(struct_type));
+        let dict_type = DataType::Dictionary(Box::new(DataType::Int32), Box::new(struct_type));
         let formatted = format_data_type(&dict_type);
         let parsed = parse_data_type(&formatted);
-        assert_eq!(dict_type, parsed, "Dict with nested struct roundtrip failed");
+        assert_eq!(
+            dict_type, parsed,
+            "Dict with nested struct roundtrip failed"
+        );
     }
 
     #[test]
@@ -710,7 +710,10 @@ mod tests {
         let formatted = format_data_type(&struct_type);
         assert_eq!(formatted, "struct<ts: timestamp[s, UTC], val: int64>");
         let parsed = parse_data_type(&formatted);
-        assert_eq!(struct_type, parsed, "Struct with bracket types roundtrip failed");
+        assert_eq!(
+            struct_type, parsed,
+            "Struct with bracket types roundtrip failed"
+        );
     }
 
     #[test]
@@ -787,7 +790,10 @@ mod tests {
         let dict_type = DataType::Dictionary(Box::new(DataType::Int32), Box::new(list_type));
         let formatted = format_data_type(&dict_type);
         let parsed = parse_data_type(&formatted);
-        assert_eq!(dict_type, parsed, "dict<int32, list<utf8>> roundtrip failed");
+        assert_eq!(
+            dict_type, parsed,
+            "dict<int32, list<utf8>> roundtrip failed"
+        );
     }
 
     #[test]
@@ -838,14 +844,30 @@ mod tests {
     fn test_schema_diff_detects_changes() {
         let from = SchemaInfo {
             fields: vec![
-                FieldInfo { name: "a".into(), dtype: "int64".into(), nullable: false },
-                FieldInfo { name: "b".into(), dtype: "utf8".into(), nullable: true },
+                FieldInfo {
+                    name: "a".into(),
+                    dtype: "int64".into(),
+                    nullable: false,
+                },
+                FieldInfo {
+                    name: "b".into(),
+                    dtype: "utf8".into(),
+                    nullable: true,
+                },
             ],
         };
         let to = SchemaInfo {
             fields: vec![
-                FieldInfo { name: "a".into(), dtype: "float64".into(), nullable: false },
-                FieldInfo { name: "c".into(), dtype: "utf8".into(), nullable: true },
+                FieldInfo {
+                    name: "a".into(),
+                    dtype: "float64".into(),
+                    nullable: false,
+                },
+                FieldInfo {
+                    name: "c".into(),
+                    dtype: "utf8".into(),
+                    nullable: true,
+                },
             ],
         };
         let diff = schema_diff(&from, &to);
@@ -861,8 +883,16 @@ mod tests {
     fn test_validate_pipeline_missing_column() {
         let schema = SchemaInfo {
             fields: vec![
-                FieldInfo { name: "id".into(), dtype: "int64".into(), nullable: false },
-                FieldInfo { name: "value".into(), dtype: "float64".into(), nullable: true },
+                FieldInfo {
+                    name: "id".into(),
+                    dtype: "int64".into(),
+                    nullable: false,
+                },
+                FieldInfo {
+                    name: "value".into(),
+                    dtype: "float64".into(),
+                    nullable: true,
+                },
             ],
         };
         let result = validate_pipeline(&schema, &[("transform1", vec!["id", "missing_col"])]);

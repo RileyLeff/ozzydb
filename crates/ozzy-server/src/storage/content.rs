@@ -162,7 +162,12 @@ impl ContentStorage {
     }
 
     /// Upload content to R2. Errors propagate (R2 is the source of truth).
-    async fn upload_remote(&self, content_hash: &str, extension: &str, content: &[u8]) -> Result<()> {
+    async fn upload_remote(
+        &self,
+        content_hash: &str,
+        extension: &str,
+        content: &[u8],
+    ) -> Result<()> {
         let remote = self
             .remote_store
             .as_ref()
@@ -187,11 +192,8 @@ impl ContentStorage {
         if Self::ensure_parent(&local_path).is_err() {
             return;
         }
-        let tmp_path = local_path.with_extension(format!(
-            "{}.{}.tmp",
-            extension,
-            uuid::Uuid::new_v4()
-        ));
+        let tmp_path =
+            local_path.with_extension(format!("{}.{}.tmp", extension, uuid::Uuid::new_v4()));
         if tokio::fs::write(&tmp_path, content).await.is_err() {
             return;
         }
@@ -242,8 +244,10 @@ impl ContentStorage {
 
         if self.remote_store.is_some() {
             // R2-primary mode: write to R2 first, cache locally best-effort.
-            self.upload_remote(&content_hash, extension, content).await?;
-            self.cache_local_best_effort(&content_hash, extension, content).await;
+            self.upload_remote(&content_hash, extension, content)
+                .await?;
+            self.cache_local_best_effort(&content_hash, extension, content)
+                .await;
         } else {
             // Local-only mode (dev/test): write to local disk as primary.
             let local_path = self.local_path(&content_hash, extension)?;
@@ -281,7 +285,8 @@ impl ContentStorage {
     ) -> Result<()> {
         if self.remote_store.is_some() {
             self.upload_remote(content_hash, extension, content).await?;
-            self.cache_local_best_effort(content_hash, extension, content).await;
+            self.cache_local_best_effort(content_hash, extension, content)
+                .await;
         } else {
             let local_path = self.local_path(content_hash, extension)?;
             if !local_path.exists() {

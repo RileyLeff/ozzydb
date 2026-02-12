@@ -490,7 +490,9 @@ impl OzzyToml {
                 (Some(_), Some(_)) => {
                     errors.push(ValidationError {
                         location: format!("transforms.{}", name),
-                        message: "Transform must have exactly one of `source` or `command`, not both.".to_string(),
+                        message:
+                            "Transform must have exactly one of `source` or `command`, not both."
+                                .to_string(),
                         suggestion: None,
                     });
                 }
@@ -508,10 +510,7 @@ impl OzzyToml {
             if !self.environments.contains_key(&t.environment) {
                 errors.push(ValidationError {
                     location: format!("transforms.{}.environment", name),
-                    message: format!(
-                        "Environment \"{}\" not found.",
-                        t.environment
-                    ),
+                    message: format!("Environment \"{}\" not found.", t.environment),
                     suggestion: suggest_name(&t.environment, env_names.iter().copied()),
                 });
             }
@@ -544,10 +543,7 @@ impl OzzyToml {
                 if !self.transforms.contains_key(&node.transform) {
                     errors.push(ValidationError {
                         location: format!("endpoints.{}.nodes.{}.transform", ep_name, node_name),
-                        message: format!(
-                            "Transform \"{}\" not found.",
-                            node.transform
-                        ),
+                        message: format!("Transform \"{}\" not found.", node.transform),
                         suggestion: suggest_name(&node.transform, transform_names.iter().copied()),
                     });
                 }
@@ -577,14 +573,18 @@ impl OzzyToml {
                             let node = &ep.nodes[&node_name];
                             if let Some(transform) = self.transforms.get(&node.transform) {
                                 if !transform.inputs.contains_key(&input_name) {
-                                    let input_names: Vec<&str> = transform.inputs.keys().map(|s| s.as_str()).collect();
+                                    let input_names: Vec<&str> =
+                                        transform.inputs.keys().map(|s| s.as_str()).collect();
                                     errors.push(ValidationError {
                                         location: format!("{}.to", edge_loc),
                                         message: format!(
                                             "Input \"{}\" not declared on transform \"{}\".",
                                             input_name, node.transform
                                         ),
-                                        suggestion: suggest_name(&input_name, input_names.iter().copied()),
+                                        suggestion: suggest_name(
+                                            &input_name,
+                                            input_names.iter().copied(),
+                                        ),
                                     });
                                 }
                             }
@@ -610,7 +610,9 @@ impl OzzyToml {
 
                 // Reject empty refs (e.g. "data:", "collection:", "endpoint:")
                 let is_empty_ref = match &source {
-                    EdgeSource::Data(r) | EdgeSource::Collection(r) | EdgeSource::Endpoint(r) => r.is_empty(),
+                    EdgeSource::Data(r) | EdgeSource::Collection(r) | EdgeSource::Endpoint(r) => {
+                        r.is_empty()
+                    }
                     EdgeSource::Node(r) => r.is_empty(),
                 };
                 if is_empty_ref {
@@ -670,9 +672,7 @@ impl OzzyToml {
                         match covered_inputs.get(&key) {
                             None => {
                                 errors.push(ValidationError {
-                                    location: format!(
-                                        "endpoints.{}.nodes.{}", ep_name, node_name
-                                    ),
+                                    location: format!("endpoints.{}.nodes.{}", ep_name, node_name),
                                     message: format!(
                                         "Input \"{}\" has no incoming edge.",
                                         input_name
@@ -682,9 +682,7 @@ impl OzzyToml {
                             }
                             Some(&count) if count > 1 => {
                                 errors.push(ValidationError {
-                                    location: format!(
-                                        "endpoints.{}.nodes.{}", ep_name, node_name
-                                    ),
+                                    location: format!("endpoints.{}.nodes.{}", ep_name, node_name),
                                     message: format!(
                                         "Input \"{}\" has {} incoming edges (expected exactly 1).",
                                         input_name, count
@@ -733,16 +731,14 @@ impl OzzyToml {
                                 transform.params.keys().map(|s| s.as_str()).collect();
                             errors.push(ValidationError {
                                 location: format!(
-                                    "endpoints.{}.params.{}.binds", ep_name, param_name
+                                    "endpoints.{}.params.{}.binds",
+                                    ep_name, param_name
                                 ),
                                 message: format!(
                                     "Bind target param \"{}\" not found on transform \"{}\".",
                                     bind_param, node.transform
                                 ),
-                                suggestion: suggest_name(
-                                    bind_param,
-                                    param_names.iter().copied(),
-                                ),
+                                suggestion: suggest_name(bind_param, param_names.iter().copied()),
                             });
                         }
                     }
@@ -1023,13 +1019,15 @@ environment = "default"
         let doc = OzzyToml::parse(toml).unwrap();
         let errors = doc.validate();
         assert!(
-            errors.iter().any(|e| e.location == "transforms.both"
-                && e.message.contains("not both")),
+            errors
+                .iter()
+                .any(|e| e.location == "transforms.both" && e.message.contains("not both")),
             "Expected 'not both' error"
         );
         assert!(
-            errors.iter().any(|e| e.location == "transforms.neither"
-                && e.message.contains("either")),
+            errors
+                .iter()
+                .any(|e| e.location == "transforms.neither" && e.message.contains("either")),
             "Expected 'either' error"
         );
     }
@@ -1147,7 +1145,9 @@ to = "just_node_no_input"
         let doc = OzzyToml::parse(toml).unwrap();
         let errors = doc.validate();
         assert!(
-            errors.iter().any(|e| e.message.contains("node_name.input_name")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("node_name.input_name")),
             "Expected edge target format error"
         );
     }
@@ -1181,9 +1181,11 @@ to = "n.data"
         let doc = OzzyToml::parse(toml).unwrap();
         let errors = doc.validate();
         assert!(
-            errors.iter().any(|e| e.message.contains("meta")
-                && e.message.contains("no incoming edge")),
-            "Expected missing input error for 'meta', got: {:?}", errors
+            errors
+                .iter()
+                .any(|e| e.message.contains("meta") && e.message.contains("no incoming edge")),
+            "Expected missing input error for 'meta', got: {:?}",
+            errors
         );
     }
 
@@ -1219,8 +1221,11 @@ to = "n.data"
         let doc = OzzyToml::parse(toml).unwrap();
         let errors = doc.validate();
         assert!(
-            errors.iter().any(|e| e.message.contains("2 incoming edges")),
-            "Expected duplicate input error, got: {:?}", errors
+            errors
+                .iter()
+                .any(|e| e.message.contains("2 incoming edges")),
+            "Expected duplicate input error, got: {:?}",
+            errors
         );
     }
 
@@ -1258,7 +1263,8 @@ to = "a.data"
         let errors = doc.validate();
         assert!(
             errors.iter().any(|e| e.message.contains("cycle")),
-            "Expected cycle error, got: {:?}", errors
+            "Expected cycle error, got: {:?}",
+            errors
         );
     }
 
@@ -1366,7 +1372,8 @@ to = "n.data"
         let errors = doc.validate();
         assert!(
             errors.iter().any(|e| e.message.contains("@sha_or_tag")),
-            "Expected cross-project pinning error, got: {:?}", errors
+            "Expected cross-project pinning error, got: {:?}",
+            errors
         );
     }
 
@@ -1433,7 +1440,8 @@ to = "n.data"
         let errors = doc.validate();
         assert!(
             errors.iter().any(|e| e.message.contains("@sha_or_tag")),
-            "Expected cross-project pinning error for empty pin, got: {:?}", errors
+            "Expected cross-project pinning error for empty pin, got: {:?}",
+            errors
         );
     }
 
@@ -1459,9 +1467,11 @@ type = "vector"
         let doc = OzzyToml::parse(toml).unwrap();
         let errors = doc.validate();
         assert!(
-            errors.iter().any(|e| e.message.contains("vector")
-                && e.message.contains("Must be")),
-            "Expected invalid param type error, got: {:?}", errors
+            errors
+                .iter()
+                .any(|e| e.message.contains("vector") && e.message.contains("Must be")),
+            "Expected invalid param type error, got: {:?}",
+            errors
         );
     }
 
@@ -1641,7 +1651,12 @@ inputs.data = "parquet"
         let doc = OzzyToml::parse(toml).unwrap();
         let errors = doc.validate();
         // Should have: bad project name, bad owner name, both source+command, missing env
-        assert!(errors.len() >= 4, "Expected at least 4 errors, got {}: {:?}", errors.len(), errors);
+        assert!(
+            errors.len() >= 4,
+            "Expected at least 4 errors, got {}: {:?}",
+            errors.len(),
+            errors
+        );
     }
 
     #[test]
@@ -1658,10 +1673,7 @@ inputs.data = "parquet"
             parse_edge_source("endpoint:org/proj/ep@v1"),
             EdgeSource::Endpoint("org/proj/ep@v1".to_string())
         );
-        assert_eq!(
-            parse_edge_source("qc"),
-            EdgeSource::Node("qc".to_string())
-        );
+        assert_eq!(parse_edge_source("qc"), EdgeSource::Node("qc".to_string()));
     }
 
     #[test]

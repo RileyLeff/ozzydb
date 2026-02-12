@@ -5,7 +5,11 @@ mod commands;
 
 #[derive(Parser)]
 #[command(name = "ozzy")]
-#[command(author, version, about = "Data management platform for scientific computing")]
+#[command(
+    author,
+    version,
+    about = "Data management platform for scientific computing"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

@@ -4,10 +4,7 @@
 //! they can be set and deleted but never read back through the API.
 //! The server decrypts them only when injecting into compute containers.
 
-use aes_gcm::{
-    Aes256Gcm, KeyInit, Nonce,
-    aead::Aead,
-};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -20,10 +17,7 @@ use uuid::Uuid;
 
 use super::access::enforce_write_access;
 use super::auth::ApiError;
-use crate::{
-    AppState,
-    auth::middleware::AuthUser,
-};
+use crate::{AppState, auth::middleware::AuthUser};
 
 // ============================================================================
 // Wire types
@@ -207,9 +201,7 @@ async fn delete_secret(
         return Err(ApiError::not_found(format!("Secret '{}'", name)));
     }
 
-    Ok(Json(
-        serde_json::json!({ "deleted": true, "name": name }),
-    ))
+    Ok(Json(serde_json::json!({ "deleted": true, "name": name })))
 }
 
 #[cfg(test)]

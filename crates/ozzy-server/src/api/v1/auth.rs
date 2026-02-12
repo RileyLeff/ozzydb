@@ -50,7 +50,7 @@ pub struct UserInfo {
 #[derive(Deserialize)]
 pub struct CreateTokenRequest {
     pub name: String,
-    pub scope: String,              // "account" | "project:{owner}/{slug}"
+    pub scope: String, // "account" | "project:{owner}/{slug}"
     pub expires_in_days: Option<u32>,
 }
 
@@ -237,7 +237,9 @@ async fn create_token(
                 .ok_or_else(|| ApiError::not_found(format!("Project {}", target)))?;
             Some(project.id)
         } else {
-            return Err(ApiError::bad_request("Project scope must be \"project:{owner}/{slug}\""));
+            return Err(ApiError::bad_request(
+                "Project scope must be \"project:{owner}/{slug}\"",
+            ));
         }
     } else {
         None
@@ -249,7 +251,14 @@ async fn create_token(
 
     let token = state
         .db
-        .create_token(user.id, &req.name, &token_hash, &req.scope, project_id, expires_at)
+        .create_token(
+            user.id,
+            &req.name,
+            &token_hash,
+            &req.scope,
+            project_id,
+            expires_at,
+        )
         .await?;
 
     Ok(Json(CreateTokenResponse {

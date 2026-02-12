@@ -32,7 +32,11 @@ async fn get_test_db() -> Option<Database> {
 }
 
 fn unique_name(prefix: &str) -> String {
-    format!("{}_{}", prefix, Uuid::new_v4().to_string().replace('-', "")[..8].to_string())
+    format!(
+        "{}_{}",
+        prefix,
+        Uuid::new_v4().to_string().replace('-', "")[..8].to_string()
+    )
 }
 
 // ========================================================================
@@ -50,7 +54,12 @@ async fn test_upsert_and_get_user() -> Result<()> {
     let login = unique_name("user");
 
     let user = db
-        .upsert_user_from_github(github_id, &login, Some("test@example.com"), Some("https://avatar.url"))
+        .upsert_user_from_github(
+            github_id,
+            &login,
+            Some("test@example.com"),
+            Some("https://avatar.url"),
+        )
         .await?;
 
     assert_eq!(user.username, login);
@@ -90,7 +99,12 @@ async fn test_create_and_get_project() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
 
     let slug = unique_name("proj");
@@ -124,7 +138,12 @@ async fn test_get_or_create_project() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
 
     let slug = unique_name("proj");
@@ -149,10 +168,20 @@ async fn test_collaborators() -> Result<()> {
     };
 
     let owner = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("owner"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("owner"),
+            None,
+            None,
+        )
         .await?;
     let collab = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("collab"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("collab"),
+            None,
+            None,
+        )
         .await?;
 
     let project = db
@@ -206,7 +235,12 @@ async fn test_tokens() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
 
     let token_hash = format!("hash_{}", Uuid::new_v4());
@@ -246,7 +280,12 @@ async fn test_project_scoped_token() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
 
     let project = db
@@ -257,7 +296,14 @@ async fn test_project_scoped_token() -> Result<()> {
     let token_hash = format!("hash_{}", Uuid::new_v4());
 
     let token = db
-        .create_token(user.id, "proj-token", &token_hash, &scope, Some(project.id), None)
+        .create_token(
+            user.id,
+            "proj-token",
+            &token_hash,
+            &scope,
+            Some(project.id),
+            None,
+        )
         .await?;
     assert_eq!(token.scope, scope);
     assert_eq!(token.project_id, Some(project.id));
@@ -272,7 +318,12 @@ async fn test_session_token_upsert() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
 
     let expires = chrono::Utc::now() + chrono::Duration::days(90);
@@ -308,7 +359,12 @@ async fn test_commits() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
@@ -354,17 +410,31 @@ async fn test_commit_state() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
         .await?;
     let sha = format!("{:040x}", rand::random::<u128>());
     let commit = db
-        .insert_commit(project.id, "github", "user/repo", &sha, "toml_hash", user.id, None)
+        .insert_commit(
+            project.id,
+            "github",
+            "user/repo",
+            &sha,
+            "toml_hash",
+            user.id,
+            None,
+        )
         .await?;
 
-    let environments = serde_json::json!({"default": {"base": "ozzydb/python:3.12", "lockfile": "uv.lock"}});
+    let environments =
+        serde_json::json!({"default": {"base": "ozzydb/python:3.12", "lockfile": "uv.lock"}});
     let transforms = serde_json::json!({"qc": {"source": "transforms/qc.py:quality_control"}});
     let endpoints = serde_json::json!({"analysis": {"description": "Main analysis"}});
     let project_meta = serde_json::json!({"name": "test", "owner": "user"});
@@ -401,14 +471,27 @@ async fn test_refs() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
         .await?;
     let sha = format!("{:040x}", rand::random::<u128>());
     let commit = db
-        .insert_commit(project.id, "github", "user/repo", &sha, "hash", user.id, None)
+        .insert_commit(
+            project.id,
+            "github",
+            "user/repo",
+            &sha,
+            "hash",
+            user.id,
+            None,
+        )
         .await?;
 
     // Create a branch ref
@@ -429,7 +512,15 @@ async fn test_refs() -> Result<()> {
     // Upsert advances the ref (new commit)
     let sha2 = format!("{:040x}", rand::random::<u128>());
     let commit2 = db
-        .insert_commit(project.id, "github", "user/repo", &sha2, "hash2", user.id, None)
+        .insert_commit(
+            project.id,
+            "github",
+            "user/repo",
+            &sha2,
+            "hash2",
+            user.id,
+            None,
+        )
         .await?;
     let r2 = db
         .upsert_ref(project.id, "main", "branch", commit2.id)
@@ -455,7 +546,12 @@ async fn test_data_atoms() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
@@ -489,9 +585,7 @@ async fn test_data_atoms() -> Result<()> {
     assert!(atoms.iter().any(|a| a.id == atom.id));
 
     // Yank
-    let yanked = db
-        .yank_data_atom(project.id, &name, "Bad data")
-        .await?;
+    let yanked = db.yank_data_atom(project.id, &name, "Bad data").await?;
     assert!(yanked);
     let found = db.get_data_atom(project.id, &name).await?.unwrap();
     assert!(found.yanked);
@@ -514,13 +608,23 @@ async fn test_content_refs() -> Result<()> {
 
     // First upsert creates with ref_count=1
     let cr = db
-        .upsert_content_ref(&hash, &format!("data/{}", hash), "application/vnd.apache.parquet", 2048)
+        .upsert_content_ref(
+            &hash,
+            &format!("data/{}", hash),
+            "application/vnd.apache.parquet",
+            2048,
+        )
         .await?;
     assert_eq!(cr.ref_count, 1);
 
     // Second upsert increments ref_count
     let cr = db
-        .upsert_content_ref(&hash, &format!("data/{}", hash), "application/vnd.apache.parquet", 2048)
+        .upsert_content_ref(
+            &hash,
+            &format!("data/{}", hash),
+            "application/vnd.apache.parquet",
+            2048,
+        )
         .await?;
     assert_eq!(cr.ref_count, 2);
 
@@ -542,14 +646,27 @@ async fn test_metadata_log() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
         .await?;
     let hash = format!("{:064x}", rand::random::<u128>());
     let atom = db
-        .insert_data_atom(project.id, &unique_name("data"), &hash, "parquet", 100, &format!("data/{}", hash), user.id)
+        .insert_data_atom(
+            project.id,
+            &unique_name("data"),
+            &hash,
+            "parquet",
+            100,
+            &format!("data/{}", hash),
+            user.id,
+        )
         .await?;
 
     // Append metadata entries
@@ -608,10 +725,7 @@ async fn test_github_installations() -> Result<()> {
     assert_eq!(inst.account_login, login);
 
     // Get by login
-    let found = db
-        .get_github_installation_by_login(&login)
-        .await?
-        .unwrap();
+    let found = db.get_github_installation_by_login(&login).await?.unwrap();
     assert_eq!(found.installation_id, install_id);
 
     // Upsert updates
@@ -639,7 +753,12 @@ async fn test_update_and_delete_project() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), Some("old desc"), "private")
@@ -672,7 +791,12 @@ async fn test_collections() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
@@ -751,18 +875,34 @@ async fn test_endpoint_yanks() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
         .await?;
     let sha = format!("{:040x}", rand::random::<u128>());
     let commit = db
-        .insert_commit(project.id, "github", "user/repo", &sha, "hash", user.id, None)
+        .insert_commit(
+            project.id,
+            "github",
+            "user/repo",
+            &sha,
+            "hash",
+            user.id,
+            None,
+        )
         .await?;
 
     // Not yanked initially
-    assert!(!db.is_endpoint_yanked(project.id, "analysis", commit.id).await?);
+    assert!(
+        !db.is_endpoint_yanked(project.id, "analysis", commit.id)
+            .await?
+    );
 
     // Yank
     let yank = db
@@ -771,16 +911,24 @@ async fn test_endpoint_yanks() -> Result<()> {
     assert_eq!(yank.endpoint_name, "analysis");
 
     // Now yanked
-    assert!(db.is_endpoint_yanked(project.id, "analysis", commit.id).await?);
+    assert!(
+        db.is_endpoint_yanked(project.id, "analysis", commit.id)
+            .await?
+    );
 
     // List
     let yanks = db.list_endpoint_yanks(project.id).await?;
     assert_eq!(yanks.len(), 1);
 
     // Remove yank
-    let removed = db.remove_endpoint_yank(project.id, "analysis", commit.id).await?;
+    let removed = db
+        .remove_endpoint_yank(project.id, "analysis", commit.id)
+        .await?;
     assert!(removed);
-    assert!(!db.is_endpoint_yanked(project.id, "analysis", commit.id).await?);
+    assert!(
+        !db.is_endpoint_yanked(project.id, "analysis", commit.id)
+            .await?
+    );
 
     Ok(())
 }
@@ -796,7 +944,12 @@ async fn test_secrets() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
@@ -862,7 +1015,9 @@ async fn test_environment_images() -> Result<()> {
     assert_eq!(found.image_ref, "ghcr.io/ozzydb/envs/abc123");
 
     // Mark as built
-    let marked = db.mark_environment_built(&env_hash, Some("logs/build.log"), 45000).await?;
+    let marked = db
+        .mark_environment_built(&env_hash, Some("logs/build.log"), 45000)
+        .await?;
     assert!(marked);
     let found = db.get_environment_image(&env_hash).await?.unwrap();
     assert!(found.built_at.is_some());
@@ -883,13 +1038,22 @@ async fn test_source_cache() -> Result<()> {
 
     let sha = format!("{:040x}", rand::random::<u128>());
     let entry = db
-        .insert_source_cache("github", "user/repo", &sha, &format!("source/{}", sha), 5000)
+        .insert_source_cache(
+            "github",
+            "user/repo",
+            &sha,
+            &format!("source/{}", sha),
+            5000,
+        )
         .await?;
     assert_eq!(entry.git_commit_sha, sha);
     assert_eq!(entry.byte_size, 5000);
 
     // Get
-    let found = db.get_source_cache("github", "user/repo", &sha).await?.unwrap();
+    let found = db
+        .get_source_cache("github", "user/repo", &sha)
+        .await?
+        .unwrap();
     assert_eq!(found.r2_key, format!("source/{}", sha));
 
     // Touch updates last_accessed
@@ -898,7 +1062,13 @@ async fn test_source_cache() -> Result<()> {
 
     // Upsert same key → updates last_accessed (no duplicate)
     let entry2 = db
-        .insert_source_cache("github", "user/repo", &sha, &format!("source/{}", sha), 5000)
+        .insert_source_cache(
+            "github",
+            "user/repo",
+            &sha,
+            &format!("source/{}", sha),
+            5000,
+        )
         .await?;
     assert_eq!(entry2.id, entry.id);
 
@@ -916,14 +1086,27 @@ async fn test_materialized_cache() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
         .await?;
     let sha = format!("{:040x}", rand::random::<u128>());
     let commit = db
-        .insert_commit(project.id, "github", "user/repo", &sha, "hash", user.id, None)
+        .insert_commit(
+            project.id,
+            "github",
+            "user/repo",
+            &sha,
+            "hash",
+            user.id,
+            None,
+        )
         .await?;
 
     let mat_hash = format!("mat_{:032x}", rand::random::<u128>());
@@ -961,17 +1144,30 @@ async fn test_materialized_cache() -> Result<()> {
     assert_eq!(entries.len(), 1);
 
     // List by project + endpoint
-    let entries = db.list_materialized_cache(project.id, Some("analysis")).await?;
+    let entries = db
+        .list_materialized_cache(project.id, Some("analysis"))
+        .await?;
     assert_eq!(entries.len(), 1);
-    let entries = db.list_materialized_cache(project.id, Some("other")).await?;
+    let entries = db
+        .list_materialized_cache(project.id, Some("other"))
+        .await?;
     assert!(entries.is_empty());
 
     // Upsert same hash → increments access_count
     let entry2 = db
         .insert_materialized_cache(
-            &mat_hash, project.id, commit.id, "analysis", "qc_node",
-            "quality_control", "output_hash_123", "cache/output_hash_123",
-            "application/vnd.apache.parquet", 1024, "linux-x86_64", 1,
+            &mat_hash,
+            project.id,
+            commit.id,
+            "analysis",
+            "qc_node",
+            "quality_control",
+            "output_hash_123",
+            "cache/output_hash_123",
+            "application/vnd.apache.parquet",
+            1024,
+            "linux-x86_64",
+            1,
         )
         .await?;
     assert_eq!(entry2.access_count, 3); // was 2, upsert adds 1

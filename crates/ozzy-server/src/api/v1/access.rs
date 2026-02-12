@@ -6,7 +6,7 @@
 use super::auth::ApiError;
 use crate::{
     AppState,
-    auth::middleware::{scope_grants_project_access, MaybeAuthUser},
+    auth::middleware::{MaybeAuthUser, scope_grants_project_access},
     db::Project,
 };
 
@@ -53,9 +53,10 @@ pub async fn enforce_read_access(
         return Ok(());
     }
 
-    let user = auth.user.as_ref().ok_or_else(|| {
-        ApiError::unauthorized("Authentication required for private projects")
-    })?;
+    let user = auth
+        .user
+        .as_ref()
+        .ok_or_else(|| ApiError::unauthorized("Authentication required for private projects"))?;
 
     let scope = auth.scope.as_deref().unwrap_or("");
     if !scope_grants_project_access(scope, owner, slug) {

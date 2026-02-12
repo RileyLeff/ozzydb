@@ -132,9 +132,7 @@ async fn resolve_member_hash(
                 .db
                 .get_data_atom(project_id, &input.member_ref)
                 .await?
-                .ok_or_else(|| {
-                    ApiError::not_found(format!("Data atom '{}'", input.member_ref))
-                })?;
+                .ok_or_else(|| ApiError::not_found(format!("Data atom '{}'", input.member_ref)))?;
             if atom.yanked {
                 return Err(ApiError::gone(format!(
                     "Data atom '{}' has been yanked",
@@ -148,9 +146,7 @@ async fn resolve_member_hash(
                 .db
                 .get_collection(project_id, &input.member_ref)
                 .await?
-                .ok_or_else(|| {
-                    ApiError::not_found(format!("Collection '{}'", input.member_ref))
-                })?;
+                .ok_or_else(|| ApiError::not_found(format!("Collection '{}'", input.member_ref)))?;
             if coll.yanked {
                 return Err(ApiError::gone(format!(
                     "Collection '{}' has been yanked",
@@ -183,69 +179,75 @@ fn flatten_collection<'a>(
     collection_name: &'a str,
     path: &'a [String],
     visited: &'a mut HashSet<String>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FlattenedAtom>, ApiError>> + Send + 'a>> {
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Vec<FlattenedAtom>, ApiError>> + Send + 'a>,
+> {
     Box::pin(async move {
-    if !visited.insert(collection_name.to_string()) {
-        // Already visited — skip to avoid infinite loops from any residual cycles
-        return Ok(Vec::new());
-    }
+        if !visited.insert(collection_name.to_string()) {
+            // Already visited — skip to avoid infinite loops from any residual cycles
+            return Ok(Vec::new());
+        }
 
-    let coll = state
-        .db
-        .get_collection(project_id, collection_name)
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("Collection '{}'", collection_name)))?;
+        let coll = state
+            .db
+            .get_collection(project_id, collection_name)
+            .await?
+            .ok_or_else(|| ApiError::not_found(format!("Collection '{}'", collection_name)))?;
 
-    // Skip yanked collections during flatten
-    if coll.yanked {
-        return Ok(Vec::new());
-    }
+        // Skip yanked collections during flatten
+        if coll.yanked {
+            return Ok(Vec::new());
+        }
 
-    let ver = match state.db.get_latest_collection_version(coll.id).await? {
-        Some(v) => v,
-        None => return Ok(Vec::new()),
-    };
+        let ver = match state.db.get_latest_collection_version(coll.id).await? {
+            Some(v) => v,
+            None => return Ok(Vec::new()),
+        };
 
-    let members = state.db.get_collection_members(ver.id).await?;
-    let mut atoms = Vec::new();
+        let members = state.db.get_collection_members(ver.id).await?;
+        let mut atoms = Vec::new();
 
-    // Current path includes this collection
-    let mut current_path = path.to_vec();
-    current_path.push(collection_name.to_string());
+        // Current path includes this collection
+        let mut current_path = path.to_vec();
+        current_path.push(collection_name.to_string());
 
-    for member in members {
-        match member.member_type.as_str() {
-            "data" => {
-                // Skip yanked data atoms
-                if let Some(atom) = state.db.get_data_atom(project_id, &member.member_ref).await? {
-                    if atom.yanked {
-                        continue;
+        for member in members {
+            match member.member_type.as_str() {
+                "data" => {
+                    // Skip yanked data atoms
+                    if let Some(atom) = state
+                        .db
+                        .get_data_atom(project_id, &member.member_ref)
+                        .await?
+                    {
+                        if atom.yanked {
+                            continue;
+                        }
                     }
+                    atoms.push(FlattenedAtom {
+                        name: member.member_ref,
+                        hash: member.member_hash,
+                        path: current_path.clone(),
+                    });
                 }
-                atoms.push(FlattenedAtom {
-                    name: member.member_ref,
-                    hash: member.member_hash,
-                    path: current_path.clone(),
-                });
-            }
-            "collection" => {
-                let child_atoms = flatten_collection(
-                    state,
-                    project_id,
-                    &member.member_ref,
-                    &current_path,
-                    visited,
-                )
-                .await?;
-                atoms.extend(child_atoms);
-            }
-            _ => {
-                // endpoint members are not leaf atoms, skip in flatten
+                "collection" => {
+                    let child_atoms = flatten_collection(
+                        state,
+                        project_id,
+                        &member.member_ref,
+                        &current_path,
+                        visited,
+                    )
+                    .await?;
+                    atoms.extend(child_atoms);
+                }
+                _ => {
+                    // endpoint members are not leaf atoms, skip in flatten
+                }
             }
         }
-    }
 
-    Ok(atoms)
+        Ok(atoms)
     })
 }
 
@@ -483,8 +485,7 @@ async fn add_members(
     // Resolve hashes for new members (read-only validation)
     let mut new_members = Vec::new();
     for input in &req.members {
-        let (mtype, mref, mhash) =
-            resolve_member_hash(&state, project.id, input).await?;
+        let (mtype, mref, mhash) = resolve_member_hash(&state, project.id, input).await?;
         new_members.push((mtype, mref, mhash));
     }
 
@@ -496,7 +497,10 @@ async fn add_members(
     {
         CollectionMutResult::Ok(result) => result,
         CollectionMutResult::Yanked(coll_name) => {
-            return Err(ApiError::gone(format!("Collection '{}' has been yanked", coll_name)));
+            return Err(ApiError::gone(format!(
+                "Collection '{}' has been yanked",
+                coll_name
+            )));
         }
         CollectionMutResult::CycleDetected(ref_name) => {
             return Err(ApiError::bad_request(format!(
@@ -582,7 +586,10 @@ async fn remove_members(
             )));
         }
         CollectionMutResult::Yanked(coll_name) => {
-            return Err(ApiError::gone(format!("Collection '{}' has been yanked", coll_name)));
+            return Err(ApiError::gone(format!(
+                "Collection '{}' has been yanked",
+                coll_name
+            )));
         }
         CollectionMutResult::CycleDetected(_) => unreachable!("remove does not check cycles"),
     };
