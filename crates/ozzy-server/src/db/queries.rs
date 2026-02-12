@@ -407,6 +407,14 @@ impl Database {
         Ok(commit)
     }
 
+    pub async fn get_commit_by_id(&self, commit_id: Uuid) -> Result<Option<Commit>> {
+        let commit = sqlx::query_as::<_, Commit>("SELECT * FROM commits WHERE id = $1")
+            .bind(commit_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(commit)
+    }
+
     pub async fn get_commit_by_sha(&self, project_id: Uuid, sha: &str) -> Result<Option<Commit>> {
         let commit = sqlx::query_as::<_, Commit>(
             "SELECT * FROM commits WHERE project_id = $1 AND git_commit_sha = $2",
