@@ -642,16 +642,21 @@ impl OzzyToml {
                         // exist in the toml - they're server-side resources).
                     }
                     EdgeSource::Endpoint(ref_str) => {
-                        // Rule 10: Cross-project refs must be pinned
-                        if ref_str.contains('/') && !ref_str.contains('@') {
-                            errors.push(ValidationError {
-                                location: format!("{}.from", edge_loc),
-                                message: format!(
-                                    "Cross-project endpoint ref \"{}\" must include @sha_or_tag.",
-                                    ref_str
-                                ),
-                                suggestion: None,
-                            });
+                        // Rule 10: Cross-project refs must be pinned with non-empty @ref
+                        if ref_str.contains('/') {
+                            let pin_valid = ref_str
+                                .split_once('@')
+                                .is_some_and(|(_, pin)| !pin.is_empty());
+                            if !pin_valid {
+                                errors.push(ValidationError {
+                                    location: format!("{}.from", edge_loc),
+                                    message: format!(
+                                        "Cross-project endpoint ref \"{}\" must include @sha_or_tag.",
+                                        ref_str
+                                    ),
+                                    suggestion: None,
+                                });
+                            }
                         }
                     }
                 }
@@ -1396,6 +1401,39 @@ to = "n.data"
         assert!(
             !errors.iter().any(|e| e.message.contains("@sha_or_tag")),
             "Should not have pinning error for pinned ref"
+        );
+    }
+
+    #[test]
+    fn validate_cross_project_endpoint_ref_empty_pin() {
+        let toml = r#"
+[project]
+name = "test"
+owner = "user"
+
+[environments.default]
+base = "ozzydb/python:3.12"
+lockfile = "uv.lock"
+
+[transforms.t]
+source = "t.py:fn"
+environment = "default"
+inputs.data = "parquet"
+
+[endpoints.ep]
+
+[endpoints.ep.nodes]
+n = { transform = "t" }
+
+[[endpoints.ep.edges]]
+from = "endpoint:other-org/other-project/constants@"
+to = "n.data"
+"#;
+        let doc = OzzyToml::parse(toml).unwrap();
+        let errors = doc.validate();
+        assert!(
+            errors.iter().any(|e| e.message.contains("@sha_or_tag")),
+            "Expected cross-project pinning error for empty pin, got: {:?}", errors
         );
     }
 
