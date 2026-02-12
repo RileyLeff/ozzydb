@@ -277,19 +277,22 @@ async fn test_session_token_upsert() -> Result<()> {
 
     let expires = chrono::Utc::now() + chrono::Duration::days(90);
 
+    let hash1 = format!("session_{}", Uuid::new_v4());
+    let hash2 = format!("session_{}", Uuid::new_v4());
+
     // First upsert creates
-    db.upsert_session_token(user.id, "cli-session", "hash1", expires)
+    db.upsert_session_token(user.id, "cli-session", &hash1, expires)
         .await?;
     let tokens = db.list_user_tokens(user.id).await?;
     assert_eq!(tokens.len(), 1);
-    assert_eq!(tokens[0].token_hash, "hash1");
+    assert_eq!(tokens[0].token_hash, hash1);
 
     // Second upsert updates the same token
-    db.upsert_session_token(user.id, "cli-session", "hash2", expires)
+    db.upsert_session_token(user.id, "cli-session", &hash2, expires)
         .await?;
     let tokens = db.list_user_tokens(user.id).await?;
     assert_eq!(tokens.len(), 1);
-    assert_eq!(tokens[0].token_hash, "hash2");
+    assert_eq!(tokens[0].token_hash, hash2);
 
     Ok(())
 }
@@ -621,6 +624,364 @@ async fn test_github_installations() -> Result<()> {
     let deleted = db.delete_github_installation(install_id).await?;
     assert!(deleted);
     assert!(db.get_github_installation_by_login(&login).await?.is_none());
+
+    Ok(())
+}
+
+// ========================================================================
+// Project Update/Delete Operations
+// ========================================================================
+
+#[tokio::test]
+async fn test_update_and_delete_project() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), Some("old desc"), "private")
+        .await?;
+
+    // Update
+    let updated = db
+        .update_project(project.id, Some("new desc"), "public")
+        .await?
+        .unwrap();
+    assert_eq!(updated.description, Some("new desc".to_string()));
+    assert_eq!(updated.visibility, "public");
+
+    // Delete
+    let deleted = db.delete_project(project.id).await?;
+    assert!(deleted);
+    assert!(db.get_project_by_id(project.id).await?.is_none());
+
+    Ok(())
+}
+
+// ========================================================================
+// Collection Operations
+// ========================================================================
+
+#[tokio::test]
+async fn test_collections() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+
+    let name = unique_name("coll");
+    let coll = db.create_collection(project.id, &name, user.id).await?;
+    assert_eq!(coll.name, name);
+    assert!(!coll.yanked);
+
+    // Get
+    let found = db.get_collection(project.id, &name).await?.unwrap();
+    assert_eq!(found.id, coll.id);
+
+    // List
+    let colls = db.list_collections(project.id).await?;
+    assert!(colls.iter().any(|c| c.id == coll.id));
+
+    // Create version with members
+    let ver = db
+        .create_collection_version(coll.id, "version_hash_1", user.id)
+        .await?;
+    assert_eq!(ver.version_number, 1);
+    assert_eq!(ver.hash, "version_hash_1");
+
+    let members = db
+        .add_collection_members(
+            ver.id,
+            &[
+                ("data".into(), "my_data".into(), "hash_aaa".into(), 0),
+                ("collection".into(), "sub_coll".into(), "hash_bbb".into(), 1),
+            ],
+        )
+        .await?;
+    assert_eq!(members.len(), 2);
+    assert_eq!(members[0].member_type, "data");
+    assert_eq!(members[1].member_type, "collection");
+
+    // Get members
+    let fetched_members = db.get_collection_members(ver.id).await?;
+    assert_eq!(fetched_members.len(), 2);
+    assert_eq!(fetched_members[0].ordinal, 0);
+    assert_eq!(fetched_members[1].ordinal, 1);
+
+    // Second version
+    let ver2 = db
+        .create_collection_version(coll.id, "version_hash_2", user.id)
+        .await?;
+    assert_eq!(ver2.version_number, 2);
+
+    // Latest version
+    let latest = db.get_latest_collection_version(coll.id).await?.unwrap();
+    assert_eq!(latest.version_number, 2);
+
+    // List versions
+    let versions = db.list_collection_versions(coll.id).await?;
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[0].version_number, 2); // DESC order
+
+    // Yank
+    let yanked = db.yank_collection(project.id, &name, "Bad data").await?;
+    assert!(yanked);
+    let found = db.get_collection(project.id, &name).await?.unwrap();
+    assert!(found.yanked);
+    assert_eq!(found.yank_reason, Some("Bad data".to_string()));
+
+    Ok(())
+}
+
+// ========================================================================
+// Endpoint Yank Operations
+// ========================================================================
+
+#[tokio::test]
+async fn test_endpoint_yanks() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+    let sha = format!("{:040x}", rand::random::<u128>());
+    let commit = db
+        .insert_commit(project.id, "github", "user/repo", &sha, "hash", user.id, None)
+        .await?;
+
+    // Not yanked initially
+    assert!(!db.is_endpoint_yanked(project.id, "analysis", commit.id).await?);
+
+    // Yank
+    let yank = db
+        .insert_endpoint_yank(project.id, "analysis", commit.id, "Broken output", user.id)
+        .await?;
+    assert_eq!(yank.endpoint_name, "analysis");
+
+    // Now yanked
+    assert!(db.is_endpoint_yanked(project.id, "analysis", commit.id).await?);
+
+    // List
+    let yanks = db.list_endpoint_yanks(project.id).await?;
+    assert_eq!(yanks.len(), 1);
+
+    // Remove yank
+    let removed = db.remove_endpoint_yank(project.id, "analysis", commit.id).await?;
+    assert!(removed);
+    assert!(!db.is_endpoint_yanked(project.id, "analysis", commit.id).await?);
+
+    Ok(())
+}
+
+// ========================================================================
+// Secret Operations
+// ========================================================================
+
+#[tokio::test]
+async fn test_secrets() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+
+    // Set a secret
+    let secret = db
+        .upsert_secret(project.id, "API_KEY", b"encrypted_value_1", user.id)
+        .await?;
+    assert_eq!(secret.name, "API_KEY");
+    let version1 = secret.version_id;
+
+    // List secrets (returns info without values)
+    let infos = db.list_secrets(project.id).await?;
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].name, "API_KEY");
+
+    // Get secret by name (with encrypted value)
+    let found = db.get_secret(project.id, "API_KEY").await?.unwrap();
+    assert_eq!(found.encrypted_value, b"encrypted_value_1");
+
+    // Upsert same name → new version_id
+    let updated = db
+        .upsert_secret(project.id, "API_KEY", b"encrypted_value_2", user.id)
+        .await?;
+    assert_ne!(updated.version_id, version1);
+    assert_eq!(updated.encrypted_value, b"encrypted_value_2");
+
+    // Delete
+    let deleted = db.delete_secret(project.id, "API_KEY").await?;
+    assert!(deleted);
+    assert!(db.get_secret(project.id, "API_KEY").await?.is_none());
+    assert!(db.list_secrets(project.id).await?.is_empty());
+
+    Ok(())
+}
+
+// ========================================================================
+// Environment Image Operations
+// ========================================================================
+
+#[tokio::test]
+async fn test_environment_images() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let env_hash = format!("env_{:032x}", rand::random::<u128>());
+    let img = db
+        .insert_environment_image(
+            &env_hash,
+            "ghcr.io/ozzydb/envs/abc123",
+            "base_lockfile",
+            Some("python:3.12"),
+        )
+        .await?;
+    assert_eq!(img.env_hash, env_hash);
+    assert_eq!(img.build_type, "base_lockfile");
+    assert!(img.built_at.is_none());
+
+    // Get by hash
+    let found = db.get_environment_image(&env_hash).await?.unwrap();
+    assert_eq!(found.image_ref, "ghcr.io/ozzydb/envs/abc123");
+
+    // Mark as built
+    let marked = db.mark_environment_built(&env_hash, Some("logs/build.log"), 45000).await?;
+    assert!(marked);
+    let found = db.get_environment_image(&env_hash).await?.unwrap();
+    assert!(found.built_at.is_some());
+    assert_eq!(found.build_duration_ms, Some(45000));
+
+    Ok(())
+}
+
+// ========================================================================
+// Source Cache Operations
+// ========================================================================
+
+#[tokio::test]
+async fn test_source_cache() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let sha = format!("{:040x}", rand::random::<u128>());
+    let entry = db
+        .insert_source_cache("github", "user/repo", &sha, &format!("source/{}", sha), 5000)
+        .await?;
+    assert_eq!(entry.git_commit_sha, sha);
+    assert_eq!(entry.byte_size, 5000);
+
+    // Get
+    let found = db.get_source_cache("github", "user/repo", &sha).await?.unwrap();
+    assert_eq!(found.r2_key, format!("source/{}", sha));
+
+    // Touch updates last_accessed
+    let touched = db.touch_source_cache("github", "user/repo", &sha).await?;
+    assert!(touched);
+
+    // Upsert same key → updates last_accessed (no duplicate)
+    let entry2 = db
+        .insert_source_cache("github", "user/repo", &sha, &format!("source/{}", sha), 5000)
+        .await?;
+    assert_eq!(entry2.id, entry.id);
+
+    Ok(())
+}
+
+// ========================================================================
+// Materialized Cache Operations
+// ========================================================================
+
+#[tokio::test]
+async fn test_materialized_cache() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+    let sha = format!("{:040x}", rand::random::<u128>());
+    let commit = db
+        .insert_commit(project.id, "github", "user/repo", &sha, "hash", user.id, None)
+        .await?;
+
+    let mat_hash = format!("mat_{:032x}", rand::random::<u128>());
+    let entry = db
+        .insert_materialized_cache(
+            &mat_hash,
+            project.id,
+            commit.id,
+            "analysis",
+            "qc_node",
+            "quality_control",
+            "output_hash_123",
+            "cache/output_hash_123",
+            "application/vnd.apache.parquet",
+            1024,
+            "linux-x86_64",
+            1,
+        )
+        .await?;
+    assert_eq!(entry.materialized_hash, mat_hash);
+    assert_eq!(entry.access_count, 1);
+
+    // Get
+    let found = db.get_materialized_cache(&mat_hash).await?.unwrap();
+    assert_eq!(found.output_hash, "output_hash_123");
+
+    // Touch increments access_count
+    let touched = db.touch_materialized_cache(&mat_hash).await?;
+    assert!(touched);
+    let found = db.get_materialized_cache(&mat_hash).await?.unwrap();
+    assert_eq!(found.access_count, 2);
+
+    // List by project
+    let entries = db.list_materialized_cache(project.id, None).await?;
+    assert_eq!(entries.len(), 1);
+
+    // List by project + endpoint
+    let entries = db.list_materialized_cache(project.id, Some("analysis")).await?;
+    assert_eq!(entries.len(), 1);
+    let entries = db.list_materialized_cache(project.id, Some("other")).await?;
+    assert!(entries.is_empty());
+
+    // Upsert same hash → increments access_count
+    let entry2 = db
+        .insert_materialized_cache(
+            &mat_hash, project.id, commit.id, "analysis", "qc_node",
+            "quality_control", "output_hash_123", "cache/output_hash_123",
+            "application/vnd.apache.parquet", 1024, "linux-x86_64", 1,
+        )
+        .await?;
+    assert_eq!(entry2.access_count, 3); // was 2, upsert adds 1
+
+    // Delete
+    let deleted = db.delete_materialized_cache(&mat_hash).await?;
+    assert!(deleted);
+    assert!(db.get_materialized_cache(&mat_hash).await?.is_none());
 
     Ok(())
 }

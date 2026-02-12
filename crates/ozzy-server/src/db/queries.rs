@@ -749,4 +749,579 @@ impl Database {
                 .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    // ========================================================================
+    // Project Update/Delete Operations
+    // ========================================================================
+
+    pub async fn update_project(
+        &self,
+        project_id: Uuid,
+        description: Option<&str>,
+        visibility: &str,
+    ) -> Result<Option<Project>> {
+        let project = sqlx::query_as::<_, Project>(
+            r#"
+            UPDATE projects SET description = $2, visibility = $3, updated_at = now()
+            WHERE id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(project_id)
+        .bind(description)
+        .bind(visibility)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(project)
+    }
+
+    pub async fn delete_project(&self, project_id: Uuid) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM projects WHERE id = $1")
+            .bind(project_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ========================================================================
+    // Collection Operations
+    // ========================================================================
+
+    pub async fn create_collection(
+        &self,
+        project_id: Uuid,
+        name: &str,
+        created_by: Uuid,
+    ) -> Result<Collection> {
+        let coll = sqlx::query_as::<_, Collection>(
+            r#"
+            INSERT INTO collections (id, project_id, name, created_by)
+            VALUES ($1, $2, $3, $4)
+            RETURNING *
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(project_id)
+        .bind(name)
+        .bind(created_by)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(coll)
+    }
+
+    pub async fn get_collection(
+        &self,
+        project_id: Uuid,
+        name: &str,
+    ) -> Result<Option<Collection>> {
+        let coll = sqlx::query_as::<_, Collection>(
+            "SELECT * FROM collections WHERE project_id = $1 AND name = $2",
+        )
+        .bind(project_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(coll)
+    }
+
+    pub async fn list_collections(&self, project_id: Uuid) -> Result<Vec<Collection>> {
+        let colls = sqlx::query_as::<_, Collection>(
+            "SELECT * FROM collections WHERE project_id = $1 ORDER BY name",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(colls)
+    }
+
+    pub async fn yank_collection(
+        &self,
+        project_id: Uuid,
+        name: &str,
+        reason: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE collections SET yanked = true, yank_reason = $3, yanked_at = now() WHERE project_id = $1 AND name = $2",
+        )
+        .bind(project_id)
+        .bind(name)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Create a new version of a collection. Returns the new version row.
+    pub async fn create_collection_version(
+        &self,
+        collection_id: Uuid,
+        hash: &str,
+        created_by: Uuid,
+    ) -> Result<CollectionVersion> {
+        // Atomically compute the next version number and insert
+        let ver = sqlx::query_as::<_, CollectionVersion>(
+            r#"
+            INSERT INTO collection_versions (id, collection_id, version_number, hash, created_by)
+            VALUES (
+                $1, $2,
+                COALESCE((SELECT MAX(version_number) FROM collection_versions WHERE collection_id = $2), 0) + 1,
+                $3, $4
+            )
+            RETURNING *
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(collection_id)
+        .bind(hash)
+        .bind(created_by)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(ver)
+    }
+
+    pub async fn add_collection_members(
+        &self,
+        version_id: Uuid,
+        members: &[(String, String, String, i32)], // (member_type, member_ref, member_hash, ordinal)
+    ) -> Result<Vec<CollectionMember>> {
+        let mut results = Vec::with_capacity(members.len());
+        for (member_type, member_ref, member_hash, ordinal) in members {
+            let member = sqlx::query_as::<_, CollectionMember>(
+                r#"
+                INSERT INTO collection_members (id, collection_version_id, member_type, member_ref, member_hash, ordinal)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING *
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(version_id)
+            .bind(member_type)
+            .bind(member_ref)
+            .bind(member_hash)
+            .bind(ordinal)
+            .fetch_one(&self.pool)
+            .await?;
+            results.push(member);
+        }
+        Ok(results)
+    }
+
+    pub async fn get_latest_collection_version(
+        &self,
+        collection_id: Uuid,
+    ) -> Result<Option<CollectionVersion>> {
+        let ver = sqlx::query_as::<_, CollectionVersion>(
+            "SELECT * FROM collection_versions WHERE collection_id = $1 ORDER BY version_number DESC LIMIT 1",
+        )
+        .bind(collection_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(ver)
+    }
+
+    pub async fn list_collection_versions(
+        &self,
+        collection_id: Uuid,
+    ) -> Result<Vec<CollectionVersion>> {
+        let vers = sqlx::query_as::<_, CollectionVersion>(
+            "SELECT * FROM collection_versions WHERE collection_id = $1 ORDER BY version_number DESC",
+        )
+        .bind(collection_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(vers)
+    }
+
+    pub async fn get_collection_members(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<CollectionMember>> {
+        let members = sqlx::query_as::<_, CollectionMember>(
+            "SELECT * FROM collection_members WHERE collection_version_id = $1 ORDER BY ordinal",
+        )
+        .bind(version_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(members)
+    }
+
+    // ========================================================================
+    // Endpoint Yank Operations
+    // ========================================================================
+
+    pub async fn insert_endpoint_yank(
+        &self,
+        project_id: Uuid,
+        endpoint_name: &str,
+        commit_id: Uuid,
+        yank_reason: &str,
+        yanked_by: Uuid,
+    ) -> Result<EndpointYank> {
+        let yank = sqlx::query_as::<_, EndpointYank>(
+            r#"
+            INSERT INTO endpoint_yanks (id, project_id, endpoint_name, commit_id, yank_reason, yanked_by)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING *
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(project_id)
+        .bind(endpoint_name)
+        .bind(commit_id)
+        .bind(yank_reason)
+        .bind(yanked_by)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(yank)
+    }
+
+    pub async fn is_endpoint_yanked(
+        &self,
+        project_id: Uuid,
+        endpoint_name: &str,
+        commit_id: Uuid,
+    ) -> Result<bool> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM endpoint_yanks WHERE project_id = $1 AND endpoint_name = $2 AND commit_id = $3)",
+        )
+        .bind(project_id)
+        .bind(endpoint_name)
+        .bind(commit_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
+    }
+
+    pub async fn list_endpoint_yanks(&self, project_id: Uuid) -> Result<Vec<EndpointYank>> {
+        let yanks = sqlx::query_as::<_, EndpointYank>(
+            "SELECT * FROM endpoint_yanks WHERE project_id = $1 ORDER BY yanked_at DESC",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(yanks)
+    }
+
+    pub async fn remove_endpoint_yank(
+        &self,
+        project_id: Uuid,
+        endpoint_name: &str,
+        commit_id: Uuid,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM endpoint_yanks WHERE project_id = $1 AND endpoint_name = $2 AND commit_id = $3",
+        )
+        .bind(project_id)
+        .bind(endpoint_name)
+        .bind(commit_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ========================================================================
+    // Secret Operations
+    // ========================================================================
+
+    /// Set (upsert) a secret. Generates a new version_id on every call.
+    pub async fn upsert_secret(
+        &self,
+        project_id: Uuid,
+        name: &str,
+        encrypted_value: &[u8],
+        set_by: Uuid,
+    ) -> Result<Secret> {
+        let secret = sqlx::query_as::<_, Secret>(
+            r#"
+            INSERT INTO secrets (id, project_id, name, encrypted_value, version_id, set_by)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (project_id, name) DO UPDATE SET
+                encrypted_value = EXCLUDED.encrypted_value,
+                version_id = EXCLUDED.version_id,
+                set_by = EXCLUDED.set_by,
+                updated_at = now()
+            RETURNING *
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(project_id)
+        .bind(name)
+        .bind(encrypted_value)
+        .bind(Uuid::new_v4()) // fresh version_id each time
+        .bind(set_by)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(secret)
+    }
+
+    /// List secret names and version IDs (no values).
+    pub async fn list_secrets(&self, project_id: Uuid) -> Result<Vec<SecretInfo>> {
+        let secrets = sqlx::query_as::<_, SecretInfo>(
+            "SELECT id, name, version_id, created_at, updated_at FROM secrets WHERE project_id = $1 ORDER BY name",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(secrets)
+    }
+
+    /// Get a secret by name (includes encrypted value — for server-side decryption only).
+    pub async fn get_secret(
+        &self,
+        project_id: Uuid,
+        name: &str,
+    ) -> Result<Option<Secret>> {
+        let secret = sqlx::query_as::<_, Secret>(
+            "SELECT * FROM secrets WHERE project_id = $1 AND name = $2",
+        )
+        .bind(project_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(secret)
+    }
+
+    pub async fn delete_secret(&self, project_id: Uuid, name: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM secrets WHERE project_id = $1 AND name = $2",
+        )
+        .bind(project_id)
+        .bind(name)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ========================================================================
+    // Environment Image Operations
+    // ========================================================================
+
+    pub async fn insert_environment_image(
+        &self,
+        env_hash: &str,
+        image_ref: &str,
+        build_type: &str,
+        base_image: Option<&str>,
+    ) -> Result<EnvironmentImage> {
+        let img = sqlx::query_as::<_, EnvironmentImage>(
+            r#"
+            INSERT INTO environment_images (id, env_hash, image_ref, build_type, base_image)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING *
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(env_hash)
+        .bind(image_ref)
+        .bind(build_type)
+        .bind(base_image)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(img)
+    }
+
+    pub async fn get_environment_image(&self, env_hash: &str) -> Result<Option<EnvironmentImage>> {
+        let img = sqlx::query_as::<_, EnvironmentImage>(
+            "SELECT * FROM environment_images WHERE env_hash = $1",
+        )
+        .bind(env_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(img)
+    }
+
+    pub async fn mark_environment_built(
+        &self,
+        env_hash: &str,
+        build_log_r2_key: Option<&str>,
+        build_duration_ms: i32,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE environment_images SET built_at = now(), build_log_r2_key = $2, build_duration_ms = $3 WHERE env_hash = $1",
+        )
+        .bind(env_hash)
+        .bind(build_log_r2_key)
+        .bind(build_duration_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ========================================================================
+    // Source Cache Operations
+    // ========================================================================
+
+    pub async fn insert_source_cache(
+        &self,
+        git_provider: &str,
+        git_repo: &str,
+        git_commit_sha: &str,
+        r2_key: &str,
+        byte_size: i64,
+    ) -> Result<SourceCacheEntry> {
+        let entry = sqlx::query_as::<_, SourceCacheEntry>(
+            r#"
+            INSERT INTO source_cache (id, git_provider, git_repo, git_commit_sha, r2_key, byte_size)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (git_provider, git_repo, git_commit_sha) DO UPDATE SET
+                last_accessed = now()
+            RETURNING *
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(git_provider)
+        .bind(git_repo)
+        .bind(git_commit_sha)
+        .bind(r2_key)
+        .bind(byte_size)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(entry)
+    }
+
+    pub async fn get_source_cache(
+        &self,
+        git_provider: &str,
+        git_repo: &str,
+        git_commit_sha: &str,
+    ) -> Result<Option<SourceCacheEntry>> {
+        let entry = sqlx::query_as::<_, SourceCacheEntry>(
+            "SELECT * FROM source_cache WHERE git_provider = $1 AND git_repo = $2 AND git_commit_sha = $3",
+        )
+        .bind(git_provider)
+        .bind(git_repo)
+        .bind(git_commit_sha)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(entry)
+    }
+
+    pub async fn touch_source_cache(
+        &self,
+        git_provider: &str,
+        git_repo: &str,
+        git_commit_sha: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE source_cache SET last_accessed = now() WHERE git_provider = $1 AND git_repo = $2 AND git_commit_sha = $3",
+        )
+        .bind(git_provider)
+        .bind(git_repo)
+        .bind(git_commit_sha)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ========================================================================
+    // Materialized Cache Operations
+    // ========================================================================
+
+    pub async fn insert_materialized_cache(
+        &self,
+        materialized_hash: &str,
+        project_id: Uuid,
+        commit_id: Uuid,
+        endpoint_name: &str,
+        node_name: &str,
+        transform_name: &str,
+        output_hash: &str,
+        output_r2_key: &str,
+        output_content_type: &str,
+        output_byte_size: i64,
+        platform: &str,
+        verification_tier: i32,
+    ) -> Result<MaterializedCacheEntry> {
+        let entry = sqlx::query_as::<_, MaterializedCacheEntry>(
+            r#"
+            INSERT INTO materialized_cache (
+                materialized_hash, project_id, commit_id, endpoint_name, node_name,
+                transform_name, output_hash, output_r2_key, output_content_type,
+                output_byte_size, platform, verification_tier
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (materialized_hash) DO UPDATE SET
+                last_accessed = now(),
+                access_count = materialized_cache.access_count + 1
+            RETURNING *
+            "#,
+        )
+        .bind(materialized_hash)
+        .bind(project_id)
+        .bind(commit_id)
+        .bind(endpoint_name)
+        .bind(node_name)
+        .bind(transform_name)
+        .bind(output_hash)
+        .bind(output_r2_key)
+        .bind(output_content_type)
+        .bind(output_byte_size)
+        .bind(platform)
+        .bind(verification_tier)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(entry)
+    }
+
+    pub async fn get_materialized_cache(
+        &self,
+        materialized_hash: &str,
+    ) -> Result<Option<MaterializedCacheEntry>> {
+        let entry = sqlx::query_as::<_, MaterializedCacheEntry>(
+            "SELECT * FROM materialized_cache WHERE materialized_hash = $1",
+        )
+        .bind(materialized_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(entry)
+    }
+
+    /// Touch the cache entry to update access tracking. Returns true if found.
+    pub async fn touch_materialized_cache(&self, materialized_hash: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE materialized_cache SET last_accessed = now(), access_count = access_count + 1 WHERE materialized_hash = $1",
+        )
+        .bind(materialized_hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn list_materialized_cache(
+        &self,
+        project_id: Uuid,
+        endpoint_name: Option<&str>,
+    ) -> Result<Vec<MaterializedCacheEntry>> {
+        match endpoint_name {
+            Some(name) => {
+                let entries = sqlx::query_as::<_, MaterializedCacheEntry>(
+                    "SELECT * FROM materialized_cache WHERE project_id = $1 AND endpoint_name = $2 ORDER BY last_accessed DESC",
+                )
+                .bind(project_id)
+                .bind(name)
+                .fetch_all(&self.pool)
+                .await?;
+                Ok(entries)
+            }
+            None => {
+                let entries = sqlx::query_as::<_, MaterializedCacheEntry>(
+                    "SELECT * FROM materialized_cache WHERE project_id = $1 ORDER BY last_accessed DESC",
+                )
+                .bind(project_id)
+                .fetch_all(&self.pool)
+                .await?;
+                Ok(entries)
+            }
+        }
+    }
+
+    pub async fn delete_materialized_cache(&self, materialized_hash: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM materialized_cache WHERE materialized_hash = $1",
+        )
+        .bind(materialized_hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }
