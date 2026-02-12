@@ -243,8 +243,29 @@ async fn upload_data(
         )));
     }
 
-    // Infer content type
+    // Infer content type and validate it's a valid HTTP header value
     let content_type = infer_content_type(fname, explicit_content_type.as_deref());
+    if content_type.as_bytes().iter().any(|&b| b < 0x20 || b == 0x7f) {
+        return Err(ApiError::bad_request(format!(
+            "Invalid content_type '{}': contains control characters",
+            content_type
+        )));
+    }
+
+    // Validate collection early (before any writes) — fixes atomicity + yanked bypass
+    if let Some(coll_name) = &collection_name {
+        let coll = state
+            .db
+            .get_collection(project.id, coll_name)
+            .await?
+            .ok_or_else(|| ApiError::not_found(format!("Collection '{}'", coll_name)))?;
+        if coll.yanked {
+            return Err(ApiError::gone(format!(
+                "Collection '{}' has been yanked",
+                coll_name
+            )));
+        }
+    }
 
     // Compute hash and check for content dedup
     let hash = ozzy_core::hash::blake3_hash(&file_bytes);
@@ -252,13 +273,16 @@ async fn upload_data(
     let existing_ref = state.db.get_content_ref(&hash).await?;
     let deduplicated = existing_ref.is_some();
 
+    // Compute the actual storage key
+    let r2_key = state.storage.storage_key(&hash, "bin")
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("Invalid hash: {}", e)))?;
+
     // Store content if this is a new hash
     if !deduplicated {
         state.storage.store(&file_bytes, "bin").await?;
     }
 
     // Upsert content_refs (increments ref_count if already exists)
-    let r2_key = format!("data/{}", hash);
     state
         .db
         .upsert_content_ref(&hash, &r2_key, &content_type, byte_size)
@@ -296,7 +320,7 @@ async fn upload_data(
         }
     }
 
-    // Add to collection if specified
+    // Add to collection if specified (atomically to prevent lost updates)
     let mut collection_version = None;
     if let Some(coll_name) = &collection_name {
         let coll = state
@@ -305,41 +329,10 @@ async fn upload_data(
             .await?
             .ok_or_else(|| ApiError::not_found(format!("Collection '{}'", coll_name)))?;
 
-        // Get current members from latest version
-        let current_members =
-            if let Some(latest_ver) = state.db.get_latest_collection_version(coll.id).await? {
-                state.db.get_collection_members(latest_ver.id).await?
-            } else {
-                Vec::new()
-            };
-
-        // Build new member list: existing + new atom
-        let mut members: Vec<(String, String, String, i32)> = current_members
-            .iter()
-            .map(|m| {
-                (
-                    m.member_type.clone(),
-                    m.member_ref.clone(),
-                    m.member_hash.clone(),
-                    m.ordinal,
-                )
-            })
-            .collect();
-        let next_ordinal = members.iter().map(|(_, _, _, o)| *o).max().unwrap_or(-1) + 1;
-        members.push((
-            "data".to_string(),
-            name.clone(),
-            hash.clone(),
-            next_ordinal,
-        ));
-
-        // Compute new collection hash
-        let member_hashes: Vec<&str> = members.iter().map(|(_, _, h, _)| h.as_str()).collect();
-        let coll_hash = ozzy_core::hash::collection_hash(&member_hashes);
-
+        let new_member = vec![("data".to_string(), name.clone(), hash.clone())];
         let (ver, _) = state
             .db
-            .create_collection_version_with_members(coll.id, &coll_hash, user.id, &members)
+            .add_to_collection_atomically(coll.id, user.id, &new_member)
             .await?;
         collection_version = Some(ver.version_number);
     }
@@ -465,7 +458,7 @@ async fn download_data(
     let ext = content_type_to_extension(&atom.content_type);
     let filename = format!("{}.{}", atom.name, ext);
 
-    Ok(Response::builder()
+    Response::builder()
         .header(header::CONTENT_TYPE, &atom.content_type)
         .header(
             header::CONTENT_DISPOSITION,
@@ -473,7 +466,7 @@ async fn download_data(
         )
         .header("X-OzzyDB-Hash", &atom.hash)
         .body(Body::from(content))
-        .unwrap())
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("Failed to build response: {}", e)))
 }
 
 /// Yank a data atom (soft delete with reason).

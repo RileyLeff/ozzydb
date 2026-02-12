@@ -10,7 +10,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use super::access::{enforce_read_access, enforce_write_access};
@@ -152,17 +152,12 @@ async fn resolve_member_hash(
             };
             Ok(("collection".to_string(), input.member_ref.clone(), hash))
         }
-        "endpoint" => {
-            // Endpoint members reference the endpoint name; hash is the endpoint name itself
-            // since endpoint materialized hashes are computed at execution time
-            Ok((
-                "endpoint".to_string(),
-                input.member_ref.clone(),
-                input.member_ref.clone(),
-            ))
-        }
+        // Endpoint members are deferred to a future phase. Reject for now.
+        "endpoint" => Err(ApiError::bad_request(
+            "Endpoint members are not supported yet. Use 'data' or 'collection'.",
+        )),
         other => Err(ApiError::bad_request(format!(
-            "Invalid member_type '{}': must be 'data', 'collection', or 'endpoint'",
+            "Invalid member_type '{}': must be 'data' or 'collection'",
             other
         ))),
     }
@@ -511,7 +506,7 @@ async fn add_members(
         )));
     }
 
-    // Resolve hashes for new members and check for cycles
+    // Resolve hashes for new members and check for cycles (read-only, safe outside tx)
     let mut new_members = Vec::new();
     for input in &req.members {
         // Cycle detection for collection members
@@ -529,43 +524,10 @@ async fn add_members(
         new_members.push((mtype, mref, mhash));
     }
 
-    // Get current members
-    let current_members =
-        if let Some(latest_ver) = state.db.get_latest_collection_version(coll.id).await? {
-            state.db.get_collection_members(latest_ver.id).await?
-        } else {
-            Vec::new()
-        };
-
-    // Build combined member list
-    let mut all_members: Vec<(String, String, String, i32)> = current_members
-        .iter()
-        .map(|m| {
-            (
-                m.member_type.clone(),
-                m.member_ref.clone(),
-                m.member_hash.clone(),
-                m.ordinal,
-            )
-        })
-        .collect();
-
-    let next_ordinal = all_members.iter().map(|(_, _, _, o)| *o).max().unwrap_or(-1) + 1;
-    for (i, (mtype, mref, mhash)) in new_members.into_iter().enumerate() {
-        // Skip duplicates (same type + ref already in collection)
-        if all_members.iter().any(|(t, r, _, _)| t == &mtype && r == &mref) {
-            continue;
-        }
-        all_members.push((mtype, mref, mhash, next_ordinal + i as i32));
-    }
-
-    // Compute new collection hash
-    let member_hashes: Vec<&str> = all_members.iter().map(|(_, _, h, _)| h.as_str()).collect();
-    let coll_hash = ozzy_core::hash::collection_hash(&member_hashes);
-
+    // Atomically: read current members + merge + create new version (prevents lost updates)
     let (ver, members) = state
         .db
-        .create_collection_version_with_members(coll.id, &coll_hash, user.id, &all_members)
+        .add_to_collection_atomically(coll.id, user.id, &new_members)
         .await?;
 
     Ok(Json(VersionDetail {
@@ -617,58 +579,34 @@ async fn remove_members(
         )));
     }
 
-    // Parse removal refs: "data:name" or "collection:name" or "endpoint:name"
-    let removal_set: HashMap<(&str, &str), bool> = req
-        .refs
-        .iter()
-        .filter_map(|r| {
-            let (mtype, mref) = r.split_once(':')?;
-            Some(((mtype, mref), true))
-        })
-        .collect();
+    // Parse and validate removal refs: "data:name" or "collection:name"
+    let valid_types = ["data", "collection"];
+    let mut refs_to_remove = Vec::new();
 
-    if removal_set.is_empty() {
-        return Err(ApiError::bad_request(
-            "Invalid ref format: use 'type:name' (e.g. 'data:readings')",
-        ));
+    for r in &req.refs {
+        let (mtype, mref) = r.split_once(':').ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "Invalid ref format '{}': use 'type:name' (e.g. 'data:readings')",
+                r
+            ))
+        })?;
+        if !valid_types.contains(&mtype) {
+            return Err(ApiError::bad_request(format!(
+                "Invalid member type '{}': must be 'data' or 'collection'",
+                mtype
+            )));
+        }
+        refs_to_remove.push((mtype.to_string(), mref.to_string()));
     }
 
-    // Get current members
-    let latest_ver = state
+    // Atomically: read current members + filter + create new version (prevents lost updates)
+    let (ver, members) = state
         .db
-        .get_latest_collection_version(coll.id)
+        .remove_from_collection_atomically(coll.id, user.id, &refs_to_remove)
         .await?
         .ok_or_else(|| {
             ApiError::bad_request(format!("Collection '{}' has no versions", name))
         })?;
-
-    let current_members = state.db.get_collection_members(latest_ver.id).await?;
-
-    // Filter out removed members, re-number ordinals
-    let remaining: Vec<(String, String, String, i32)> = current_members
-        .iter()
-        .filter(|m| {
-            !removal_set.contains_key(&(m.member_type.as_str(), m.member_ref.as_str()))
-        })
-        .enumerate()
-        .map(|(i, m)| {
-            (
-                m.member_type.clone(),
-                m.member_ref.clone(),
-                m.member_hash.clone(),
-                i as i32,
-            )
-        })
-        .collect();
-
-    // Compute new hash
-    let member_hashes: Vec<&str> = remaining.iter().map(|(_, _, h, _)| h.as_str()).collect();
-    let coll_hash = ozzy_core::hash::collection_hash(&member_hashes);
-
-    let (ver, members) = state
-        .db
-        .create_collection_version_with_members(coll.id, &coll_hash, user.id, &remaining)
-        .await?;
 
     Ok(Json(VersionDetail {
         version_number: ver.version_number,

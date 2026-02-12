@@ -126,14 +126,20 @@ impl ContentStorage {
         Self::new_with_cache_and_remote(Self::default_cache_dir(), remote_store, prefix, true)
     }
 
-    fn object_path(&self, content_hash: &str, extension: &str) -> Result<ObjectPath> {
+    /// Return the R2/object-store key string for a given hash and extension.
+    /// Used to persist the key in the DB (content_refs.r2_key, data_atoms.r2_key).
+    pub fn storage_key(&self, content_hash: &str, extension: &str) -> Result<String> {
         Self::validate_content_hash(content_hash)?;
         let dir1 = &content_hash[0..2];
         let dir2 = &content_hash[2..4];
-        Ok(ObjectPath::from(format!(
+        Ok(format!(
             "{}/{}/{}/{}.{}",
             self.prefix, dir1, dir2, content_hash, extension
-        )))
+        ))
+    }
+
+    fn object_path(&self, content_hash: &str, extension: &str) -> Result<ObjectPath> {
+        Ok(ObjectPath::from(self.storage_key(content_hash, extension)?))
     }
 
     fn local_path(&self, content_hash: &str, extension: &str) -> Result<PathBuf> {

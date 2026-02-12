@@ -4,6 +4,8 @@ use anyhow::Result;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use ozzy_core::hash::collection_hash;
+
 use super::models::*;
 
 /// Database operations wrapper.
@@ -944,6 +946,200 @@ impl Database {
 
         tx.commit().await?;
         Ok((ver, results))
+    }
+
+    /// Add members to a collection atomically.
+    /// Locks the collection row, reads current members, merges (deduplicating by
+    /// type+ref), computes the collection hash, and creates a new version — all
+    /// inside a single transaction to prevent lost updates from concurrent mutations.
+    pub async fn add_to_collection_atomically(
+        &self,
+        collection_id: Uuid,
+        created_by: Uuid,
+        new_members: &[(String, String, String)], // (member_type, member_ref, member_hash)
+    ) -> Result<(CollectionVersion, Vec<CollectionMember>)> {
+        let mut tx = self.pool.begin().await?;
+
+        // Lock the collection row
+        sqlx::query("SELECT id FROM collections WHERE id = $1 FOR UPDATE")
+            .bind(collection_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        // Read current members inside the lock
+        let latest_ver = sqlx::query_as::<_, CollectionVersion>(
+            "SELECT * FROM collection_versions WHERE collection_id = $1 ORDER BY version_number DESC LIMIT 1",
+        )
+        .bind(collection_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let current = if let Some(ref ver) = latest_ver {
+            sqlx::query_as::<_, CollectionMember>(
+                "SELECT * FROM collection_members WHERE collection_version_id = $1 ORDER BY ordinal",
+            )
+            .bind(ver.id)
+            .fetch_all(&mut *tx)
+            .await?
+        } else {
+            Vec::new()
+        };
+
+        // Merge: keep existing, append new (skip duplicates by type+ref)
+        let mut all: Vec<(String, String, String, i32)> = current
+            .iter()
+            .map(|m| (m.member_type.clone(), m.member_ref.clone(), m.member_hash.clone(), m.ordinal))
+            .collect();
+
+        let next_ordinal = all.iter().map(|(_, _, _, o)| *o).max().unwrap_or(-1) + 1;
+        for (i, (mtype, mref, mhash)) in new_members.iter().enumerate() {
+            if all.iter().any(|(t, r, _, _)| t == mtype && r == mref) {
+                continue;
+            }
+            all.push((mtype.clone(), mref.clone(), mhash.clone(), next_ordinal + i as i32));
+        }
+
+        // Compute collection hash and create version
+        let hashes: Vec<&str> = all.iter().map(|(_, _, h, _)| h.as_str()).collect();
+        let coll_hash = collection_hash(&hashes);
+
+        let ver = sqlx::query_as::<_, CollectionVersion>(
+            r#"
+            INSERT INTO collection_versions (id, collection_id, version_number, hash, created_by)
+            VALUES (
+                $1, $2,
+                COALESCE((SELECT MAX(version_number) FROM collection_versions WHERE collection_id = $2), 0) + 1,
+                $3, $4
+            )
+            RETURNING *
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(collection_id)
+        .bind(&coll_hash)
+        .bind(created_by)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let mut results = Vec::with_capacity(all.len());
+        for (member_type, member_ref, member_hash, ordinal) in &all {
+            let member = sqlx::query_as::<_, CollectionMember>(
+                r#"
+                INSERT INTO collection_members (id, collection_version_id, member_type, member_ref, member_hash, ordinal)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING *
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(ver.id)
+            .bind(member_type)
+            .bind(member_ref)
+            .bind(member_hash)
+            .bind(ordinal)
+            .fetch_one(&mut *tx)
+            .await?;
+            results.push(member);
+        }
+
+        tx.commit().await?;
+        Ok((ver, results))
+    }
+
+    /// Remove members from a collection atomically.
+    /// Locks the collection row, reads current members, filters out the specified
+    /// refs, computes the new collection hash, and creates a new version — all
+    /// inside a single transaction to prevent lost updates.
+    pub async fn remove_from_collection_atomically(
+        &self,
+        collection_id: Uuid,
+        created_by: Uuid,
+        refs_to_remove: &[(String, String)], // (member_type, member_ref)
+    ) -> Result<Option<(CollectionVersion, Vec<CollectionMember>)>> {
+        let mut tx = self.pool.begin().await?;
+
+        // Lock the collection row
+        sqlx::query("SELECT id FROM collections WHERE id = $1 FOR UPDATE")
+            .bind(collection_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        // Read current members inside the lock
+        let latest_ver = sqlx::query_as::<_, CollectionVersion>(
+            "SELECT * FROM collection_versions WHERE collection_id = $1 ORDER BY version_number DESC LIMIT 1",
+        )
+        .bind(collection_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(ref prev_ver) = latest_ver else {
+            // No versions to remove from
+            tx.commit().await?;
+            return Ok(None);
+        };
+
+        let current = sqlx::query_as::<_, CollectionMember>(
+            "SELECT * FROM collection_members WHERE collection_version_id = $1 ORDER BY ordinal",
+        )
+        .bind(prev_ver.id)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        // Filter out removed members, re-number ordinals
+        let remaining: Vec<(String, String, String, i32)> = current
+            .iter()
+            .filter(|m| {
+                !refs_to_remove
+                    .iter()
+                    .any(|(t, r)| t == &m.member_type && r == &m.member_ref)
+            })
+            .enumerate()
+            .map(|(i, m)| (m.member_type.clone(), m.member_ref.clone(), m.member_hash.clone(), i as i32))
+            .collect();
+
+        // Compute hash and create version
+        let hashes: Vec<&str> = remaining.iter().map(|(_, _, h, _)| h.as_str()).collect();
+        let coll_hash = collection_hash(&hashes);
+
+        let ver = sqlx::query_as::<_, CollectionVersion>(
+            r#"
+            INSERT INTO collection_versions (id, collection_id, version_number, hash, created_by)
+            VALUES (
+                $1, $2,
+                COALESCE((SELECT MAX(version_number) FROM collection_versions WHERE collection_id = $2), 0) + 1,
+                $3, $4
+            )
+            RETURNING *
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(collection_id)
+        .bind(&coll_hash)
+        .bind(created_by)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let mut results = Vec::with_capacity(remaining.len());
+        for (member_type, member_ref, member_hash, ordinal) in &remaining {
+            let member = sqlx::query_as::<_, CollectionMember>(
+                r#"
+                INSERT INTO collection_members (id, collection_version_id, member_type, member_ref, member_hash, ordinal)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING *
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(ver.id)
+            .bind(member_type)
+            .bind(member_ref)
+            .bind(member_hash)
+            .bind(ordinal)
+            .fetch_one(&mut *tx)
+            .await?;
+            results.push(member);
+        }
+
+        tx.commit().await?;
+        Ok(Some((ver, results)))
     }
 
     pub async fn get_latest_collection_version(

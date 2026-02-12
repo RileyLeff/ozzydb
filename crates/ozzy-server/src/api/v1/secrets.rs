@@ -18,11 +18,11 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::access::{enforce_read_access, enforce_write_access};
+use super::access::enforce_write_access;
 use super::auth::ApiError;
 use crate::{
     AppState,
-    auth::middleware::{AuthUser, MaybeAuthUser},
+    auth::middleware::AuthUser,
 };
 
 // ============================================================================
@@ -159,8 +159,9 @@ async fn set_secret(
 }
 
 /// List secret names and metadata (values are never returned).
+/// Requires write access — secret metadata should not be publicly enumerable.
 async fn list_secrets(
-    auth: MaybeAuthUser,
+    AuthUser { user, scope }: AuthUser,
     State(state): State<AppState>,
     Path((owner, project_slug)): Path<(String, String)>,
 ) -> Result<Json<Vec<SecretListItem>>, ApiError> {
@@ -170,7 +171,7 @@ async fn list_secrets(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Project '{}/{}'", owner, project_slug)))?;
 
-    enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
+    enforce_write_access(&state, &project, &owner, &project_slug, &user, &scope).await?;
 
     let secrets = state.db.list_secrets(project.id).await?;
 
