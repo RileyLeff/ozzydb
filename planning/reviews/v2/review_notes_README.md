@@ -24,3 +24,12 @@ The `created` field in `SetSecretResponse` is derived from a pre-upsert existenc
 
 ### Endpoint collection members deferred
 Endpoint members in collections are rejected in Phase 2 with a clear error message. They require materialized hash resolution at execution time, which depends on compute pipeline work in Phase 4. When implemented, `resolve_member_hash` will need to look up the endpoint's latest materialized hash.
+
+### Collection member hashes are point-in-time snapshots
+When adding a collection-type member, the stored `member_hash` reflects the child collection's hash at the time of addition. If the child is subsequently updated, the parent's stored hash becomes "stale" — this is intentional. Content-addressed systems record the state at the point of reference. The parent must be explicitly updated (re-add the member) to pick up the child's new hash.
+
+### Upload + collection add are separate operations
+Data atom upload and optional collection-add are two separate DB operations. If the collection is yanked between upload and collection-add, the atom persists (it's valid data) and the user gets a 410. This is acceptable — the atom exists and is usable independently. Full transactional atomicity across upload + collection-add would require wrapping storage writes + two different DB operations in a single transaction, adding complexity for minimal benefit.
+
+### Streaming reads don't verify content hash
+`get_stream()` remote branch returns the stream without hash verification. Hash verification requires consuming the entire stream first, which defeats the purpose of streaming. A hash-verifying stream wrapper could be added in the future if needed, but the primary use case (serving large files) benefits from streaming without full buffering.

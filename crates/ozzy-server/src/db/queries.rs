@@ -993,13 +993,17 @@ impl Database {
             return Ok(CollectionMutResult::Yanked(coll.name));
         }
 
-        // Cycle detection for collection-type members (reads from pool — safe
-        // because advisory lock ensures no concurrent mutation is in-flight)
+        // Cycle detection for collection-type members, using the transaction
+        // connection to avoid pool exhaustion deadlocks under contention.
         for (mtype, mref, _) in new_members {
             if mtype == "collection" {
-                if self
-                    .would_create_collection_cycle(project_id, collection_name, mref)
-                    .await?
+                if Self::would_create_collection_cycle(
+                    &mut *tx,
+                    project_id,
+                    collection_name,
+                    mref,
+                )
+                .await?
                 {
                     return Ok(CollectionMutResult::CycleDetected(mref.clone()));
                 }
@@ -1198,8 +1202,12 @@ impl Database {
 
     /// DFS cycle detection: check if adding `target_name` as a sub-collection
     /// of `parent_name` would create a cycle.
+    ///
+    /// Uses the provided transaction connection for all reads, avoiding separate
+    /// pool connections that could deadlock under contention when the advisory
+    /// lock is held.
     async fn would_create_collection_cycle(
-        &self,
+        tx: &mut sqlx::PgConnection,
         project_id: Uuid,
         parent_name: &str,
         target_name: &str,
@@ -1216,15 +1224,34 @@ impl Database {
                 continue;
             }
 
-            let Some(coll) = self.get_collection(project_id, &current).await? else {
+            let Some(coll) = sqlx::query_as::<_, Collection>(
+                "SELECT * FROM collections WHERE project_id = $1 AND name = $2",
+            )
+            .bind(project_id)
+            .bind(&current)
+            .fetch_optional(&mut *tx)
+            .await?
+            else {
                 continue;
             };
 
-            let Some(ver) = self.get_latest_collection_version(coll.id).await? else {
+            let Some(ver) = sqlx::query_as::<_, CollectionVersion>(
+                "SELECT * FROM collection_versions WHERE collection_id = $1 ORDER BY version_number DESC LIMIT 1",
+            )
+            .bind(coll.id)
+            .fetch_optional(&mut *tx)
+            .await?
+            else {
                 continue;
             };
 
-            let members = self.get_collection_members(ver.id).await?;
+            let members = sqlx::query_as::<_, CollectionMember>(
+                "SELECT * FROM collection_members WHERE collection_version_id = $1 ORDER BY ordinal",
+            )
+            .bind(ver.id)
+            .fetch_all(&mut *tx)
+            .await?;
+
             for member in members {
                 if member.member_type == "collection" {
                     if member.member_ref == parent_name {
