@@ -79,6 +79,8 @@ async fn push(
             "git_commit_sha must be a 40-character hex string".to_string(),
         ));
     }
+    // Normalize to lowercase to avoid case-mismatch in storage keys
+    let git_commit_sha = req.git_commit_sha.to_ascii_lowercase();
 
     if req.git_provider != "github" {
         return Err(ApiError::BadRequest(format!(
@@ -107,19 +109,27 @@ async fn push(
     }
 
     // ── Get or create project ────────────────────────────────────
+    // Resolve the project owner's user_id (may differ from the authenticated
+    // user if a collaborator is pushing).
+    let owner_user = state
+        .db
+        .get_user_by_username(owner)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("User '{}' not found", owner)))?;
+
     let project = state
         .db
-        .get_or_create_project(auth.user.id, slug, "private")
+        .get_or_create_project(owner_user.id, slug, "private")
         .await
         .map_err(ApiError::Internal)?;
 
-    // If project already existed and owner is the user, verify write access via scope
+    // Verify write access via token scope
     enforce_write_access(&state, &project, owner, slug, &auth.user, &auth.scope).await?;
 
     // Check for duplicate push (same SHA already registered)
     if let Some(existing) = state
         .db
-        .get_commit_by_sha(project.id, &req.git_commit_sha)
+        .get_commit_by_sha(project.id, &git_commit_sha)
         .await?
     {
         // Idempotent: return success with existing commit info
@@ -134,7 +144,7 @@ async fn push(
     // ── Fetch ozzy.toml from git provider ────────────────────────
     let toml_bytes = state
         .git
-        .get_file(&req.git_repo, &req.git_commit_sha, "ozzy.toml")
+        .get_file(&req.git_repo, &git_commit_sha, "ozzy.toml")
         .await
         .map_err(|e| {
             // Convert git errors to appropriate API errors
@@ -179,10 +189,15 @@ async fn push(
     // ── Verify referenced source files exist ─────────────────────
     for (name, transform) in &ozzy_toml.transforms {
         if let Some(source) = &transform.source {
+            // Strip function selector (e.g. "transforms/qc.py:quality_control" → "transforms/qc.py")
+            let file_path = source
+                .rsplit_once(':')
+                .map_or(source.as_str(), |(path, _)| path);
+
             // Try to fetch the file to verify it exists
             state
                 .git
-                .get_file(&req.git_repo, &req.git_commit_sha, source)
+                .get_file(&req.git_repo, &git_commit_sha, file_path)
                 .await
                 .map_err(|e| {
                     if let Some(crate::git::github::GitError::FileNotFound { .. }) =
@@ -192,7 +207,7 @@ async fn push(
                             "Transform '{}' references source file '{}' which does not exist at commit {}",
                             name,
                             source,
-                            req.git_commit_sha.get(..8).unwrap_or(&req.git_commit_sha)
+                            git_commit_sha.get(..8).unwrap_or(&git_commit_sha)
                         ))
                     } else {
                         ApiError::Internal(e)
@@ -202,13 +217,8 @@ async fn push(
     }
 
     // ── Cache source tarball ─────────────────────────────────────
-    let source_cached = cache_source_tarball(
-        &state,
-        &req.git_provider,
-        &req.git_repo,
-        &req.git_commit_sha,
-    )
-    .await;
+    let source_cached =
+        cache_source_tarball(&state, &req.git_provider, &req.git_repo, &git_commit_sha).await;
     if let Err(ref e) = source_cached {
         tracing::warn!("Failed to cache source tarball: {}", e);
     }
@@ -231,7 +241,7 @@ async fn push(
             project.id,
             &req.git_provider,
             &req.git_repo,
-            &req.git_commit_sha,
+            &git_commit_sha,
             &toml_hash,
             auth.user.id,
             req.message.as_deref(),
@@ -277,13 +287,13 @@ async fn push(
         "Push registered: {}/{} at {} (commit_id={})",
         owner,
         slug,
-        req.git_commit_sha.get(..8).unwrap_or(&req.git_commit_sha),
+        git_commit_sha.get(..8).unwrap_or(&git_commit_sha),
         commit.id
     );
 
     Ok(Json(PushResponse {
         commit_id: commit.id.to_string(),
-        git_commit_sha: req.git_commit_sha,
+        git_commit_sha,
         environments: env_statuses,
         source_cached: source_cached.is_ok(),
     }))

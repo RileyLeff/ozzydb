@@ -255,8 +255,9 @@ fn update_gitignore(cwd: &Path) -> Result<()> {
     // Lines to ensure are present
     let entries = ["# OzzyDB", ".ozzy/", "data/*.parquet"];
 
+    let existing_lines: Vec<&str> = existing.lines().map(|l| l.trim()).collect();
     for entry in &entries {
-        if !existing.contains(entry) {
+        if !existing_lines.contains(entry) {
             additions.push(*entry);
         }
     }

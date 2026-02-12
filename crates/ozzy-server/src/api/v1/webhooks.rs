@@ -59,7 +59,10 @@ async fn github_webhook(
             ));
         }
     } else {
-        tracing::warn!("GitHub webhook secret not configured — skipping signature verification");
+        tracing::warn!("GitHub webhook secret not configured — rejecting webhook");
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "Webhook secret not configured"
+        )));
     }
 
     // Check event type

@@ -112,8 +112,30 @@ impl GitHubProvider {
             .await
             .context("Failed to fetch archive from GitHub")?;
 
+        // Limit archive size to 500 MB to prevent OOM
+        const MAX_ARCHIVE_SIZE: u64 = 500 * 1024 * 1024;
+
         match resp.status().as_u16() {
-            200..=299 => Ok(resp.bytes().await?.to_vec()),
+            200..=299 => {
+                if let Some(len) = resp.content_length() {
+                    if len > MAX_ARCHIVE_SIZE {
+                        anyhow::bail!(
+                            "Archive too large ({} bytes, max {} bytes)",
+                            len,
+                            MAX_ARCHIVE_SIZE
+                        );
+                    }
+                }
+                let bytes = resp.bytes().await?.to_vec();
+                if bytes.len() as u64 > MAX_ARCHIVE_SIZE {
+                    anyhow::bail!(
+                        "Archive too large ({} bytes, max {} bytes)",
+                        bytes.len(),
+                        MAX_ARCHIVE_SIZE
+                    );
+                }
+                Ok(bytes)
+            }
             404 => {
                 if token.is_none() {
                     // Could be a private repo — suggest installing the App
@@ -139,9 +161,15 @@ impl GitHubProvider {
     /// Returns the raw file bytes.
     pub async fn get_file(&self, repo: &str, commit_sha: &str, path: &str) -> Result<Vec<u8>> {
         let token = self.get_token_for_repo(repo).await?;
+        // URL-encode each path segment individually (preserve / separators)
+        let encoded_path: String = path
+            .split('/')
+            .map(|seg| urlencoding::encode(seg))
+            .collect::<Vec<_>>()
+            .join("/");
         let url = format!(
             "{}/repos/{}/contents/{}?ref={}",
-            GITHUB_API_BASE, repo, path, commit_sha
+            GITHUB_API_BASE, repo, encoded_path, commit_sha
         );
 
         let mut req = self

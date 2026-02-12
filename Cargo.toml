@@ -35,6 +35,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 anyhow = "1"
 thiserror = "1"
 
+# URL encoding
+urlencoding = "2"
+
 # File system
 walkdir = "2"
 tempfile = "3"

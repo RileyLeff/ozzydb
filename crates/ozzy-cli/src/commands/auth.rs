@@ -192,8 +192,9 @@ pub async fn login() -> Result<()> {
     println!();
     println!("Waiting for authorization...");
 
-    // Step 2: Poll for completion
+    // Step 2: Poll for completion (with timeout based on device code expiry)
     let poll_interval = std::time::Duration::from_secs(device.interval.max(5));
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(device.expires_in);
     let poll_req = PollRequest {
         device_code: device.device_code,
         client: "cli-session".to_string(),
@@ -201,6 +202,10 @@ pub async fn login() -> Result<()> {
 
     loop {
         tokio::time::sleep(poll_interval).await;
+
+        if tokio::time::Instant::now() >= deadline {
+            bail!("Device code expired. Run `ozzy auth login` again.");
+        }
 
         let resp = client
             .post(format!("{}/v1/auth/github/poll", registry_url))

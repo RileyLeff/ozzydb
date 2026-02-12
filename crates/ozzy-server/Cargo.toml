@@ -67,6 +67,9 @@ jsonwebtoken.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 
+# URL encoding
+urlencoding.workspace = true
+
 [dev-dependencies]
 # Testing
 tempfile.workspace = true

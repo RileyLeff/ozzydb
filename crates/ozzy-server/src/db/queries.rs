@@ -426,6 +426,14 @@ impl Database {
         Ok(commit)
     }
 
+    pub async fn count_commits(&self, project_id: Uuid) -> Result<i64> {
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM commits WHERE project_id = $1")
+            .bind(project_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.0)
+    }
+
     pub async fn list_commits(&self, project_id: Uuid, limit: i64) -> Result<Vec<Commit>> {
         let commits = sqlx::query_as::<_, Commit>(
             "SELECT * FROM commits WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2",

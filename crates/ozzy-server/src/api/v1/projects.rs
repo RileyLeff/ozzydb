@@ -112,14 +112,7 @@ async fn get_project(
     enforce_read_access(&state, &project, &owner, &slug, &auth).await?;
 
     // Get commit count
-    let commits = state.db.list_commits(project.id, 1).await?;
-    let commit_count = if commits.is_empty() {
-        0
-    } else {
-        // We don't have a count query, so use the list length as a proxy
-        // For a more accurate count, we'd need a dedicated COUNT query
-        state.db.list_commits(project.id, 100).await?.len() as i64
-    };
+    let commit_count = state.db.count_commits(project.id).await?;
 
     // Get refs
     let refs = state.db.list_refs(project.id).await?;
