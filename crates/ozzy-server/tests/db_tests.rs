@@ -46,7 +46,7 @@ async fn test_upsert_and_get_user() -> Result<()> {
         return Ok(());
     };
 
-    let github_id = rand::random::<i64>().abs();
+    let github_id = (rand::random::<i64>() & i64::MAX);
     let login = unique_name("user");
 
     let user = db
@@ -90,7 +90,7 @@ async fn test_create_and_get_project() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
 
     let slug = unique_name("proj");
@@ -124,7 +124,7 @@ async fn test_get_or_create_project() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
 
     let slug = unique_name("proj");
@@ -149,10 +149,10 @@ async fn test_collaborators() -> Result<()> {
     };
 
     let owner = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("owner"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("owner"), None, None)
         .await?;
     let collab = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("collab"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("collab"), None, None)
         .await?;
 
     let project = db
@@ -206,7 +206,7 @@ async fn test_tokens() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
 
     let token_hash = format!("hash_{}", Uuid::new_v4());
@@ -246,7 +246,7 @@ async fn test_project_scoped_token() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
 
     let project = db
@@ -272,7 +272,7 @@ async fn test_session_token_upsert() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
 
     let expires = chrono::Utc::now() + chrono::Duration::days(90);
@@ -308,7 +308,7 @@ async fn test_commits() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
@@ -354,7 +354,7 @@ async fn test_commit_state() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
@@ -401,7 +401,7 @@ async fn test_refs() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
@@ -455,7 +455,7 @@ async fn test_data_atoms() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
@@ -542,7 +542,7 @@ async fn test_metadata_log() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
@@ -598,7 +598,7 @@ async fn test_github_installations() -> Result<()> {
         return Ok(());
     };
 
-    let install_id = rand::random::<i64>().abs();
+    let install_id = (rand::random::<i64>() & i64::MAX);
     let login = unique_name("org");
 
     let inst = db
@@ -639,7 +639,7 @@ async fn test_update_and_delete_project() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), Some("old desc"), "private")
@@ -672,7 +672,7 @@ async fn test_collections() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
@@ -691,22 +691,20 @@ async fn test_collections() -> Result<()> {
     let colls = db.list_collections(project.id).await?;
     assert!(colls.iter().any(|c| c.id == coll.id));
 
-    // Create version with members
-    let ver = db
-        .create_collection_version(coll.id, "version_hash_1", user.id)
-        .await?;
-    assert_eq!(ver.version_number, 1);
-    assert_eq!(ver.hash, "version_hash_1");
-
-    let members = db
-        .add_collection_members(
-            ver.id,
+    // Create version with members (atomically in transaction)
+    let (ver, members) = db
+        .create_collection_version_with_members(
+            coll.id,
+            "version_hash_1",
+            user.id,
             &[
                 ("data".into(), "my_data".into(), "hash_aaa".into(), 0),
                 ("collection".into(), "sub_coll".into(), "hash_bbb".into(), 1),
             ],
         )
         .await?;
+    assert_eq!(ver.version_number, 1);
+    assert_eq!(ver.hash, "version_hash_1");
     assert_eq!(members.len(), 2);
     assert_eq!(members[0].member_type, "data");
     assert_eq!(members[1].member_type, "collection");
@@ -718,8 +716,8 @@ async fn test_collections() -> Result<()> {
     assert_eq!(fetched_members[1].ordinal, 1);
 
     // Second version
-    let ver2 = db
-        .create_collection_version(coll.id, "version_hash_2", user.id)
+    let (ver2, _) = db
+        .create_collection_version_with_members(coll.id, "version_hash_2", user.id, &[])
         .await?;
     assert_eq!(ver2.version_number, 2);
 
@@ -753,7 +751,7 @@ async fn test_endpoint_yanks() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
@@ -798,7 +796,7 @@ async fn test_secrets() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")
@@ -918,7 +916,7 @@ async fn test_materialized_cache() -> Result<()> {
     };
 
     let user = db
-        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .upsert_user_from_github((rand::random::<i64>() & i64::MAX), &unique_name("user"), None, None)
         .await?;
     let project = db
         .create_project(user.id, &unique_name("proj"), None, "private")

@@ -1,0 +1,20 @@
+# Review Notes — v2
+
+Persistent notes on design decisions and intentional tradeoffs. Future reviewers: check here before flagging something as a bug.
+
+## Intentional Design Decisions
+
+### Rule 11 (content type compatibility) is a runtime check
+Content type compatibility between edge sources (`data:`, `collection:`, `endpoint:`) and transform inputs can't be validated at TOML parse time because it requires DB lookups for data atom types. It will be validated at fetch/run time in Phase 4.
+
+### Endpoint param types are strings, validated at runtime
+Endpoint `type_` is a string field, not an enum. Consumer parameter validation (type checking, min/max/enum enforcement) happens at the fetch endpoint, not at TOML parse time.
+
+### DB tests skip without DATABASE_URL
+This is intentional — they need real Postgres. CI must set DATABASE_URL.
+
+### Cross-project integrity enforced via composite FKs
+Tables that reference both `project_id` and `commit_id` (refs, endpoint_yanks, materialized_cache) use composite FKs to `commits(id, project_id)`, preventing cross-project references at the DB constraint level.
+
+### Collection members use set semantics
+`collection_members` has `UNIQUE (collection_version_id, member_hash)` to prevent duplicate members per version. `collection_hash()` also deduplicates defensively. Ordinals provide deterministic ordering for display.

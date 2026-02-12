@@ -478,6 +478,7 @@ impl Database {
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (project_id, ref_name) DO UPDATE SET
                 commit_id = EXCLUDED.commit_id,
+                ref_type = EXCLUDED.ref_type,
                 updated_at = now()
             RETURNING *
             "#,
@@ -851,14 +852,24 @@ impl Database {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Create a new version of a collection. Returns the new version row.
-    pub async fn create_collection_version(
+    /// Create a new collection version with members, atomically in a transaction.
+    /// Computes the next version number, inserts the version row, and all member rows.
+    /// If any step fails, the entire operation is rolled back.
+    pub async fn create_collection_version_with_members(
         &self,
         collection_id: Uuid,
         hash: &str,
         created_by: Uuid,
-    ) -> Result<CollectionVersion> {
-        // Atomically compute the next version number and insert
+        members: &[(String, String, String, i32)], // (member_type, member_ref, member_hash, ordinal)
+    ) -> Result<(CollectionVersion, Vec<CollectionMember>)> {
+        let mut tx = self.pool.begin().await?;
+
+        // Lock the collection row to prevent concurrent version number races
+        sqlx::query("SELECT id FROM collections WHERE id = $1 FOR UPDATE")
+            .bind(collection_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
         let ver = sqlx::query_as::<_, CollectionVersion>(
             r#"
             INSERT INTO collection_versions (id, collection_id, version_number, hash, created_by)
@@ -874,16 +885,9 @@ impl Database {
         .bind(collection_id)
         .bind(hash)
         .bind(created_by)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
-        Ok(ver)
-    }
 
-    pub async fn add_collection_members(
-        &self,
-        version_id: Uuid,
-        members: &[(String, String, String, i32)], // (member_type, member_ref, member_hash, ordinal)
-    ) -> Result<Vec<CollectionMember>> {
         let mut results = Vec::with_capacity(members.len());
         for (member_type, member_ref, member_hash, ordinal) in members {
             let member = sqlx::query_as::<_, CollectionMember>(
@@ -894,16 +898,18 @@ impl Database {
                 "#,
             )
             .bind(Uuid::new_v4())
-            .bind(version_id)
+            .bind(ver.id)
             .bind(member_type)
             .bind(member_ref)
             .bind(member_hash)
             .bind(ordinal)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await?;
             results.push(member);
         }
-        Ok(results)
+
+        tx.commit().await?;
+        Ok((ver, results))
     }
 
     pub async fn get_latest_collection_version(

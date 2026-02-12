@@ -105,19 +105,20 @@ pub fn materialized_hash(
     let mut sorted_inputs: Vec<_> = inputs.to_vec();
     sorted_inputs.sort_by_key(|(name, _)| *name);
 
-    // Build input string: "name1\0hash1\0name2\0hash2\0..."
-    let input_str: String = sorted_inputs
-        .iter()
-        .flat_map(|(name, hash)| [*name, *hash])
-        .collect::<Vec<_>>()
-        .join("\0");
-
-    let input_hash = blake3_hash(input_str.as_bytes());
-
-    match secrets_hash {
-        Some(sh) => blake3_hash_components(&[&input_hash, transform_hash, params_hash, platform_hash, sh]),
-        None => blake3_hash_components(&[&input_hash, transform_hash, params_hash, platform_hash]),
+    // Single-pass hash over all components per spec:
+    // blake3(input_name1 \0 input_hash1 \0 ... \0 transform_hash \0 params_hash \0 platform_hash [\0 secrets_hash])
+    let mut parts: Vec<&str> = Vec::new();
+    for (name, hash) in &sorted_inputs {
+        parts.push(name);
+        parts.push(hash);
     }
+    parts.push(transform_hash);
+    parts.push(params_hash);
+    parts.push(platform_hash);
+    if let Some(sh) = secrets_hash {
+        parts.push(sh);
+    }
+    blake3_hash_components(&parts)
 }
 
 /// Compute the hash of a collection version.
@@ -131,6 +132,7 @@ pub fn materialized_hash(
 pub fn collection_hash(member_hashes: &[&str]) -> String {
     let mut sorted: Vec<_> = member_hashes.to_vec();
     sorted.sort();
+    sorted.dedup(); // set semantics: duplicates don't change the hash
     let combined = sorted.join("\0");
     blake3_hash(combined.as_bytes())
 }
@@ -328,5 +330,31 @@ mod tests {
         let h = collection_hash(&["b", "a"]);
         let expected = blake3_hash(b"a\0b");
         assert_eq!(h, expected);
+    }
+
+    #[test]
+    fn test_golden_materialized_hash() {
+        // Single-pass: blake3("x\0hash_x\0t\0p\0plat")
+        let inputs = [("x", "hash_x")];
+        let h = materialized_hash(&inputs, "t", "p", "plat", None);
+        let expected = blake3_hash(b"x\0hash_x\0t\0p\0plat");
+        assert_eq!(h, expected);
+    }
+
+    #[test]
+    fn test_golden_materialized_hash_with_secrets() {
+        // Single-pass: blake3("x\0hash_x\0t\0p\0plat\0s")
+        let inputs = [("x", "hash_x")];
+        let h = materialized_hash(&inputs, "t", "p", "plat", Some("s"));
+        let expected = blake3_hash(b"x\0hash_x\0t\0p\0plat\0s");
+        assert_eq!(h, expected);
+    }
+
+    #[test]
+    fn test_collection_hash_dedup() {
+        // Duplicate member hashes should not change the result (set semantics)
+        let h1 = collection_hash(&["hash_a", "hash_b"]);
+        let h2 = collection_hash(&["hash_a", "hash_b", "hash_a"]);
+        assert_eq!(h1, h2);
     }
 }

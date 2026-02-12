@@ -139,7 +139,7 @@ impl TestServer {
 
     /// Create a test user with an account-scoped API token. Returns (username, bearer_token).
     async fn create_test_user(&self, suffix: &str) -> (String, String) {
-        let github_id = rand::random::<i64>().abs();
+        let github_id = (rand::random::<i64>() & i64::MAX);
         let username = format!("testuser_{}", suffix);
         let user = self
             .db
@@ -194,7 +194,7 @@ fn test_server_health() {
 fn test_concurrent_token_upsert() {
     let s = &*TEST_SERVER;
     TEST_RT.block_on(async {
-        let github_id = rand::random::<i64>().abs();
+        let github_id = (rand::random::<i64>() & i64::MAX);
         let username = format!("token_race_{}", github_id);
         let user = s
             .db
@@ -265,7 +265,7 @@ fn test_project_scoped_token_cannot_access_account_endpoints() {
     let s = &*TEST_SERVER;
     TEST_RT.block_on(async {
         // Create a user with a project-scoped token
-        let github_id = rand::random::<i64>().abs();
+        let github_id = (rand::random::<i64>() & i64::MAX);
         let username = format!("testuser_scoped_{}", github_id);
         let user = s
             .db

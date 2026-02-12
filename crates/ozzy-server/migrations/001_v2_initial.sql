@@ -25,6 +25,10 @@ CREATE TABLE api_tokens (
     name            TEXT NOT NULL,
     scope           TEXT NOT NULL,              -- "account" | "project:{owner}/{slug}"
     project_id      UUID,                       -- NULL for account tokens, set after projects table exists
+    CONSTRAINT chk_scope_project CHECK (
+        (scope = 'account' AND project_id IS NULL) OR
+        (scope <> 'account' AND project_id IS NOT NULL)
+    ),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at      TIMESTAMPTZ,
     last_used_at    TIMESTAMPTZ,
@@ -74,7 +78,8 @@ CREATE TABLE commits (
     pushed_by       UUID NOT NULL REFERENCES users(id),
     message         TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (project_id, git_commit_sha)
+    UNIQUE (project_id, git_commit_sha),
+    UNIQUE (id, project_id)             -- enables composite FKs from refs, endpoint_yanks, materialized_cache
 );
 
 -- Parsed + cached ozzy.toml content
@@ -94,10 +99,11 @@ CREATE TABLE refs (
     project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     ref_name        TEXT NOT NULL,
     ref_type        TEXT NOT NULL CHECK (ref_type IN ('branch', 'tag')),
-    commit_id       UUID NOT NULL REFERENCES commits(id),
+    commit_id       UUID NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (project_id, ref_name)
+    UNIQUE (project_id, ref_name),
+    FOREIGN KEY (commit_id, project_id) REFERENCES commits(id, project_id)
 );
 
 -- ============================================================
@@ -176,7 +182,8 @@ CREATE TABLE collection_members (
     member_ref              TEXT NOT NULL,
     member_hash             TEXT NOT NULL,
     ordinal                 INT NOT NULL,
-    UNIQUE (collection_version_id, ordinal)
+    UNIQUE (collection_version_id, ordinal),
+    UNIQUE (collection_version_id, member_hash)  -- set semantics: no duplicate members per version
 );
 
 -- ============================================================
@@ -186,11 +193,12 @@ CREATE TABLE endpoint_yanks (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     endpoint_name   TEXT NOT NULL,
-    commit_id       UUID NOT NULL REFERENCES commits(id),
+    commit_id       UUID NOT NULL,
     yank_reason     TEXT NOT NULL,
     yanked_by       UUID NOT NULL REFERENCES users(id),
     yanked_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (project_id, endpoint_name, commit_id)
+    UNIQUE (project_id, endpoint_name, commit_id),
+    FOREIGN KEY (commit_id, project_id) REFERENCES commits(id, project_id)
 );
 
 -- ============================================================
@@ -244,7 +252,7 @@ CREATE TABLE source_cache (
 CREATE TABLE materialized_cache (
     materialized_hash   TEXT PRIMARY KEY,
     project_id          UUID NOT NULL REFERENCES projects(id),
-    commit_id           UUID NOT NULL REFERENCES commits(id),
+    commit_id           UUID NOT NULL,
     endpoint_name       TEXT NOT NULL,
     node_name           TEXT NOT NULL,
     transform_name      TEXT NOT NULL,
@@ -256,7 +264,8 @@ CREATE TABLE materialized_cache (
     verification_tier   INT NOT NULL DEFAULT 1,
     computed_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_accessed       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    access_count        INT NOT NULL DEFAULT 1
+    access_count        INT NOT NULL DEFAULT 1,
+    FOREIGN KEY (commit_id, project_id) REFERENCES commits(id, project_id)
 );
 
 -- ============================================================

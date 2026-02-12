@@ -452,6 +452,18 @@ impl OzzyToml {
                     });
                 }
             }
+            for param_name in ep.params.keys() {
+                if !is_valid_name(param_name) {
+                    errors.push(ValidationError {
+                        location: format!("endpoints.{}.params.{}", name, param_name),
+                        message: format!(
+                            "Invalid endpoint param name \"{}\". Names must match [a-zA-Z0-9_-]+.",
+                            param_name
+                        ),
+                        suggestion: None,
+                    });
+                }
+            }
         }
     }
 
@@ -595,9 +607,26 @@ impl OzzyToml {
 
                 // Rule 6: Parse and validate `from` source
                 let source = parse_edge_source(&edge.from);
+
+                // Reject empty refs (e.g. "data:", "collection:", "endpoint:")
+                let is_empty_ref = match &source {
+                    EdgeSource::Data(r) | EdgeSource::Collection(r) | EdgeSource::Endpoint(r) => r.is_empty(),
+                    EdgeSource::Node(r) => r.is_empty(),
+                };
+                if is_empty_ref {
+                    errors.push(ValidationError {
+                        location: format!("{}.from", edge_loc),
+                        message: format!(
+                            "Empty edge source \"{}\". Must specify a reference after the prefix.",
+                            edge.from
+                        ),
+                        suggestion: None,
+                    });
+                }
+
                 match &source {
                     EdgeSource::Node(node_ref) => {
-                        if !ep.nodes.contains_key(node_ref.as_str()) {
+                        if !node_ref.is_empty() && !ep.nodes.contains_key(node_ref.as_str()) {
                             errors.push(ValidationError {
                                 location: format!("{}.from", edge_loc),
                                 message: format!(
