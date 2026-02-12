@@ -1035,12 +1035,13 @@ impl Database {
             .map(|m| (m.member_type.clone(), m.member_ref.clone(), m.member_hash.clone(), m.ordinal))
             .collect();
 
-        let next_ordinal = all.iter().map(|(_, _, _, o)| *o).max().unwrap_or(-1) + 1;
-        for (i, (mtype, mref, mhash)) in new_members.iter().enumerate() {
+        let mut next_ordinal = all.iter().map(|(_, _, _, o)| *o).max().unwrap_or(-1) + 1;
+        for (mtype, mref, mhash) in new_members {
             if all.iter().any(|(t, r, _, _)| t == mtype && r == mref) {
                 continue;
             }
-            all.push((mtype.clone(), mref.clone(), mhash.clone(), next_ordinal + i as i32));
+            all.push((mtype.clone(), mref.clone(), mhash.clone(), next_ordinal));
+            next_ordinal += 1;
         }
 
         // Compute collection hash and create version

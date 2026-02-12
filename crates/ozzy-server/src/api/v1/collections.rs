@@ -135,6 +135,12 @@ async fn resolve_member_hash(
                 .ok_or_else(|| {
                     ApiError::not_found(format!("Data atom '{}'", input.member_ref))
                 })?;
+            if atom.yanked {
+                return Err(ApiError::gone(format!(
+                    "Data atom '{}' has been yanked",
+                    input.member_ref
+                )));
+            }
             Ok(("data".to_string(), input.member_ref.clone(), atom.hash))
         }
         "collection" => {
@@ -145,6 +151,12 @@ async fn resolve_member_hash(
                 .ok_or_else(|| {
                     ApiError::not_found(format!("Collection '{}'", input.member_ref))
                 })?;
+            if coll.yanked {
+                return Err(ApiError::gone(format!(
+                    "Collection '{}' has been yanked",
+                    input.member_ref
+                )));
+            }
             let hash = if let Some(ver) = state.db.get_latest_collection_version(coll.id).await? {
                 ver.hash
             } else {
@@ -184,6 +196,11 @@ fn flatten_collection<'a>(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Collection '{}'", collection_name)))?;
 
+    // Skip yanked collections during flatten
+    if coll.yanked {
+        return Ok(Vec::new());
+    }
+
     let ver = match state.db.get_latest_collection_version(coll.id).await? {
         Some(v) => v,
         None => return Ok(Vec::new()),
@@ -199,6 +216,12 @@ fn flatten_collection<'a>(
     for member in members {
         match member.member_type.as_str() {
             "data" => {
+                // Skip yanked data atoms
+                if let Some(atom) = state.db.get_data_atom(project_id, &member.member_ref).await? {
+                    if atom.yanked {
+                        continue;
+                    }
+                }
                 atoms.push(FlattenedAtom {
                     name: member.member_ref,
                     hash: member.member_hash,
