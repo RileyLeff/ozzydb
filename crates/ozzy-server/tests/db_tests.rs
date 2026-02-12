@@ -1,11 +1,11 @@
-//! Database integration tests.
+//! Database integration tests for v2 schema.
 //!
 //! These tests require a PostgreSQL database to run.
 //! Set DATABASE_URL environment variable to run these tests.
 //!
 //! Example using Docker:
 //! ```bash
-//! docker run -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=ozzy_test postgres:16-alpine
+//! docker run -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=ozzy_test postgres:17-alpine
 //! export DATABASE_URL=postgres://postgres:test@localhost/ozzy_test
 //! cargo test --package ozzy-server db_tests
 //! ```
@@ -31,89 +31,84 @@ async fn get_test_db() -> Option<Database> {
     Some(Database::new(pool))
 }
 
-fn should_skip_db_tests() -> bool {
-    env::var("DATABASE_URL").is_err()
+fn unique_name(prefix: &str) -> String {
+    format!("{}_{}", prefix, Uuid::new_v4().to_string().replace('-', "")[..8].to_string())
 }
 
+// ========================================================================
+// User Operations
+// ========================================================================
+
 #[tokio::test]
-async fn test_user_crud() -> Result<()> {
-    if should_skip_db_tests() {
-        eprintln!("Skipping DB tests - DATABASE_URL not set");
+async fn test_upsert_and_get_user() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        eprintln!("Skipping: DATABASE_URL not set");
         return Ok(());
-    }
+    };
 
-    let db = get_test_db().await.unwrap();
-
-    // Create user via GitHub
     let github_id = rand::random::<i64>().abs();
-    let username = format!("testuser_{}", github_id);
+    let login = unique_name("user");
 
     let user = db
-        .upsert_user_from_github(github_id, &username, Some("test@example.com"), None)
+        .upsert_user_from_github(github_id, &login, Some("test@example.com"), Some("https://avatar.url"))
         .await?;
 
-    assert_eq!(user.username, username);
+    assert_eq!(user.username, login);
     assert_eq!(user.github_id, Some(github_id));
+    assert_eq!(user.email, Some("test@example.com".to_string()));
 
-    // Retrieve by GitHub ID
-    let found = db.get_user_by_github_id(github_id).await?;
-    assert!(found.is_some());
-    assert_eq!(found.unwrap().id, user.id);
+    // Get by github_id
+    let found = db.get_user_by_github_id(github_id).await?.unwrap();
+    assert_eq!(found.id, user.id);
 
-    // Retrieve by username
-    let found = db.get_user_by_username(&username).await?;
-    assert!(found.is_some());
-    assert_eq!(found.unwrap().id, user.id);
+    // Get by username
+    let found = db.get_user_by_username(&login).await?.unwrap();
+    assert_eq!(found.id, user.id);
 
-    // Retrieve by ID
-    let found = db.get_user_by_id(user.id).await?;
-    assert!(found.is_some());
+    // Get by id
+    let found = db.get_user_by_id(user.id).await?.unwrap();
+    assert_eq!(found.username, login);
 
-    // Update user
+    // Upsert updates existing user
     let updated = db
-        .upsert_user_from_github(
-            github_id,
-            &username,
-            Some("new@example.com"),
-            Some("https://avatar.url"),
-        )
+        .upsert_user_from_github(github_id, &login, Some("new@example.com"), None)
         .await?;
     assert_eq!(updated.id, user.id);
-    assert_eq!(updated.avatar_url, Some("https://avatar.url".to_string()));
+    assert_eq!(updated.email, Some("new@example.com".to_string()));
 
     Ok(())
 }
 
+// ========================================================================
+// Project Operations
+// ========================================================================
+
 #[tokio::test]
-async fn test_project_crud() -> Result<()> {
-    if should_skip_db_tests() {
-        eprintln!("Skipping DB tests - DATABASE_URL not set");
+async fn test_create_and_get_project() -> Result<()> {
+    let Some(db) = get_test_db().await else {
         return Ok(());
-    }
+    };
 
-    let db = get_test_db().await.unwrap();
-
-    // Create user first
-    let github_id = rand::random::<i64>().abs();
-    let username = format!("projowner_{}", github_id);
     let user = db
-        .upsert_user_from_github(github_id, &username, None, None)
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
         .await?;
 
-    // Create project
-    let slug = format!("test-project-{}", Uuid::new_v4());
+    let slug = unique_name("proj");
     let project = db
-        .create_project(user.id, &slug, Some("A test project"), "private")
+        .create_project(user.id, &slug, Some("Test project"), "private")
         .await?;
 
     assert_eq!(project.slug, slug);
-    assert_eq!(project.owner_user_id, user.id);
+    assert_eq!(project.owner_id, user.id);
     assert_eq!(project.visibility, "private");
 
-    // Retrieve project
-    let found = db.get_project(&username, &slug).await?;
-    assert!(found.is_some());
-    assert_eq!(found.unwrap().id, project.id);
+    // Get by owner + slug
+    let found = db.get_project(&user.username, &slug).await?.unwrap();
+    assert_eq!(found.id, project.id);
+
+    // Get by id
+    let found = db.get_project_by_id(project.id).await?.unwrap();
+    assert_eq!(found.slug, slug);
 
     // List user projects
     let projects = db.list_user_projects(user.id).await?;
@@ -123,427 +118,509 @@ async fn test_project_crud() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_ref_operations() -> Result<()> {
-    if should_skip_db_tests() {
-        eprintln!("Skipping DB tests - DATABASE_URL not set");
+async fn test_get_or_create_project() -> Result<()> {
+    let Some(db) = get_test_db().await else {
         return Ok(());
-    }
-
-    let db = get_test_db().await.unwrap();
-
-    // Create user and project
-    let github_id = rand::random::<i64>().abs();
-    let username = format!("refowner_{}", github_id);
-    let user = db
-        .upsert_user_from_github(github_id, &username, None, None)
-        .await?;
-
-    let slug = format!("ref-test-{}", Uuid::new_v4());
-    let project = db.create_project(user.id, &slug, None, "public").await?;
-
-    // Create a minimal commit
-    let commit = ozzy_core::project::Commit {
-        hash: format!("{:064x}", rand::random::<u64>()),
-        parent_hashes: vec![],
-        author: "test".to_string(),
-        message: "Test commit".to_string(),
-        timestamp: chrono::Utc::now(),
-        data_sources: Default::default(),
-        transforms: Default::default(),
-        endpoints: Default::default(),
     };
 
-    let commit_id = db
-        .create_commit(
-            project.id,
-            &commit,
-            Some(user.id),
-            &std::collections::HashMap::new(),
-        )
+    let user = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
         .await?;
 
-    // Create branch ref
-    let branch = db
-        .upsert_ref(project.id, "main", "branch", commit_id)
-        .await?;
-    assert_eq!(branch.name, "main");
-    assert_eq!(branch.ref_type, "branch");
+    let slug = unique_name("proj");
 
-    // Create tag ref
-    let tag = db
-        .upsert_ref(project.id, "v1.0.0", "tag", commit_id)
-        .await?;
-    assert_eq!(tag.name, "v1.0.0");
-    assert_eq!(tag.ref_type, "tag");
-
-    // Get ref by name (should find branch first)
-    let found = db.get_ref_by_name(project.id, "main").await?;
-    assert!(found.is_some());
-    assert_eq!(found.unwrap().ref_type, "branch");
-
-    // List all refs
-    let refs = db.list_refs(project.id).await?;
-    assert!(refs.len() >= 2);
+    // First call creates
+    let p1 = db.get_or_create_project(user.id, &slug, "private").await?;
+    // Second call returns same project
+    let p2 = db.get_or_create_project(user.id, &slug, "private").await?;
+    assert_eq!(p1.id, p2.id);
 
     Ok(())
 }
 
+// ========================================================================
+// Collaborator Operations
+// ========================================================================
+
 #[tokio::test]
-async fn test_api_token_operations() -> Result<()> {
-    if should_skip_db_tests() {
-        eprintln!("Skipping DB tests - DATABASE_URL not set");
+async fn test_collaborators() -> Result<()> {
+    let Some(db) = get_test_db().await else {
         return Ok(());
-    }
+    };
 
-    let db = get_test_db().await.unwrap();
+    let owner = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("owner"), None, None)
+        .await?;
+    let collab = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("collab"), None, None)
+        .await?;
 
-    // Create user
-    let github_id = rand::random::<i64>().abs();
-    let username = format!("tokenuser_{}", github_id);
+    let project = db
+        .create_project(owner.id, &unique_name("proj"), None, "private")
+        .await?;
+
+    // Add collaborator
+    let c = db
+        .upsert_project_collaborator(project.id, collab.id, "read")
+        .await?;
+    assert_eq!(c.role, "read");
+
+    // Update role
+    let c = db
+        .upsert_project_collaborator(project.id, collab.id, "write")
+        .await?;
+    assert_eq!(c.role, "write");
+
+    // Get collaborator
+    let fetched = db
+        .get_project_collaborator(project.id, collab.id)
+        .await?
+        .unwrap();
+    assert_eq!(fetched.role, "write");
+
+    // List collaborators
+    let collabs = db.list_project_collaborators(project.id).await?;
+    assert_eq!(collabs.len(), 1);
+    assert_eq!(collabs[0].username, collab.username);
+
+    // Remove collaborator
+    let removed = db
+        .remove_project_collaborator(project.id, collab.id)
+        .await?;
+    assert!(removed);
+
+    let collabs = db.list_project_collaborators(project.id).await?;
+    assert!(collabs.is_empty());
+
+    Ok(())
+}
+
+// ========================================================================
+// API Token Operations
+// ========================================================================
+
+#[tokio::test]
+async fn test_tokens() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
     let user = db
-        .upsert_user_from_github(github_id, &username, None, None)
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
         .await?;
 
-    // Create token
-    let token_hash = format!("{:064x}", rand::random::<u64>());
+    let token_hash = format!("hash_{}", Uuid::new_v4());
+
     let token = db
-        .create_token(
-            user.id,
-            "test-token",
-            &token_hash,
-            "ozzy_abc",
-            &["read".to_string(), "write".to_string()],
-            None,
-        )
+        .create_token(user.id, "test-token", &token_hash, "account", None, None)
         .await?;
-
     assert_eq!(token.name, "test-token");
-    assert_eq!(token.scopes, vec!["read", "write"]);
+    assert_eq!(token.scope, "account");
+    assert!(token.project_id.is_none());
 
-    // Retrieve by hash
-    let found = db.get_token_by_hash(&token_hash).await?;
-    assert!(found.is_some());
-    assert_eq!(found.unwrap().id, token.id);
+    // Get by hash
+    let found = db.get_token_by_hash(&token_hash).await?.unwrap();
+    assert_eq!(found.id, token.id);
 
-    // List user tokens
+    // List tokens
     let tokens = db.list_user_tokens(user.id).await?;
     assert!(tokens.iter().any(|t| t.id == token.id));
 
     // Touch token
     db.touch_token(token.id).await?;
+    let touched = db.get_token_by_hash(&token_hash).await?.unwrap();
+    assert!(touched.last_used_at.is_some());
 
     // Delete by name
     let deleted = db.delete_token_by_name(user.id, "test-token").await?;
     assert!(deleted);
-
-    // Verify deletion
-    let found = db.get_token_by_hash(&token_hash).await?;
-    assert!(found.is_none());
+    assert!(db.get_token_by_hash(&token_hash).await?.is_none());
 
     Ok(())
 }
 
 #[tokio::test]
-async fn test_commit_with_data() -> Result<()> {
-    if should_skip_db_tests() {
-        eprintln!("Skipping DB tests - DATABASE_URL not set");
+async fn test_project_scoped_token() -> Result<()> {
+    let Some(db) = get_test_db().await else {
         return Ok(());
-    }
-
-    let db = get_test_db().await.unwrap();
-
-    // Create user and project
-    let github_id = rand::random::<i64>().abs();
-    let username = format!("commitowner_{}", github_id);
-    let user = db
-        .upsert_user_from_github(github_id, &username, None, None)
-        .await?;
-
-    let slug = format!("commit-test-{}", Uuid::new_v4());
-    let project = db.create_project(user.id, &slug, None, "public").await?;
-
-    // Create commit with data source and transform
-    let mut data_sources = std::collections::BTreeMap::new();
-    data_sources.insert(
-        "raw".to_string(),
-        ozzy_core::project::DataSource {
-            name: "raw".to_string(),
-            path: "data/raw.parquet".to_string(),
-            hash: "abc123".to_string(),
-            schema_hash: "schema123".to_string(),
-            row_count: Some(1000),
-            byte_size: Some(50000),
-        },
-    );
-
-    let mut transforms = std::collections::BTreeMap::new();
-    transforms.insert(
-        "clean".to_string(),
-        ozzy_core::project::Transform {
-            name: "clean".to_string(),
-            source_path: "transforms/clean.py".to_string(),
-            hash: "def456".to_string(),
-            source_hash: "src456".to_string(),
-            function_name: "clean_data".to_string(),
-            input_schema: None,
-            output_schema: None,
-            runtime: "python".to_string(),
-            lockfile_hash: "lock123".to_string(),
-            params_schema: Default::default(),
-            reproducible: true,
-        },
-    );
-
-    let mut endpoints = std::collections::BTreeMap::new();
-    endpoints.insert(
-        "clean_data".to_string(),
-        ozzy_core::project::Endpoint {
-            name: "clean_data".to_string(),
-            description: Some("Clean raw data".to_string()),
-            nodes: vec![],
-            edges: vec![],
-        },
-    );
-
-    let commit = ozzy_core::project::Commit {
-        hash: format!("{:064x}", rand::random::<u64>()),
-        parent_hashes: vec![],
-        author: "test@example.com".to_string(),
-        message: "Add data processing pipeline".to_string(),
-        timestamp: chrono::Utc::now(),
-        data_sources,
-        transforms,
-        endpoints,
     };
 
-    let commit_id = db
-        .create_commit(
+    let user = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .await?;
+
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+
+    let scope = format!("project:{}/{}", user.username, project.slug);
+    let token_hash = format!("hash_{}", Uuid::new_v4());
+
+    let token = db
+        .create_token(user.id, "proj-token", &token_hash, &scope, Some(project.id), None)
+        .await?;
+    assert_eq!(token.scope, scope);
+    assert_eq!(token.project_id, Some(project.id));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_session_token_upsert() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .await?;
+
+    let expires = chrono::Utc::now() + chrono::Duration::days(90);
+
+    // First upsert creates
+    db.upsert_session_token(user.id, "cli-session", "hash1", expires)
+        .await?;
+    let tokens = db.list_user_tokens(user.id).await?;
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].token_hash, "hash1");
+
+    // Second upsert updates the same token
+    db.upsert_session_token(user.id, "cli-session", "hash2", expires)
+        .await?;
+    let tokens = db.list_user_tokens(user.id).await?;
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].token_hash, "hash2");
+
+    Ok(())
+}
+
+// ========================================================================
+// Commit Operations
+// ========================================================================
+
+#[tokio::test]
+async fn test_commits() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+
+    let sha = format!("{:040x}", rand::random::<u128>());
+    let commit = db
+        .insert_commit(
             project.id,
-            &commit,
-            Some(user.id),
-            &std::collections::HashMap::new(),
+            "github",
+            &format!("{}/test-repo", user.username),
+            &sha,
+            "toml_hash_abc",
+            user.id,
+            Some("Initial commit"),
         )
         .await?;
 
-    // Verify data sources
-    let sources = db.get_data_sources(commit_id).await?;
-    assert_eq!(sources.len(), 1);
-    assert_eq!(sources[0].name, "raw");
-    assert_eq!(sources[0].content_hash, "abc123");
+    assert_eq!(commit.git_commit_sha, sha);
+    assert_eq!(commit.git_provider, "github");
+    assert_eq!(commit.message, Some("Initial commit".to_string()));
 
-    // Verify transforms
-    let transforms = db.get_transforms(commit_id).await?;
-    assert_eq!(transforms.len(), 1);
-    assert_eq!(transforms[0].name, "clean");
-    assert_eq!(transforms[0].content_hash, "def456");
+    // Get by SHA
+    let found = db.get_commit_by_sha(project.id, &sha).await?.unwrap();
+    assert_eq!(found.id, commit.id);
 
-    // Verify endpoints
-    let endpoints = db.get_endpoints(commit_id).await?;
-    assert_eq!(endpoints.len(), 1);
-    assert_eq!(endpoints[0].name, "clean_data");
-
-    // Retrieve commit by hash
-    let found = db.get_commit_by_hash(project.id, &commit.hash).await?;
-    assert!(found.is_some());
-    assert_eq!(found.unwrap().message, "Add data processing pipeline");
+    // List commits
+    let commits = db.list_commits(project.id, 10).await?;
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].id, commit.id);
 
     Ok(())
 }
 
+// ========================================================================
+// Commit State Operations
+// ========================================================================
+
 #[tokio::test]
-async fn test_list_commits_paginated() -> Result<()> {
-    if should_skip_db_tests() {
-        eprintln!("Skipping DB tests - DATABASE_URL not set");
+async fn test_commit_state() -> Result<()> {
+    let Some(db) = get_test_db().await else {
         return Ok(());
-    }
+    };
 
-    let db = get_test_db().await.unwrap();
-
-    let github_id = rand::random::<i64>().abs();
-    let username = format!("historyowner_{}", github_id);
     let user = db
-        .upsert_user_from_github(github_id, &username, None, None)
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+    let sha = format!("{:040x}", rand::random::<u128>());
+    let commit = db
+        .insert_commit(project.id, "github", "user/repo", &sha, "toml_hash", user.id, None)
         .await?;
 
-    let slug = format!("history-test-{}", Uuid::new_v4());
-    let project = db.create_project(user.id, &slug, None, "private").await?;
+    let environments = serde_json::json!({"default": {"base": "ozzydb/python:3.12", "lockfile": "uv.lock"}});
+    let transforms = serde_json::json!({"qc": {"source": "transforms/qc.py:quality_control"}});
+    let endpoints = serde_json::json!({"analysis": {"description": "Main analysis"}});
+    let project_meta = serde_json::json!({"name": "test", "owner": "user"});
 
-    let commit1 = ozzy_core::project::Commit {
-        hash: format!("{:064x}", rand::random::<u64>()),
-        parent_hashes: vec![],
-        author: "test".to_string(),
-        message: "First commit".to_string(),
-        timestamp: chrono::Utc::now(),
-        data_sources: Default::default(),
-        transforms: Default::default(),
-        endpoints: Default::default(),
-    };
-    db.create_commit(
-        project.id,
-        &commit1,
-        Some(user.id),
-        &std::collections::HashMap::new(),
-    )
-    .await?;
+    let state = db
+        .insert_commit_state(
+            commit.id,
+            "[project]\nname = \"test\"",
+            &environments,
+            &transforms,
+            &endpoints,
+            &project_meta,
+        )
+        .await?;
 
-    let commit2 = ozzy_core::project::Commit {
-        hash: format!("{:064x}", rand::random::<u64>()),
-        parent_hashes: vec![commit1.hash.clone()],
-        author: "test".to_string(),
-        message: "Second commit".to_string(),
-        timestamp: chrono::Utc::now(),
-        data_sources: Default::default(),
-        transforms: Default::default(),
-        endpoints: Default::default(),
-    };
-    db.create_commit(
-        project.id,
-        &commit2,
-        Some(user.id),
-        &std::collections::HashMap::new(),
-    )
-    .await?;
+    assert_eq!(state.commit_id, commit.id);
+    assert_eq!(state.environments, environments);
 
-    let commits = db.list_commits_paginated(project.id, 10, 0).await?;
-    assert!(!commits.is_empty());
-    assert!(commits.iter().any(|c| c.hash == commit1.hash));
-    assert!(commits.iter().any(|c| c.hash == commit2.hash));
+    // Get commit state
+    let found = db.get_commit_state(commit.id).await?.unwrap();
+    assert_eq!(found.transforms, transforms);
 
     Ok(())
 }
 
+// ========================================================================
+// Ref Operations
+// ========================================================================
+
 #[tokio::test]
-async fn test_content_deduplication() -> Result<()> {
-    if should_skip_db_tests() {
-        eprintln!("Skipping DB tests - DATABASE_URL not set");
+async fn test_refs() -> Result<()> {
+    let Some(db) = get_test_db().await else {
         return Ok(());
-    }
+    };
 
-    let db = get_test_db().await.unwrap();
-
-    let content_hash = format!("{:064x}", rand::random::<u64>());
-
-    // Initially should not exist
-    let exists = db.content_exists(&content_hash).await?;
-    assert!(!exists);
-
-    // Register content
-    db.register_content(&content_hash, "content/ab/cd/abc.parquet", "parquet", 10000)
+    let user = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+    let sha = format!("{:040x}", rand::random::<u128>());
+    let commit = db
+        .insert_commit(project.id, "github", "user/repo", &sha, "hash", user.id, None)
         .await?;
 
-    // Now should exist
-    let exists = db.content_exists(&content_hash).await?;
-    assert!(exists);
-
-    // Register again (should increment ref_count)
-    db.register_content(&content_hash, "content/ab/cd/abc.parquet", "parquet", 10000)
+    // Create a branch ref
+    let r = db
+        .upsert_ref(project.id, "main", "branch", commit.id)
         .await?;
+    assert_eq!(r.ref_name, "main");
+    assert_eq!(r.ref_type, "branch");
+
+    // Resolve ref
+    let found = db.resolve_ref(project.id, "main").await?.unwrap();
+    assert_eq!(found.commit_id, commit.id);
+
+    // List refs
+    let refs = db.list_refs(project.id).await?;
+    assert_eq!(refs.len(), 1);
+
+    // Upsert advances the ref (new commit)
+    let sha2 = format!("{:040x}", rand::random::<u128>());
+    let commit2 = db
+        .insert_commit(project.id, "github", "user/repo", &sha2, "hash2", user.id, None)
+        .await?;
+    let r2 = db
+        .upsert_ref(project.id, "main", "branch", commit2.id)
+        .await?;
+    assert_eq!(r2.commit_id, commit2.id);
+
+    // Delete ref
+    let deleted = db.delete_ref(project.id, "main").await?;
+    assert!(deleted);
+    assert!(db.resolve_ref(project.id, "main").await?.is_none());
 
     Ok(())
 }
 
+// ========================================================================
+// Data Atom Operations
+// ========================================================================
+
 #[tokio::test]
-async fn test_project_collaborator_operations() -> Result<()> {
-    if should_skip_db_tests() {
-        eprintln!("Skipping DB tests - DATABASE_URL not set");
+async fn test_data_atoms() -> Result<()> {
+    let Some(db) = get_test_db().await else {
         return Ok(());
-    }
+    };
 
-    let db = get_test_db().await.unwrap();
-
-    let owner_github_id = rand::random::<i64>().abs();
-    let owner_name = format!("collab_owner_{}", owner_github_id);
-    let owner = db
-        .upsert_user_from_github(owner_github_id, &owner_name, None, None)
+    let user = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
         .await?;
 
-    let collab_github_id = rand::random::<i64>().abs();
-    let collab_name = format!("collab_user_{}", collab_github_id);
-    let collaborator = db
-        .upsert_user_from_github(collab_github_id, &collab_name, None, None)
+    let name = unique_name("data");
+    let hash = format!("{:064x}", rand::random::<u128>());
+
+    let atom = db
+        .insert_data_atom(
+            project.id,
+            &name,
+            &hash,
+            "application/vnd.apache.parquet",
+            1024,
+            &format!("data/{}", hash),
+            user.id,
+        )
         .await?;
 
-    let slug = format!("collab-test-{}", Uuid::new_v4());
-    let project = db.create_project(owner.id, &slug, None, "private").await?;
+    assert_eq!(atom.name, name);
+    assert_eq!(atom.hash, hash);
+    assert!(!atom.yanked);
 
-    db.upsert_project_collaborator(project.id, collaborator.id, "write")
+    // Get by name
+    let found = db.get_data_atom(project.id, &name).await?.unwrap();
+    assert_eq!(found.id, atom.id);
+
+    // List atoms
+    let atoms = db.list_data_atoms(project.id).await?;
+    assert!(atoms.iter().any(|a| a.id == atom.id));
+
+    // Yank
+    let yanked = db
+        .yank_data_atom(project.id, &name, "Bad data")
         .await?;
-    let fetched = db
-        .get_project_collaborator(project.id, collaborator.id)
+    assert!(yanked);
+    let found = db.get_data_atom(project.id, &name).await?.unwrap();
+    assert!(found.yanked);
+    assert_eq!(found.yank_reason, Some("Bad data".to_string()));
+
+    Ok(())
+}
+
+// ========================================================================
+// Content Ref Operations
+// ========================================================================
+
+#[tokio::test]
+async fn test_content_refs() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let hash = format!("{:064x}", rand::random::<u128>());
+
+    // First upsert creates with ref_count=1
+    let cr = db
+        .upsert_content_ref(&hash, &format!("data/{}", hash), "application/vnd.apache.parquet", 2048)
+        .await?;
+    assert_eq!(cr.ref_count, 1);
+
+    // Second upsert increments ref_count
+    let cr = db
+        .upsert_content_ref(&hash, &format!("data/{}", hash), "application/vnd.apache.parquet", 2048)
+        .await?;
+    assert_eq!(cr.ref_count, 2);
+
+    // Get content ref
+    let found = db.get_content_ref(&hash).await?.unwrap();
+    assert_eq!(found.ref_count, 2);
+
+    Ok(())
+}
+
+// ========================================================================
+// Data Metadata Operations
+// ========================================================================
+
+#[tokio::test]
+async fn test_metadata_log() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(rand::random::<i64>().abs(), &unique_name("user"), None, None)
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+    let hash = format!("{:064x}", rand::random::<u128>());
+    let atom = db
+        .insert_data_atom(project.id, &unique_name("data"), &hash, "parquet", 100, &format!("data/{}", hash), user.id)
+        .await?;
+
+    // Append metadata entries
+    db.append_metadata(
+        atom.id,
+        "description",
+        &serde_json::json!("First description"),
+        user.id,
+    )
+    .await?;
+
+    // Brief delay to ensure different timestamps
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    db.append_metadata(
+        atom.id,
+        "description",
+        &serde_json::json!("Updated description"),
+        user.id,
+    )
+    .await?;
+
+    // Latest should be the second one
+    let latest = db
+        .get_latest_metadata(atom.id, "description")
         .await?
-        .expect("collaborator should exist");
-    assert_eq!(fetched.permission, "write");
+        .unwrap();
+    assert_eq!(latest.value, serde_json::json!("Updated description"));
 
-    let all = db.list_project_collaborators(project.id).await?;
-    assert!(all.iter().any(|c| c.user_id == collaborator.id));
-
-    let removed = db
-        .remove_project_collaborator(project.id, collaborator.id)
-        .await?;
-    assert!(removed);
-    let missing = db
-        .get_project_collaborator(project.id, collaborator.id)
-        .await?;
-    assert!(missing.is_none());
+    // History should have both, newest first
+    let history = db.get_metadata_history(atom.id, "description").await?;
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].value, serde_json::json!("Updated description"));
+    assert_eq!(history[1].value, serde_json::json!("First description"));
 
     Ok(())
 }
 
+// ========================================================================
+// GitHub Installation Operations
+// ========================================================================
+
 #[tokio::test]
-async fn test_lookup_data_schema_by_hash() -> Result<()> {
-    if should_skip_db_tests() {
-        eprintln!("Skipping DB tests - DATABASE_URL not set");
+async fn test_github_installations() -> Result<()> {
+    let Some(db) = get_test_db().await else {
         return Ok(());
-    }
-
-    let db = get_test_db().await.unwrap();
-
-    let github_id = rand::random::<i64>().abs();
-    let username = format!("schema_lookup_{}", github_id);
-    let user = db
-        .upsert_user_from_github(github_id, &username, None, None)
-        .await?;
-    let slug = format!("schema-lookup-{}", Uuid::new_v4());
-    let project = db.create_project(user.id, &slug, None, "private").await?;
-
-    let mut data_sources = std::collections::BTreeMap::new();
-    let content_hash = format!("{:064x}", rand::random::<u64>());
-    data_sources.insert(
-        "raw".to_string(),
-        ozzy_core::project::DataSource {
-            name: "raw".to_string(),
-            path: "data/raw.parquet".to_string(),
-            hash: content_hash.clone(),
-            schema_hash: "schemahash".to_string(),
-            row_count: Some(10),
-            byte_size: Some(100),
-        },
-    );
-
-    let commit = ozzy_core::project::Commit {
-        hash: format!("{:064x}", rand::random::<u64>()),
-        parent_hashes: vec![],
-        author: "test".to_string(),
-        message: "schema commit".to_string(),
-        timestamp: chrono::Utc::now(),
-        data_sources,
-        transforms: Default::default(),
-        endpoints: Default::default(),
     };
 
-    let mut schemas = std::collections::HashMap::new();
-    schemas.insert(
-        content_hash.clone(),
-        serde_json::json!({"fields": [{"name": "x", "type": "INT64"}]}),
-    );
-    db.create_commit(project.id, &commit, Some(user.id), &schemas)
-        .await?;
+    let install_id = rand::random::<i64>().abs();
+    let login = unique_name("org");
 
+    let inst = db
+        .upsert_github_installation(install_id, "Organization", &login)
+        .await?;
+    assert_eq!(inst.installation_id, install_id);
+    assert_eq!(inst.account_login, login);
+
+    // Get by login
     let found = db
-        .get_data_schema_by_hash(&content_hash)
+        .get_github_installation_by_login(&login)
         .await?
-        .expect("schema should exist");
-    assert!(found.get("fields").is_some());
+        .unwrap();
+    assert_eq!(found.installation_id, install_id);
+
+    // Upsert updates
+    let updated = db
+        .upsert_github_installation(install_id, "User", &login)
+        .await?;
+    assert_eq!(updated.account_type, "User");
+
+    // Delete
+    let deleted = db.delete_github_installation(install_id).await?;
+    assert!(deleted);
+    assert!(db.get_github_installation_by_login(&login).await?.is_none());
 
     Ok(())
 }

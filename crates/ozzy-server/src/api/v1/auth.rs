@@ -13,7 +13,7 @@ use crate::{
     AppState,
     auth::{
         github,
-        middleware::{AccountAuthUser, WriteAuthUser, can_delegate_scopes},
+        middleware::{AccountAuthUser, can_delegate_scope},
         tokens,
     },
 };
@@ -50,7 +50,7 @@ pub struct UserInfo {
 #[derive(Deserialize)]
 pub struct CreateTokenRequest {
     pub name: String,
-    pub scopes: Vec<String>,
+    pub scope: String,              // "account" | "project:{owner}/{slug}"
     pub expires_in_days: Option<u32>,
 }
 
@@ -59,7 +59,7 @@ pub struct CreateTokenResponse {
     pub token: String,
     pub id: Uuid,
     pub name: String,
-    pub scopes: Vec<String>,
+    pub scope: String,
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
@@ -68,7 +68,7 @@ pub struct CreateTokenResponse {
 pub struct TokenInfo {
     pub id: Uuid,
     pub name: String,
-    pub scopes: Vec<String>,
+    pub scope: String,
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
@@ -179,7 +179,6 @@ async fn github_poll(
 
     // Generate API token for the user
     let (plaintext_token, token_hash) = tokens::generate_api_token();
-    let token_prefix = &plaintext_token[..12.min(plaintext_token.len())];
 
     // Use different token names for web vs CLI so they don't invalidate each other
     let token_name = match req.client.as_deref() {
@@ -187,32 +186,13 @@ async fn github_poll(
         _ => "cli-session",
     };
 
-    // Upsert the session token atomically to avoid race conditions
-    // from concurrent login attempts. INSERT ... ON CONFLICT is safe under
-    // PostgreSQL READ COMMITTED unlike DELETE + INSERT in a transaction.
-    {
-        let token_id = uuid::Uuid::new_v4();
-        let expires = chrono::Utc::now() + chrono::Duration::days(90);
-        sqlx::query(
-            r#"INSERT INTO api_tokens (id, user_id, name, token_hash, token_prefix, scopes, expires_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)
-               ON CONFLICT (user_id, name) DO UPDATE SET
-                   token_hash = EXCLUDED.token_hash,
-                   token_prefix = EXCLUDED.token_prefix,
-                   scopes = EXCLUDED.scopes,
-                   expires_at = EXCLUDED.expires_at"#,
-        )
-        .bind(token_id)
-        .bind(user.id)
-        .bind(token_name)
-        .bind(&token_hash)
-        .bind(token_prefix)
-        .bind(&vec!["owner".to_string()])
-        .bind(expires)
-        .execute(state.db.pool())
+    // Upsert the session token atomically
+    let expires = chrono::Utc::now() + chrono::Duration::days(90);
+    state
+        .db
+        .upsert_session_token(user.id, token_name, &token_hash, expires)
         .await
         .map_err(anyhow::Error::from)?;
-    }
 
     Ok(Json(AuthResponse {
         access_token: Some(plaintext_token),
@@ -229,21 +209,39 @@ async fn github_poll(
 
 /// Create a new API token.
 async fn create_token(
-    WriteAuthUser { user, scopes }: WriteAuthUser,
+    AccountAuthUser { user, scope }: AccountAuthUser,
     State(state): State<AppState>,
     Json(req): Json<CreateTokenRequest>,
 ) -> Result<Json<CreateTokenResponse>, ApiError> {
-    if req.scopes.is_empty() {
-        return Err(ApiError::bad_request("At least one scope is required"));
+    // Validate scope format
+    if req.scope != "account" && !req.scope.starts_with("project:") {
+        return Err(ApiError::bad_request(
+            "Scope must be \"account\" or \"project:{owner}/{slug}\"",
+        ));
     }
-    if !can_delegate_scopes(&scopes, &req.scopes) {
+    if !can_delegate_scope(&scope, &req.scope) {
         return Err(ApiError::forbidden(
-            "Cannot grant scopes you do not already have",
+            "Cannot grant a scope you do not already have",
         ));
     }
 
     let (plaintext_token, token_hash) = tokens::generate_api_token();
-    let token_prefix = &plaintext_token[..12.min(plaintext_token.len())];
+
+    // Resolve project_id for project-scoped tokens
+    let project_id = if let Some(target) = req.scope.strip_prefix("project:") {
+        if let Some((owner, slug)) = target.split_once('/') {
+            let project = state
+                .db
+                .get_project(owner, slug)
+                .await?
+                .ok_or_else(|| ApiError::not_found(format!("Project {}", target)))?;
+            Some(project.id)
+        } else {
+            return Err(ApiError::bad_request("Project scope must be \"project:{owner}/{slug}\""));
+        }
+    } else {
+        None
+    };
 
     let expires_at = req
         .expires_in_days
@@ -251,21 +249,14 @@ async fn create_token(
 
     let token = state
         .db
-        .create_token(
-            user.id,
-            &req.name,
-            &token_hash,
-            token_prefix,
-            &req.scopes,
-            expires_at,
-        )
+        .create_token(user.id, &req.name, &token_hash, &req.scope, project_id, expires_at)
         .await?;
 
     Ok(Json(CreateTokenResponse {
         token: plaintext_token,
         id: token.id,
         name: token.name,
-        scopes: token.scopes,
+        scope: token.scope,
         expires_at: token.expires_at,
         created_at: token.created_at,
     }))
@@ -284,7 +275,7 @@ async fn list_tokens(
         .map(|t| TokenInfo {
             id: t.id,
             name: t.name,
-            scopes: t.scopes,
+            scope: t.scope,
             created_at: t.created_at,
             expires_at: t.expires_at,
             last_used_at: t.last_used_at,

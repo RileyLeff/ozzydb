@@ -1,30 +1,34 @@
-//! Shared access control helpers for API endpoints.
+//! Shared access control helpers for v2 API endpoints.
+//!
+//! v2 scope model: tokens have a single `scope` field ("account" or "project:{owner}/{slug}").
+//! Project access is determined by: owner, collaborator role, or public visibility.
 
 use super::auth::ApiError;
 use crate::{
     AppState,
-    auth::middleware::{MaybeAuthUser, ScopeAction, has_project_scope},
+    auth::middleware::{scope_grants_project_access, MaybeAuthUser},
     db::Project,
 };
 
-/// Check if a collaborator permission level satisfies the required action.
-pub fn collaborator_allows(permission: &str, need: ScopeAction) -> bool {
+/// Check if a collaborator role satisfies a required access level.
+pub fn role_allows(role: &str, need: &str) -> bool {
     match need {
-        ScopeAction::Read => matches!(permission, "read" | "write" | "admin"),
-        ScopeAction::Write => matches!(permission, "write" | "admin"),
-        ScopeAction::Admin => permission == "admin",
-        ScopeAction::Owner => false,
+        "read" => matches!(role, "read" | "write" | "admin"),
+        "write" => matches!(role, "write" | "admin"),
+        "admin" => role == "admin",
+        _ => false,
     }
 }
 
-/// Check if a user has a given permission level on a project (owner or collaborator).
-pub async fn user_has_project_permission(
+/// Check if a user has a given access level on a project (owner or collaborator).
+pub async fn user_has_project_access(
     state: &AppState,
     project: &Project,
     user_id: uuid::Uuid,
-    need: ScopeAction,
+    need: &str,
 ) -> Result<bool, ApiError> {
-    if user_id == project.owner_user_id {
+    // Owner has all access
+    if user_id == project.owner_id {
         return Ok(true);
     }
     let collaborator = state
@@ -33,7 +37,7 @@ pub async fn user_has_project_permission(
         .await?;
     Ok(collaborator
         .as_ref()
-        .map(|c| collaborator_allows(&c.permission, need))
+        .map(|c| role_allows(&c.role, need))
         .unwrap_or(false))
 }
 
@@ -42,7 +46,7 @@ pub async fn enforce_read_access(
     state: &AppState,
     project: &Project,
     owner: &str,
-    project_slug: &str,
+    slug: &str,
     auth: &MaybeAuthUser,
 ) -> Result<(), ApiError> {
     if project.visibility == "public" {
@@ -50,38 +54,39 @@ pub async fn enforce_read_access(
     }
 
     let user = auth.user.as_ref().ok_or_else(|| {
-        ApiError::unauthorized("Authentication required for private/org projects")
+        ApiError::unauthorized("Authentication required for private projects")
     })?;
 
-    if !has_project_scope(&auth.scopes, ScopeAction::Read, owner, project_slug) {
+    let scope = auth.scope.as_deref().unwrap_or("");
+    if !scope_grants_project_access(scope, owner, slug) {
         return Err(ApiError::forbidden(
-            "Token lacks read scope for this project",
+            "Token does not have access to this project",
         ));
     }
 
-    if user_has_project_permission(state, project, user.id, ScopeAction::Read).await? {
+    if user_has_project_access(state, project, user.id, "read").await? {
         Ok(())
     } else {
         Err(ApiError::forbidden("You don't have access to this project"))
     }
 }
 
-/// Enforce write access on a project: requires auth + write scope + write permission.
+/// Enforce write access on a project: requires auth + scope + write permission.
 pub async fn enforce_write_access(
     state: &AppState,
     project: &Project,
     owner: &str,
-    project_slug: &str,
+    slug: &str,
     user: &crate::db::User,
-    scopes: &[String],
+    scope: &str,
 ) -> Result<(), ApiError> {
-    if !has_project_scope(scopes, ScopeAction::Write, owner, project_slug) {
+    if !scope_grants_project_access(scope, owner, slug) {
         return Err(ApiError::forbidden(
-            "Token lacks write scope for this project",
+            "Token does not have access to this project",
         ));
     }
 
-    if user_has_project_permission(state, project, user.id, ScopeAction::Write).await? {
+    if user_has_project_access(state, project, user.id, "write").await? {
         Ok(())
     } else {
         Err(ApiError::forbidden(

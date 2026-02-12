@@ -1,4 +1,8 @@
 //! Authentication middleware for extracting user from requests.
+//!
+//! v2 scope model: each token has a single `scope` field:
+//! - "account" — full account access (all projects)
+//! - "project:{owner}/{slug}" — scoped to a specific project
 
 use axum::{
     Json,
@@ -17,178 +21,54 @@ use ozzy_core::hash::blake3_hash;
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub user: User,
-    pub scopes: Vec<String>,
+    pub scope: String,
 }
 
-/// Authenticated user with write scope required.
-#[derive(Debug, Clone)]
-pub struct WriteAuthUser {
-    pub user: User,
-    pub scopes: Vec<String>,
-}
-
-/// Authenticated user with unscoped read (for account-wide endpoints like /auth/me, /auth/token).
-/// Rejects project-scoped tokens (e.g. "read:alice/project1") since those should not
-/// grant access to account management operations.
+/// Authenticated user with account-level scope.
+/// Rejects project-scoped tokens — used for /auth/me, /auth/token, etc.
 #[derive(Debug, Clone)]
 pub struct AccountAuthUser {
     pub user: User,
-    pub scopes: Vec<String>,
+    pub scope: String,
 }
 
 /// Optional authenticated user (for public endpoints).
 #[derive(Debug, Clone)]
 pub struct MaybeAuthUser {
     pub user: Option<User>,
-    pub scopes: Vec<String>,
+    pub scope: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ScopeAction {
-    Read,
-    Write,
-    Admin,
-    Owner,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedScope {
-    action: ScopeAction,
-    owner: Option<String>,
-    project: Option<String>,
-}
-
-fn parse_scope_action(raw: &str) -> Option<ScopeAction> {
-    match raw {
-        "read" => Some(ScopeAction::Read),
-        "write" => Some(ScopeAction::Write),
-        "admin" => Some(ScopeAction::Admin),
-        "owner" => Some(ScopeAction::Owner),
-        _ => None,
+/// Check if a scope grants access to a specific project.
+pub fn scope_grants_project_access(scope: &str, owner: &str, slug: &str) -> bool {
+    if scope == "account" {
+        return true;
     }
-}
-
-fn parse_scope(raw_scope: &str) -> Option<ParsedScope> {
-    let (action_raw, target) = match raw_scope.split_once(':') {
-        Some((a, t)) => (a, Some(t)),
-        None => (raw_scope, None),
-    };
-
-    let action = parse_scope_action(action_raw)?;
-
-    if let Some(target) = target {
-        let mut parts = target.split('/');
-        let owner = parts.next()?.trim();
-        let project = parts.next()?.trim();
-        if owner.is_empty() || project.is_empty() || parts.next().is_some() {
-            return None;
-        }
-        Some(ParsedScope {
-            action,
-            owner: Some(owner.to_string()),
-            project: Some(project.to_string()),
-        })
-    } else {
-        Some(ParsedScope {
-            action,
-            owner: None,
-            project: None,
-        })
+    if let Some(target) = scope.strip_prefix("project:") {
+        let expected = format!("{}/{}", owner, slug);
+        return target == expected;
     }
+    false
 }
 
-fn action_implies(have: ScopeAction, need: ScopeAction) -> bool {
-    have >= need
+/// Check if a scope is account-level (not project-scoped).
+pub fn is_account_scope(scope: &str) -> bool {
+    scope == "account"
 }
 
-fn scope_matches_project(parsed: &ParsedScope, owner: &str, project: &str) -> bool {
-    fn matches_pattern(pattern: &str, value: &str) -> bool {
-        pattern == "*" || pattern == value
+/// Check if the granter scope can delegate to create a token with the requested scope.
+pub fn can_delegate_scope(granter: &str, requested: &str) -> bool {
+    if granter == "account" {
+        // Account scope can delegate anything
+        return true;
     }
-
-    match (&parsed.owner, &parsed.project) {
-        (None, None) => true,
-        (Some(scope_owner), Some(scope_project)) => {
-            matches_pattern(scope_owner, owner) && matches_pattern(scope_project, project)
-        }
-        _ => false,
+    if let (Some(granter_target), Some(requested_target)) =
+        (granter.strip_prefix("project:"), requested.strip_prefix("project:"))
+    {
+        // Project scope can only delegate to the same project
+        return granter_target == requested_target;
     }
-}
-
-fn pattern_covers(granter: &str, requested: &str) -> bool {
-    match (granter, requested) {
-        ("*", _) => true,
-        (_, "*") => granter == "*",
-        (g, r) => g == r,
-    }
-}
-
-fn target_covers(granter: &ParsedScope, requested: &ParsedScope) -> bool {
-    match (
-        &granter.owner,
-        &granter.project,
-        &requested.owner,
-        &requested.project,
-    ) {
-        (None, None, _, _) => true,
-        (Some(go), Some(gp), Some(ro), Some(rp)) => {
-            pattern_covers(go, ro) && pattern_covers(gp, rp)
-        }
-        _ => false,
-    }
-}
-
-pub fn has_any_scope(scopes: &[String], need: ScopeAction) -> bool {
-    scopes.iter().any(|scope| {
-        parse_scope(scope)
-            .map(|parsed| action_implies(parsed.action, need))
-            .unwrap_or(false)
-    })
-}
-
-/// Check whether the token has an unscoped (account-wide) scope at the given level.
-/// Project-scoped tokens like "read:alice/project1" do NOT satisfy this check.
-pub fn has_unscoped_scope(scopes: &[String], need: ScopeAction) -> bool {
-    scopes.iter().any(|scope| {
-        parse_scope(scope)
-            .map(|parsed| {
-                action_implies(parsed.action, need)
-                    && parsed.owner.is_none()
-                    && parsed.project.is_none()
-            })
-            .unwrap_or(false)
-    })
-}
-
-pub fn has_project_scope(scopes: &[String], need: ScopeAction, owner: &str, project: &str) -> bool {
-    scopes.iter().any(|scope| {
-        parse_scope(scope)
-            .map(|parsed| {
-                action_implies(parsed.action, need)
-                    && scope_matches_project(&parsed, owner, project)
-            })
-            .unwrap_or(false)
-    })
-}
-
-pub fn can_delegate_scopes(granter_scopes: &[String], requested_scopes: &[String]) -> bool {
-    requested_scopes.iter().all(|requested| {
-        let Some(requested_parsed) = parse_scope(requested) else {
-            return false;
-        };
-
-        granter_scopes.iter().any(|granter| {
-            let Some(granter_parsed) = parse_scope(granter) else {
-                return false;
-            };
-
-            if !action_implies(granter_parsed.action, requested_parsed.action) {
-                return false;
-            }
-
-            target_covers(&granter_parsed, &requested_parsed)
-        })
-    })
+    false
 }
 
 impl FromRequestParts<AppState> for AuthUser {
@@ -200,29 +80,8 @@ impl FromRequestParts<AppState> for AuthUser {
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         async move {
             let token = extract_token(parts)?;
-            let (user, scopes) = validate_token_with_scopes(&state.db, &token).await?;
-            if !has_any_scope(&scopes, ScopeAction::Read) {
-                return Err(AuthError::InsufficientScope);
-            }
-            Ok(AuthUser { user, scopes })
-        }
-    }
-}
-
-impl FromRequestParts<AppState> for WriteAuthUser {
-    type Rejection = AuthError;
-
-    fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        async move {
-            let token = extract_token(parts)?;
-            let (user, scopes) = validate_token_with_scopes(&state.db, &token).await?;
-            if !has_any_scope(&scopes, ScopeAction::Write) {
-                return Err(AuthError::InsufficientScope);
-            }
-            Ok(WriteAuthUser { user, scopes })
+            let (user, scope) = validate_token(&state.db, &token).await?;
+            Ok(AuthUser { user, scope })
         }
     }
 }
@@ -236,11 +95,11 @@ impl FromRequestParts<AppState> for AccountAuthUser {
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         async move {
             let token = extract_token(parts)?;
-            let (user, scopes) = validate_token_with_scopes(&state.db, &token).await?;
-            if !has_unscoped_scope(&scopes, ScopeAction::Read) {
+            let (user, scope) = validate_token(&state.db, &token).await?;
+            if !is_account_scope(&scope) {
                 return Err(AuthError::InsufficientScope);
             }
-            Ok(AccountAuthUser { user, scopes })
+            Ok(AccountAuthUser { user, scope })
         }
     }
 }
@@ -254,25 +113,19 @@ impl FromRequestParts<AppState> for MaybeAuthUser {
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         async move {
             match extract_token(parts) {
-                Ok(token) => match validate_token_with_scopes(&state.db, &token).await {
-                    Ok((user, scopes)) if has_any_scope(&scopes, ScopeAction::Read) => {
-                        Ok(MaybeAuthUser {
-                            user: Some(user),
-                            scopes,
-                        })
-                    }
+                Ok(token) => match validate_token(&state.db, &token).await {
+                    Ok((user, scope)) => Ok(MaybeAuthUser {
+                        user: Some(user),
+                        scope: Some(scope),
+                    }),
                     Err(_) => Ok(MaybeAuthUser {
                         user: None,
-                        scopes: vec![],
-                    }),
-                    _ => Ok(MaybeAuthUser {
-                        user: None,
-                        scopes: vec![],
+                        scope: None,
                     }),
                 },
                 Err(_) => Ok(MaybeAuthUser {
                     user: None,
-                    scopes: vec![],
+                    scope: None,
                 }),
             }
         }
@@ -297,51 +150,45 @@ fn extract_token(parts: &Parts) -> Result<String, AuthError> {
 /// Minimum interval between token touch updates (5 minutes).
 const TOKEN_TOUCH_INTERVAL_SECS: i64 = 300;
 
-async fn validate_token_with_scopes(
+async fn validate_token(
     db: &Database,
     token: &str,
-) -> Result<(User, Vec<String>), AuthError> {
-    // Hash the token to look it up
+) -> Result<(User, String), AuthError> {
     let token_hash = blake3_hash(token.as_bytes());
 
-    // Look up the token
     let api_token = db
         .get_token_by_hash(&token_hash)
         .await
         .map_err(|_| AuthError::ServerError)?
         .ok_or(AuthError::InvalidToken)?;
 
-    // Check expiration
     if let Some(expires_at) = api_token.expires_at {
         if expires_at < Utc::now() {
             return Err(AuthError::TokenExpired);
         }
     }
 
-    // Update last_used_at only if it's been more than 5 minutes since last update.
-    // This reduces DB writes while still tracking token usage accurately enough.
     let should_touch = match api_token.last_used_at {
         Some(last_used) => {
             let elapsed = Utc::now().signed_duration_since(last_used);
             elapsed.num_seconds() > TOKEN_TOUCH_INTERVAL_SECS
         }
-        None => true, // Never used before, touch it
+        None => true,
     };
 
     if should_touch {
         let _ = db.touch_token(api_token.id).await;
     }
 
-    let scopes = api_token.scopes.clone();
+    let scope = api_token.scope.clone();
 
-    // Get the user
     let user = db
         .get_user_by_id(api_token.user_id)
         .await
         .map_err(|_| AuthError::ServerError)?
         .ok_or(AuthError::InvalidToken)?;
 
-    Ok((user, scopes))
+    Ok((user, scope))
 }
 
 /// Authentication error types.
@@ -390,102 +237,60 @@ impl IntoResponse for AuthError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScopeAction, can_delegate_scopes, has_any_scope, has_project_scope, has_unscoped_scope};
+    use super::*;
 
     #[test]
-    fn read_scope_accepts_read_and_write() {
-        assert!(has_any_scope(&["read".to_string()], ScopeAction::Read));
-        assert!(has_any_scope(&["write".to_string()], ScopeAction::Read));
+    fn account_scope_grants_all_project_access() {
+        assert!(scope_grants_project_access("account", "alice", "sapflux"));
+        assert!(scope_grants_project_access("account", "bob", "anything"));
     }
 
     #[test]
-    fn read_scope_rejects_missing_scope() {
-        assert!(!has_any_scope(&[], ScopeAction::Read));
-        assert!(has_any_scope(&["admin".to_string()], ScopeAction::Read));
-    }
-
-    #[test]
-    fn project_scope_matches_exact_target() {
-        let scopes = vec!["read:alice/sapflux".to_string()];
-        assert!(has_project_scope(
-            &scopes,
-            ScopeAction::Read,
+    fn project_scope_grants_matching_project() {
+        assert!(scope_grants_project_access(
+            "project:alice/sapflux",
             "alice",
             "sapflux"
         ));
-        assert!(!has_project_scope(
-            &scopes,
-            ScopeAction::Read,
+    }
+
+    #[test]
+    fn project_scope_rejects_different_project() {
+        assert!(!scope_grants_project_access(
+            "project:alice/sapflux",
             "alice",
             "other"
         ));
-    }
-
-    #[test]
-    fn delegation_prevents_scope_escalation() {
-        let granter = vec!["read:alice/sapflux".to_string()];
-        assert!(can_delegate_scopes(
-            &granter,
-            &["read:alice/sapflux".to_string()]
-        ));
-        assert!(!can_delegate_scopes(
-            &granter,
-            &["write:alice/sapflux".to_string()]
-        ));
-        assert!(!can_delegate_scopes(
-            &granter,
-            &["read:alice/other".to_string()]
-        ));
-    }
-
-    #[test]
-    fn wildcard_project_scope_matches() {
-        let scopes = vec!["read:alice/*".to_string()];
-        assert!(has_project_scope(
-            &scopes,
-            ScopeAction::Read,
-            "alice",
-            "sapflux"
-        ));
-        assert!(!has_project_scope(
-            &scopes,
-            ScopeAction::Read,
+        assert!(!scope_grants_project_access(
+            "project:alice/sapflux",
             "bob",
             "sapflux"
         ));
     }
 
     #[test]
-    fn unscoped_scope_rejects_project_scoped_tokens() {
-        // Project-scoped tokens should NOT satisfy unscoped check
-        assert!(!has_unscoped_scope(
-            &["read:alice/sapflux".to_string()],
-            ScopeAction::Read
-        ));
-        assert!(!has_unscoped_scope(
-            &["write:alice/*".to_string()],
-            ScopeAction::Read
-        ));
-        // Unscoped tokens SHOULD satisfy unscoped check
-        assert!(has_unscoped_scope(
-            &["read".to_string()],
-            ScopeAction::Read
-        ));
-        assert!(has_unscoped_scope(
-            &["owner".to_string()],
-            ScopeAction::Read
-        ));
-        // Empty scopes should not satisfy
-        assert!(!has_unscoped_scope(&[], ScopeAction::Read));
+    fn is_account_scope_works() {
+        assert!(is_account_scope("account"));
+        assert!(!is_account_scope("project:alice/sapflux"));
+        assert!(!is_account_scope(""));
     }
 
     #[test]
-    fn wildcard_delegation_respects_coverage() {
-        let granter = vec!["write:alice/*".to_string()];
-        assert!(can_delegate_scopes(
-            &granter,
-            &["read:alice/sapflux".to_string()]
+    fn account_can_delegate_anything() {
+        assert!(can_delegate_scope("account", "account"));
+        assert!(can_delegate_scope("account", "project:alice/sapflux"));
+    }
+
+    #[test]
+    fn project_scope_delegates_only_same_project() {
+        assert!(can_delegate_scope(
+            "project:alice/sapflux",
+            "project:alice/sapflux"
         ));
-        assert!(!can_delegate_scopes(&granter, &["write:*/*".to_string()]));
+        assert!(!can_delegate_scope(
+            "project:alice/sapflux",
+            "project:alice/other"
+        ));
+        assert!(!can_delegate_scope("project:alice/sapflux", "account"));
     }
 }
