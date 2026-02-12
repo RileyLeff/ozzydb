@@ -91,6 +91,13 @@ base64 = "0.22"
 # Cryptography
 aes-gcm = "0.10"
 
+# JWT signing (GitHub App)
+jsonwebtoken = "9"
+
+# HMAC (webhook verification)
+hmac = "0.12"
+sha2 = "0.10"
+
 # Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

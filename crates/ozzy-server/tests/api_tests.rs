@@ -41,13 +41,17 @@ async fn build_test_app() -> Option<Router> {
         cors_origins: "*".to_string(),
         allowed_logins: vec![],
         secrets_encryption_key: None,
+        github_app: None,
     };
 
     let storage = ContentStorage::from_config(&config).ok()?;
+    let db = Database::new(pool);
+    let git = ozzy_server::GitHubProvider::new(None, db.clone());
     let state = AppState {
         config: Arc::new(config),
-        db: Database::new(pool),
+        db,
         storage,
+        git,
     };
 
     let app = Router::new().merge(api::router()).with_state(state);

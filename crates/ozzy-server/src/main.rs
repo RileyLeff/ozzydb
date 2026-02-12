@@ -6,7 +6,9 @@ use anyhow::Result;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, Method};
-use ozzy_server::{AppState, api, config::Config, db::Database, storage::ContentStorage};
+use ozzy_server::{
+    AppState, api, config::Config, db::Database, git, git::GitHubProvider, storage::ContentStorage,
+};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -57,11 +59,27 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Initialize git provider
+    let db = Database::new(pool);
+    let git_app_config = config.github_app.as_ref().map(|app| {
+        tracing::info!("GitHub App configured (ID: {})", app.app_id);
+        git::github::GitHubAppConfig {
+            app_id: app.app_id,
+            private_key: app.private_key.clone(),
+            webhook_secret: app.webhook_secret.clone(),
+        }
+    });
+    if git_app_config.is_none() {
+        tracing::info!("GitHub App not configured — only public repos accessible");
+    }
+    let git = GitHubProvider::new(git_app_config, db.clone());
+
     // Build application state
     let state = AppState {
         config: Arc::new(config.clone()),
-        db: Database::new(pool),
+        db,
         storage,
+        git,
     };
 
     // Build router

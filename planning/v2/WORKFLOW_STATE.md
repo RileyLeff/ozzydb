@@ -1,8 +1,8 @@
 # v2 Workflow State
 
-**Current Phase:** 2 — Data Plane (COMPLETE, running exhaustive review)
-**Current Step:** Phase 2 exhaustive review
-**Status:** All server-side API endpoints implemented and tested
+**Current Phase:** 3 — Git Integration & Push
+**Current Step:** 3.1 — GitHub App integration
+**Status:** Phase 2 exhaustive review complete (6 rounds, 2 consecutive clean). Starting Phase 3.
 
 ## Progress
 
@@ -15,7 +15,7 @@
 | 2 | 2.1 | Data upload API + CLI | Done (server) |
 | 2 | 2.2 | Collections API + CLI | Done (server) |
 | 2 | 2.3 | Secrets API + CLI | Done (server) |
-| 3 | 3.1 | GitHub App integration | Pending |
+| 3 | 3.1 | GitHub App integration | In Progress |
 | 3 | 3.2 | Push endpoint | Pending |
 | 3 | 3.3 | Endpoint inspection + project API | Pending |
 | 3 | 3.4 | CLI init + transform scaffold | Pending |
@@ -51,4 +51,5 @@ None.
   - AES-256-GCM encryption, values write-only
   - Config: SECRETS_ENCRYPTION_KEY env var
   - 3 Docker integration tests + 3 unit tests
-- **Phase 2 server-side complete.** Running exhaustive review.
+- **Phase 2 server-side complete.** Exhaustive review passed (6 rounds, 2 clean).
+- Phase 3 starting: Git Integration & Push

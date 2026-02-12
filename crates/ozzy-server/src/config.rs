@@ -24,7 +24,9 @@ fn parse_hex_key(var_name: &str, expected_bytes: usize) -> Result<Option<Vec<u8>
         .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16))
         .collect();
 
-    Ok(Some(bytes.map_err(|e| anyhow::anyhow!("{} contains invalid hex: {}", var_name, e))?))
+    Ok(Some(bytes.map_err(|e| {
+        anyhow::anyhow!("{} contains invalid hex: {}", var_name, e)
+    })?))
 }
 
 /// Server configuration.
@@ -68,6 +70,21 @@ pub struct Config {
     /// AES-256-GCM key for encrypting project secrets (hex-encoded, 32 bytes = 64 hex chars).
     /// Required for the secrets API. Set via SECRETS_ENCRYPTION_KEY env var.
     pub secrets_encryption_key: Option<Vec<u8>>,
+
+    /// GitHub App configuration (optional). When set, enables private repo access
+    /// via GitHub App installation tokens. Without this, only public repos are accessible.
+    pub github_app: Option<GitHubAppConfig>,
+}
+
+/// GitHub App configuration for repository access.
+#[derive(Debug, Clone)]
+pub struct GitHubAppConfig {
+    /// GitHub App ID
+    pub app_id: u64,
+    /// PEM-encoded RSA private key for JWT signing
+    pub private_key: String,
+    /// Webhook secret for verifying GitHub webhook payloads (optional)
+    pub webhook_secret: Option<String>,
 }
 
 /// R2/S3 storage configuration.
@@ -120,6 +137,31 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect(),
             secrets_encryption_key: parse_hex_key("SECRETS_ENCRYPTION_KEY", 32)?,
+            github_app: GitHubAppConfig::from_env_optional(),
+        })
+    }
+}
+
+impl GitHubAppConfig {
+    /// Load optional GitHub App configuration from environment variables.
+    /// Returns None when GITHUB_APP_ID or GITHUB_APP_PRIVATE_KEY is not set.
+    pub fn from_env_optional() -> Option<Self> {
+        let app_id: u64 = std::env::var("GITHUB_APP_ID")
+            .ok()
+            .filter(|s| !s.is_empty())?
+            .parse()
+            .ok()?;
+        let private_key = std::env::var("GITHUB_APP_PRIVATE_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())?;
+        let webhook_secret = std::env::var("GITHUB_WEBHOOK_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        Some(Self {
+            app_id,
+            private_key,
+            webhook_secret,
         })
     }
 }
@@ -143,10 +185,16 @@ impl R2Config {
     /// Load optional R2 configuration.
     /// Returns None when required R2 credentials are not all present (or empty).
     pub fn from_env_optional() -> Option<Self> {
-        let endpoint = std::env::var("R2_ENDPOINT").ok().filter(|s| !s.is_empty())?;
+        let endpoint = std::env::var("R2_ENDPOINT")
+            .ok()
+            .filter(|s| !s.is_empty())?;
         let bucket = std::env::var("R2_BUCKET").ok().filter(|s| !s.is_empty())?;
-        let access_key_id = std::env::var("R2_ACCESS_KEY_ID").ok().filter(|s| !s.is_empty())?;
-        let secret_access_key = std::env::var("R2_SECRET_ACCESS_KEY").ok().filter(|s| !s.is_empty())?;
+        let access_key_id = std::env::var("R2_ACCESS_KEY_ID")
+            .ok()
+            .filter(|s| !s.is_empty())?;
+        let secret_access_key = std::env::var("R2_SECRET_ACCESS_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())?;
 
         Some(Self {
             endpoint,
