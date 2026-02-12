@@ -1,17 +1,17 @@
 # v2 Workflow State
 
-**Current Phase:** 1 — Foundation
-**Current Step:** 1.2 — Build ozzy.toml parser (toml_spec.rs)
-**Status:** Starting
+**Current Phase:** 1 — Foundation (COMPLETE)
+**Current Step:** Moving to Phase 2
+**Status:** Phase 1 review pending
 
 ## Progress
 
 | Phase | Step | Description | Status |
 |-------|------|-------------|--------|
 | 1 | 1.1 | Replace Postgres schema with v2 DDL | Done |
-| 1 | 1.2 | Build ozzy.toml parser (toml_spec.rs) | Starting |
-| 1 | 1.3 | Update core hash functions | Pending |
-| 1 | 1.4 | Update server AppState and DB layer | Pending |
+| 1 | 1.2 | Build ozzy.toml parser (toml_spec.rs) | Done |
+| 1 | 1.3 | Update core hash functions | Done |
+| 1 | 1.4 | Update server AppState and DB layer | Done |
 | 2 | 2.1 | Data upload API + CLI | Pending |
 | 2 | 2.2 | Collections API + CLI | Pending |
 | 2 | 2.3 | Secrets API + CLI | Pending |
@@ -42,4 +42,17 @@ None.
   - Simplified auth middleware for singular scope model
   - 14 DB tests, 5 API tests, all passing
   - Server integration/e2e tests gutted (will be rewritten with v2 endpoints)
-- Moving to Step 1.2: ozzy.toml parser
+- Step 1.2 complete (4bcb31f): ozzy.toml parser
+  - toml_spec.rs: all v2 structs, 11 validation rules, DAG cycle detection
+  - 27 tests covering parsing, roundtrip, all validation rules
+- Step 1.3 complete (c1d295a): hash functions updated
+  - transform_hash: added environment_image_hash parameter
+  - secrets_hash: new function for sorted (name, version_id) pairs
+  - materialized_hash: unified multi-input API with optional secrets_hash
+  - collection_hash: new function for sorted member hashes
+  - 20 tests including golden values
+- Step 1.4 complete (d4133ab): remaining DB queries + tests
+  - Project update/delete, collection CRUD + versioning
+  - Endpoint yanks, secrets, environment images, source/materialized cache
+  - 7 new DB tests (21 total), all passing
+- **Phase 1 complete.** Running review before Phase 2.
