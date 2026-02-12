@@ -601,14 +601,24 @@ impl Database {
     }
 
     pub async fn yank_data_atom(&self, project_id: Uuid, name: &str, reason: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+
+        // Advisory lock to serialize with collection add/remove operations
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await?;
+
         let result = sqlx::query(
             "UPDATE data_atoms SET yanked = true, yank_reason = $3, yanked_at = now() WHERE project_id = $1 AND name = $2",
         )
         .bind(project_id)
         .bind(name)
         .bind(reason)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        tx.commit().await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -877,14 +887,24 @@ impl Database {
         name: &str,
         reason: &str,
     ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+
+        // Advisory lock to serialize with collection add/remove operations
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await?;
+
         let result = sqlx::query(
             "UPDATE collections SET yanked = true, yank_reason = $3, yanked_at = now() WHERE project_id = $1 AND name = $2",
         )
         .bind(project_id)
         .bind(name)
         .bind(reason)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        tx.commit().await?;
         Ok(result.rows_affected() > 0)
     }
 

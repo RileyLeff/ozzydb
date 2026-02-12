@@ -50,6 +50,14 @@ struct EnvironmentStatus {
     status: String,
 }
 
+/// Validate a name (alphanumeric, underscores, dashes only).
+fn is_valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Validate a git commit SHA (40 lowercase hex chars).
 fn is_valid_sha(sha: &str) -> bool {
     sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit())
@@ -73,6 +81,13 @@ async fn push(
     let (owner, slug) = req.project.split_once('/').ok_or_else(|| {
         ApiError::BadRequest("'project' must be in 'owner/slug' format".to_string())
     })?;
+
+    // Validate owner and slug: alphanumeric, underscores, dashes only
+    if !is_valid_name(owner) || !is_valid_name(slug) {
+        return Err(ApiError::BadRequest(
+            "Owner and slug must be non-empty and contain only alphanumeric characters, underscores, or dashes".to_string(),
+        ));
+    }
 
     if !is_valid_sha(&req.git_commit_sha) {
         return Err(ApiError::BadRequest(
@@ -356,5 +371,16 @@ mod tests {
         assert!(!is_valid_sha("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2xx")); // too long
         assert!(!is_valid_sha("g1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")); // invalid hex
         assert!(!is_valid_sha("")); // empty
+    }
+
+    #[test]
+    fn test_is_valid_name() {
+        assert!(is_valid_name("my-project"));
+        assert!(is_valid_name("my_project"));
+        assert!(is_valid_name("project123"));
+        assert!(!is_valid_name("")); // empty
+        assert!(!is_valid_name("my/project")); // slash
+        assert!(!is_valid_name("my project")); // space
+        assert!(!is_valid_name("my.project")); // dot
     }
 }

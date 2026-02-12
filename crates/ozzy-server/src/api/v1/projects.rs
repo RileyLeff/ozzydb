@@ -82,6 +82,12 @@ async fn list_projects(
         if project.visibility == "public" {
             visible.push(project_to_summary(&owner, &project));
         } else if let Some(ref auth_user) = auth.user {
+            // Check token scope — project-scoped tokens must not leak other projects
+            let scope = auth.scope.as_deref().unwrap_or("");
+            if !crate::auth::middleware::scope_grants_project_access(scope, &owner, &project.slug) {
+                continue;
+            }
+
             // Show private projects only if the auth user has access
             if auth_user.id == project.owner_id
                 || state
