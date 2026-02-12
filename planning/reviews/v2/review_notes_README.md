@@ -39,3 +39,12 @@ Data upload reads the entire file into memory via `field.bytes()`, and download 
 
 ### N+1 queries in collection listing
 `list_collections` does 2 queries per collection (latest version + member count). This is a performance optimization opportunity for later — can be replaced with a single JOIN query. Not a correctness issue.
+
+### Collection member UNIQUE constraint on hash
+`UNIQUE(collection_version_id, member_hash)` prevents two different-named members with identical content hash in the same version. This enforces set semantics — if two data atoms have identical bytes, they're the same content and only appear once. Users who need distinct logical references to the same content should use different metadata or separate collections.
+
+### Redundant BLAKE3 computation in upload
+Upload handler computes `blake3_hash(&file_bytes)` for dedup checking, then `storage.store()` computes it again internally. Minor performance overhead bounded by 100MB body limit. Could be optimized with a `store_with_known_hash()` method in the future.
+
+### Orphaned storage blobs
+If `insert_data_atom` fails after `storage.store()` succeeds, an unreferenced blob remains in storage. Safe in content-addressed systems (no corruption), but requires future GC mechanism to reclaim space.
