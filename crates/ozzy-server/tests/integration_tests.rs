@@ -103,6 +103,8 @@ impl TestServer {
             max_upload_size_bytes: 104_857_600,
             cors_origins: "*".to_string(),
             allowed_logins: vec![],
+            // Test encryption key: 32 bytes of 0x42
+            secrets_encryption_key: Some(vec![0x42; 32]),
         };
 
         let storage =
@@ -831,5 +833,149 @@ fn test_collection_cycle_detection() {
             .await
             .unwrap();
         assert_eq!(resp.status(), 400, "Should reject self-reference");
+    });
+}
+
+// ========================================================================
+// Secrets API Tests
+// ========================================================================
+
+/// Full secrets lifecycle: set → list → re-set (version changes) → delete → list empty.
+#[test]
+#[ignore] // Requires Docker
+fn test_secrets_lifecycle() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (owner, slug, token) = setup_data_test(s, &format!("sec_life_{}", rand::random::<u32>())).await;
+        let base = format!("{}/api/v1", s.base_url);
+
+        // 1. Set a secret
+        let resp = s.client
+            .post(format!("{}/secrets/{}/{}", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"name": "API_KEY", "value": "sk-secret-123"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "Set secret failed: {}", resp.text().await.unwrap_or_default());
+
+        // Re-set to get response body
+        let resp = s.client
+            .post(format!("{}/secrets/{}/{}", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"name": "DB_PASSWORD", "value": "hunter2"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let set_body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(set_body["name"], "DB_PASSWORD");
+        assert!(set_body["created"].as_bool().unwrap(), "Should be created (new)");
+        let version_1 = set_body["version_id"].as_str().unwrap().to_string();
+
+        // 2. List secrets (should show names only, no values)
+        let resp = s.client
+            .get(format!("{}/secrets/{}/{}", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let list_body: Vec<serde_json::Value> = resp.json().await.unwrap();
+        assert_eq!(list_body.len(), 2);
+        // Verify no value field is returned
+        for item in &list_body {
+            assert!(item.get("value").is_none(), "Value should never be in list response");
+            assert!(item.get("encrypted_value").is_none(), "Encrypted value should never be in list response");
+        }
+
+        // 3. Re-set same secret (version should change)
+        let resp = s.client
+            .post(format!("{}/secrets/{}/{}", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"name": "DB_PASSWORD", "value": "new-password"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let reset_body: serde_json::Value = resp.json().await.unwrap();
+        assert!(!reset_body["created"].as_bool().unwrap(), "Should not be created (update)");
+        let version_2 = reset_body["version_id"].as_str().unwrap().to_string();
+        assert_ne!(version_1, version_2, "Version ID should change on re-set");
+
+        // 4. Delete a secret
+        let resp = s.client
+            .delete(format!("{}/secrets/{}/{}/API_KEY", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // 5. List should now show only 1 secret
+        let resp = s.client
+            .get(format!("{}/secrets/{}/{}", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let list_body: Vec<serde_json::Value> = resp.json().await.unwrap();
+        assert_eq!(list_body.len(), 1);
+        assert_eq!(list_body[0]["name"], "DB_PASSWORD");
+
+        // 6. Delete nonexistent secret returns 404
+        let resp = s.client
+            .delete(format!("{}/secrets/{}/{}/NOPE", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    });
+}
+
+/// Set secret with invalid name returns 400.
+#[test]
+#[ignore] // Requires Docker
+fn test_secret_invalid_name() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (owner, slug, token) = setup_data_test(s, &format!("sec_bad_{}", rand::random::<u32>())).await;
+        let base = format!("{}/api/v1", s.base_url);
+
+        let resp = s.client
+            .post(format!("{}/secrets/{}/{}", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"name": "has.dot", "value": "secret"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+    });
+}
+
+/// Set secret with empty value returns 400.
+#[test]
+#[ignore] // Requires Docker
+fn test_secret_empty_value() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (owner, slug, token) = setup_data_test(s, &format!("sec_empty_{}", rand::random::<u32>())).await;
+        let base = format!("{}/api/v1", s.base_url);
+
+        let resp = s.client
+            .post(format!("{}/secrets/{}/{}", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"name": "MY_SECRET", "value": ""}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
     });
 }

@@ -4,6 +4,7 @@ mod access;
 pub mod auth;
 mod collections;
 mod data;
+mod secrets;
 
 use axum::Router;
 
@@ -15,4 +16,5 @@ pub fn router() -> Router<AppState> {
         .nest("/auth", auth::router())
         .nest("/data", data::router())
         .nest("/collections", collections::router())
+        .nest("/secrets", secrets::router())
 }

@@ -40,6 +40,7 @@ async fn build_test_app() -> Option<Router> {
         max_upload_size_bytes: 104_857_600,
         cors_origins: "*".to_string(),
         allowed_logins: vec![],
+        secrets_encryption_key: None,
     };
 
     let storage = ContentStorage::from_config(&config).ok()?;

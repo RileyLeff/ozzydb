@@ -2,6 +2,31 @@
 
 use anyhow::{Context, Result};
 
+/// Parse an optional hex-encoded key of expected byte length.
+fn parse_hex_key(var_name: &str, expected_bytes: usize) -> Result<Option<Vec<u8>>> {
+    let hex_str = match std::env::var(var_name).ok().filter(|s| !s.is_empty()) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    if hex_str.len() != expected_bytes * 2 {
+        anyhow::bail!(
+            "{} must be {} hex characters ({} bytes), got {}",
+            var_name,
+            expected_bytes * 2,
+            expected_bytes,
+            hex_str.len()
+        );
+    }
+
+    let bytes: Result<Vec<u8>, _> = (0..hex_str.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16))
+        .collect();
+
+    Ok(Some(bytes.map_err(|e| anyhow::anyhow!("{} contains invalid hex: {}", var_name, e))?))
+}
+
 /// Server configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -39,6 +64,10 @@ pub struct Config {
     /// When empty, registration is open to everyone.
     /// Set via ALLOWED_LOGINS=rileyleff,collaborator2
     pub allowed_logins: Vec<String>,
+
+    /// AES-256-GCM key for encrypting project secrets (hex-encoded, 32 bytes = 64 hex chars).
+    /// Required for the secrets API. Set via SECRETS_ENCRYPTION_KEY env var.
+    pub secrets_encryption_key: Option<Vec<u8>>,
 }
 
 /// R2/S3 storage configuration.
@@ -90,6 +119,7 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            secrets_encryption_key: parse_hex_key("SECRETS_ENCRYPTION_KEY", 32)?,
         })
     }
 }
