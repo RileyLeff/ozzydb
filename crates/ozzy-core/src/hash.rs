@@ -1,9 +1,11 @@
 //! Content-addressed hashing using BLAKE3.
 //!
 //! All artifacts in OzzyDB are identified by their content hash:
-//! - raw_data_hash = blake3(raw_parquet_bytes)
-//! - transform_hash = blake3(canonical_source + lockfile_hash + runtime_version + params_schema_hash)
-//! - materialized_hash = blake3(input_hash + transform_hash + canonical_params_hash + platform_fingerprint)
+//! - data_atom_hash = blake3(raw_bytes)
+//! - collection_hash = blake3(sorted member hashes)
+//! - transform_hash = blake3(source_hash + function_name + lockfile_hash + environment_image_hash + params_schema_hash)
+//! - secrets_hash = blake3(sorted(secret_name + version_id) pairs)
+//! - materialized_hash = blake3(sorted(input_name, input_hash) + transform_hash + params_hash + platform_hash + [secrets_hash])
 
 use blake3::Hasher;
 use std::fs::File;
@@ -34,54 +36,73 @@ pub fn blake3_hash_file(path: &Path) -> std::io::Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-/// Compute the BLAKE3 hash of multiple components combined.
+/// Compute the BLAKE3 hash of multiple components combined (NUL-separated).
 pub fn blake3_hash_components(components: &[&str]) -> String {
     let combined = components.join("\0");
     blake3_hash(combined.as_bytes())
 }
 
-/// Compute the hash of a transform.
+/// Compute the hash of a transform (v2).
 ///
-/// transform_hash = blake3(source_hash + function_name + lockfile_hash + runtime_version + params_schema_hash)
+/// transform_hash = blake3(source_hash + function_name + lockfile_hash + environment_image_hash + params_schema_hash)
 pub fn transform_hash(
     source_hash: &str,
     function_name: &str,
     lockfile_hash: &str,
-    runtime_version: &str,
+    environment_image_hash: &str,
     params_schema_hash: &str,
 ) -> String {
     blake3_hash_components(&[
         source_hash,
         function_name,
         lockfile_hash,
-        runtime_version,
+        environment_image_hash,
         params_schema_hash,
     ])
 }
 
-/// Compute the materialized hash for a transform execution.
+/// Compute the secrets hash for a transform execution.
 ///
-/// materialized_hash = blake3(input_hash + transform_hash + canonical_params_hash + platform_hash)
-pub fn materialized_hash(
-    input_hash: &str,
-    transform_hash: &str,
-    params_hash: &str,
-    platform_hash: &str,
-) -> String {
-    blake3_hash_components(&[input_hash, transform_hash, params_hash, platform_hash])
+/// secrets_hash = blake3(sorted(secret_name + version_id) pairs)
+///
+/// Returns `None` if the secrets list is empty (transform declares no secrets).
+/// Secret values are never part of the hash — only names and version IDs.
+/// When a secret is rotated, its version_id changes → new materialized hash → cache miss.
+pub fn secrets_hash(secrets: &[(&str, &str)]) -> Option<String> {
+    if secrets.is_empty() {
+        return None;
+    }
+
+    let mut sorted: Vec<_> = secrets.to_vec();
+    sorted.sort_by_key(|(name, _)| *name);
+
+    let combined: String = sorted
+        .iter()
+        .flat_map(|(name, version_id)| [*name, *version_id])
+        .collect::<Vec<_>>()
+        .join("\0");
+
+    Some(blake3_hash(combined.as_bytes()))
 }
 
-/// Compute the hash of a multi-input transform execution.
+/// Compute the materialized hash (cache key) for a transform execution.
 ///
-/// For transforms with multiple inputs, we hash the sorted list of (input_name, input_hash) pairs.
-pub fn materialized_hash_multi_input(
+/// materialized_hash = blake3(
+///   sorted(input_name, input_hash) pairs +
+///   transform_hash +
+///   params_hash +
+///   platform_hash +
+///   secrets_hash           // only if transform declares secrets
+/// )
+pub fn materialized_hash(
     inputs: &[(&str, &str)], // (input_name, input_hash) pairs
     transform_hash: &str,
     params_hash: &str,
     platform_hash: &str,
+    secrets_hash: Option<&str>,
 ) -> String {
     // Sort inputs by name for determinism
-    let mut sorted_inputs: Vec<_> = inputs.iter().collect();
+    let mut sorted_inputs: Vec<_> = inputs.to_vec();
     sorted_inputs.sort_by_key(|(name, _)| *name);
 
     // Build input string: "name1\0hash1\0name2\0hash2\0..."
@@ -92,7 +113,26 @@ pub fn materialized_hash_multi_input(
         .join("\0");
 
     let input_hash = blake3_hash(input_str.as_bytes());
-    blake3_hash_components(&[&input_hash, transform_hash, params_hash, platform_hash])
+
+    match secrets_hash {
+        Some(sh) => blake3_hash_components(&[&input_hash, transform_hash, params_hash, platform_hash, sh]),
+        None => blake3_hash_components(&[&input_hash, transform_hash, params_hash, platform_hash]),
+    }
+}
+
+/// Compute the hash of a collection version.
+///
+/// collection_hash = blake3(sorted member reference hashes)
+///
+/// Member hashes are pre-resolved before calling this function:
+/// - Data atoms: the atom's blake3 content hash
+/// - Endpoint outputs: the materialized hash of the endpoint
+/// - Sub-collections: the sub-collection's version hash
+pub fn collection_hash(member_hashes: &[&str]) -> String {
+    let mut sorted: Vec<_> = member_hashes.to_vec();
+    sorted.sort();
+    let combined = sorted.join("\0");
+    blake3_hash(combined.as_bytes())
 }
 
 #[cfg(test)]
@@ -115,26 +155,178 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_hash() {
-        let hash = transform_hash(
-            "source123",
-            "my_func",
-            "lockfile456",
-            "python-3.11",
-            "params789",
-        );
-        assert!(!hash.is_empty());
-        assert_eq!(hash.len(), 64); // BLAKE3 produces 256-bit (64 hex chars) hashes
+    fn test_blake3_hash_length() {
+        let hash = blake3_hash(b"test");
+        assert_eq!(hash.len(), 64); // BLAKE3 = 256-bit = 64 hex chars
+    }
+
+    // -- transform_hash --
+
+    #[test]
+    fn test_transform_hash_stable() {
+        let h1 = transform_hash("src_abc", "my_func", "lock_def", "env_ghi", "params_jkl");
+        let h2 = transform_hash("src_abc", "my_func", "lock_def", "env_ghi", "params_jkl");
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64);
     }
 
     #[test]
-    fn test_materialized_hash_multi_input_order_independent() {
-        let inputs1 = vec![("left", "hash_a"), ("right", "hash_b")];
-        let inputs2 = vec![("right", "hash_b"), ("left", "hash_a")];
+    fn test_transform_hash_changes_with_environment() {
+        let h1 = transform_hash("src", "func", "lock", "env_v1", "params");
+        let h2 = transform_hash("src", "func", "lock", "env_v2", "params");
+        assert_ne!(h1, h2);
+    }
 
-        let hash1 = materialized_hash_multi_input(&inputs1, "transform", "params", "platform");
-        let hash2 = materialized_hash_multi_input(&inputs2, "transform", "params", "platform");
+    #[test]
+    fn test_transform_hash_changes_with_source() {
+        let h1 = transform_hash("src_v1", "func", "lock", "env", "params");
+        let h2 = transform_hash("src_v2", "func", "lock", "env", "params");
+        assert_ne!(h1, h2);
+    }
 
-        assert_eq!(hash1, hash2);
+    // -- secrets_hash --
+
+    #[test]
+    fn test_secrets_hash_empty() {
+        assert_eq!(secrets_hash(&[]), None);
+    }
+
+    #[test]
+    fn test_secrets_hash_single() {
+        let h = secrets_hash(&[("API_KEY", "uuid-1")]);
+        assert!(h.is_some());
+        assert_eq!(h.unwrap().len(), 64);
+    }
+
+    #[test]
+    fn test_secrets_hash_order_independent() {
+        let h1 = secrets_hash(&[("A", "v1"), ("B", "v2")]);
+        let h2 = secrets_hash(&[("B", "v2"), ("A", "v1")]);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_secrets_hash_version_change() {
+        let h1 = secrets_hash(&[("API_KEY", "uuid-1")]);
+        let h2 = secrets_hash(&[("API_KEY", "uuid-2")]);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_secrets_hash_name_matters() {
+        let h1 = secrets_hash(&[("KEY_A", "uuid-1")]);
+        let h2 = secrets_hash(&[("KEY_B", "uuid-1")]);
+        assert_ne!(h1, h2);
+    }
+
+    // -- materialized_hash --
+
+    #[test]
+    fn test_materialized_hash_stable() {
+        let inputs = [("x", "hash_x")];
+        let h1 = materialized_hash(&inputs, "transform", "params", "platform", None);
+        let h2 = materialized_hash(&inputs, "transform", "params", "platform", None);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_materialized_hash_input_order_independent() {
+        let inputs1 = [("left", "hash_a"), ("right", "hash_b")];
+        let inputs2 = [("right", "hash_b"), ("left", "hash_a")];
+
+        let h1 = materialized_hash(&inputs1, "transform", "params", "platform", None);
+        let h2 = materialized_hash(&inputs2, "transform", "params", "platform", None);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_materialized_hash_with_secrets() {
+        let inputs = [("x", "hash_x")];
+        let h_no_secrets = materialized_hash(&inputs, "t", "p", "plat", None);
+        let h_with_secrets = materialized_hash(&inputs, "t", "p", "plat", Some("secrets_abc"));
+        assert_ne!(h_no_secrets, h_with_secrets);
+    }
+
+    #[test]
+    fn test_materialized_hash_secrets_change() {
+        let inputs = [("x", "hash_x")];
+        let h1 = materialized_hash(&inputs, "t", "p", "plat", Some("secrets_v1"));
+        let h2 = materialized_hash(&inputs, "t", "p", "plat", Some("secrets_v2"));
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_materialized_hash_different_inputs() {
+        let inputs1 = [("x", "hash_a")];
+        let inputs2 = [("x", "hash_b")];
+        let h1 = materialized_hash(&inputs1, "t", "p", "plat", None);
+        let h2 = materialized_hash(&inputs2, "t", "p", "plat", None);
+        assert_ne!(h1, h2);
+    }
+
+    // -- collection_hash --
+
+    #[test]
+    fn test_collection_hash_stable() {
+        let h1 = collection_hash(&["hash_a", "hash_b"]);
+        let h2 = collection_hash(&["hash_a", "hash_b"]);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_collection_hash_order_independent() {
+        let h1 = collection_hash(&["hash_a", "hash_b", "hash_c"]);
+        let h2 = collection_hash(&["hash_c", "hash_a", "hash_b"]);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_collection_hash_empty() {
+        let h = collection_hash(&[]);
+        assert_eq!(h.len(), 64); // valid hash even for empty collection
+    }
+
+    #[test]
+    fn test_collection_hash_different_members() {
+        let h1 = collection_hash(&["hash_a", "hash_b"]);
+        let h2 = collection_hash(&["hash_a", "hash_c"]);
+        assert_ne!(h1, h2);
+    }
+
+    // -- golden value tests --
+
+    #[test]
+    fn test_golden_blake3_hash() {
+        // blake3("hello") is a known value — verify we produce correct hex
+        let h = blake3_hash(b"hello");
+        assert_eq!(
+            h,
+            "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f"
+        );
+    }
+
+    #[test]
+    fn test_golden_transform_hash() {
+        // Pin a specific transform hash so we detect accidental changes to the formula
+        let h = transform_hash("src", "func", "lock", "env", "params");
+        // This is blake3("src\0func\0lock\0env\0params")
+        let expected = blake3_hash(b"src\0func\0lock\0env\0params");
+        assert_eq!(h, expected);
+    }
+
+    #[test]
+    fn test_golden_secrets_hash() {
+        // Pin: secrets_hash([("A","v1"),("B","v2")]) = blake3("A\0v1\0B\0v2")
+        let h = secrets_hash(&[("A", "v1"), ("B", "v2")]).unwrap();
+        let expected = blake3_hash(b"A\0v1\0B\0v2");
+        assert_eq!(h, expected);
+    }
+
+    #[test]
+    fn test_golden_collection_hash() {
+        // Pin: collection_hash(["b","a"]) = blake3("a\0b") since sorted
+        let h = collection_hash(&["b", "a"]);
+        let expected = blake3_hash(b"a\0b");
+        assert_eq!(h, expected);
     }
 }
