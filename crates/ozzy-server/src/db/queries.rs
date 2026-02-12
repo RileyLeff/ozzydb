@@ -307,11 +307,12 @@ impl Database {
     ) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO api_tokens (id, user_id, name, token_hash, scope, expires_at)
-            VALUES ($1, $2, $3, $4, 'account', $5)
+            INSERT INTO api_tokens (id, user_id, name, token_hash, scope, project_id, expires_at)
+            VALUES ($1, $2, $3, $4, 'account', NULL, $5)
             ON CONFLICT (user_id, name) DO UPDATE SET
                 token_hash = EXCLUDED.token_hash,
                 scope = EXCLUDED.scope,
+                project_id = NULL,
                 expires_at = EXCLUDED.expires_at
             "#,
         )
