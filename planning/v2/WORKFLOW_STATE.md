@@ -1,15 +1,15 @@
 # v2 Workflow State
 
 **Current Phase:** 1 — Foundation
-**Current Step:** 1.1 — Replace Postgres schema with v2 DDL
+**Current Step:** 1.2 — Build ozzy.toml parser (toml_spec.rs)
 **Status:** Starting
 
 ## Progress
 
 | Phase | Step | Description | Status |
 |-------|------|-------------|--------|
-| 1 | 1.1 | Replace Postgres schema with v2 DDL | Starting |
-| 1 | 1.2 | Build ozzy.toml parser (toml_spec.rs) | Pending |
+| 1 | 1.1 | Replace Postgres schema with v2 DDL | Done |
+| 1 | 1.2 | Build ozzy.toml parser (toml_spec.rs) | Starting |
 | 1 | 1.3 | Update core hash functions | Pending |
 | 1 | 1.4 | Update server AppState and DB layer | Pending |
 | 2 | 2.1 | Data upload API + CLI | Pending |
@@ -36,6 +36,10 @@ None.
 
 ## Recent Activity
 
-- Created implementation plan
-- Created workflow state file
-- About to begin Phase 1, Step 1.1
+- Step 1.1 complete (3ded031): v2 DDL, models, queries, auth middleware, tests
+  - Fresh 001_v2_initial.sql with all v2 tables
+  - Rewrote models.rs, queries.rs for v2 (singular scope, git-referenced commits, etc.)
+  - Simplified auth middleware for singular scope model
+  - 14 DB tests, 5 API tests, all passing
+  - Server integration/e2e tests gutted (will be rewritten with v2 endpoints)
+- Moving to Step 1.2: ozzy.toml parser
