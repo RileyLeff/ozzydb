@@ -620,3 +620,216 @@ fn test_data_yank_empty_reason() {
         assert_eq!(resp.status(), 400);
     });
 }
+
+// ========================================================================
+// Collections API Tests
+// ========================================================================
+
+/// Full collection lifecycle: create → add members → get → log → flatten → remove → yank.
+#[test]
+#[ignore] // Requires Docker
+fn test_collection_lifecycle() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (owner, slug, token) = setup_data_test(s, &format!("coll_life_{}", rand::random::<u32>())).await;
+        let base = format!("{}/api/v1", s.base_url);
+
+        // Upload two data atoms first
+        for name in &["alpha", "beta"] {
+            let file_part = reqwest::multipart::Part::bytes(format!("data for {}", name).into_bytes())
+                .file_name(format!("{}.csv", name));
+            let form = reqwest::multipart::Form::new()
+                .part("file", file_part)
+                .text("project", format!("{}/{}", owner, slug))
+                .text("name", name.to_string());
+            let resp = s.client
+                .post(format!("{}/data/upload", base))
+                .header("Authorization", format!("Bearer {}", token))
+                .multipart(form)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "Upload {} failed", name);
+        }
+
+        // 1. Create collection
+        let resp = s.client
+            .post(format!("{}/collections/{}/{}", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"name": "train-set"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "Create collection failed: {}", resp.text().await.unwrap_or_default());
+
+        // Re-send to get parsed body
+        let resp = s.client
+            .post(format!("{}/collections/{}/{}", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"name": "test-set"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let create_body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(create_body["name"], "test-set");
+        assert_eq!(create_body["yanked"], false);
+
+        // 2. List collections
+        let resp = s.client
+            .get(format!("{}/collections/{}/{}", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let list_body: Vec<serde_json::Value> = resp.json().await.unwrap();
+        assert_eq!(list_body.len(), 2);
+
+        // 3. Add members to train-set
+        let resp = s.client
+            .post(format!("{}/collections/{}/{}/train-set/add", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"members": [{"member_type": "data", "member_ref": "alpha"}, {"member_type": "data", "member_ref": "beta"}]}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "Add members failed: {}", resp.text().await.unwrap_or_default());
+
+        // Re-add to get body
+        let resp = s.client
+            .post(format!("{}/collections/{}/{}/train-set/add", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"members": [{"member_type": "data", "member_ref": "alpha"}]}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let add_body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(add_body["version_number"], 2, "Should be version 2 (duplicate alpha skipped)");
+        assert_eq!(add_body["members"].as_array().unwrap().len(), 2, "Should still have 2 members");
+
+        // 4. Get collection detail
+        let resp = s.client
+            .get(format!("{}/collections/{}/{}/train-set", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let detail: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(detail["name"], "train-set");
+        assert_eq!(detail["version"]["version_number"], 2);
+        assert_eq!(detail["version"]["members"].as_array().unwrap().len(), 2);
+
+        // 5. Version log
+        let resp = s.client
+            .get(format!("{}/collections/{}/{}/train-set/log", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let log_body: Vec<serde_json::Value> = resp.json().await.unwrap();
+        assert_eq!(log_body.len(), 2, "Should have 2 versions");
+
+        // 6. Flatten
+        let resp = s.client
+            .get(format!("{}/collections/{}/{}/train-set/flatten", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let flat_body: Vec<serde_json::Value> = resp.json().await.unwrap();
+        assert_eq!(flat_body.len(), 2, "Should have 2 leaf atoms");
+
+        // 7. Remove a member
+        let resp = s.client
+            .post(format!("{}/collections/{}/{}/train-set/remove", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"refs": ["data:beta"]}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let remove_body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(remove_body["version_number"], 3);
+        assert_eq!(remove_body["members"].as_array().unwrap().len(), 1);
+
+        // 8. Yank collection
+        let resp = s.client
+            .post(format!("{}/collections/{}/{}/test-set/yank", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"reason": "superseded"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    });
+}
+
+/// Circular reference detection in collections.
+#[test]
+#[ignore] // Requires Docker
+fn test_collection_cycle_detection() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (owner, slug, token) = setup_data_test(s, &format!("coll_cycle_{}", rand::random::<u32>())).await;
+        let base = format!("{}/api/v1", s.base_url);
+
+        // Create two collections
+        for name in &["coll-a", "coll-b"] {
+            let resp = s.client
+                .post(format!("{}/collections/{}/{}", base, owner, slug))
+                .header("Authorization", format!("Bearer {}", token))
+                .header("Content-Type", "application/json")
+                .body(format!(r#"{{"name": "{}"}}"#, name))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "Create {} failed", name);
+        }
+
+        // Add coll-b as member of coll-a (ok)
+        let resp = s.client
+            .post(format!("{}/collections/{}/{}/coll-a/add", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"members": [{"member_type": "collection", "member_ref": "coll-b"}]}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Try to add coll-a as member of coll-b (would create cycle)
+        let resp = s.client
+            .post(format!("{}/collections/{}/{}/coll-b/add", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"members": [{"member_type": "collection", "member_ref": "coll-a"}]}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "Should reject circular reference");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["message"].as_str().unwrap().contains("circular"), "Error should mention circular reference");
+
+        // Self-reference should also be rejected
+        let resp = s.client
+            .post(format!("{}/collections/{}/{}/coll-a/add", base, owner, slug))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(r#"{"members": [{"member_type": "collection", "member_ref": "coll-a"}]}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "Should reject self-reference");
+    });
+}
