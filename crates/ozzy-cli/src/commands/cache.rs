@@ -104,11 +104,7 @@ pub fn clear() -> Result<()> {
         }
     }
 
-    println!(
-        "Cleared {} entries ({})",
-        count,
-        format_size(removed)
-    );
+    println!("Cleared {} entries ({})", count, format_size(removed));
     Ok(())
 }
 
