@@ -27,7 +27,10 @@ use ozzy_core::toml_spec::{
 // ============================================================================
 
 struct NodeOutput {
+    #[allow(dead_code)]
     hash: String,
+    /// blake3 of the primary output file content (used as input hash for downstream nodes)
+    output_hash: String,
     output_dir: PathBuf,
 }
 
@@ -179,10 +182,13 @@ pub async fn run(
         if cache_path.exists() && !force {
             let short = mat_hash.get(..12).unwrap_or(&mat_hash);
             eprintln!("  {} — cache hit ({})", node_name, short);
+            let primary = find_primary_output(&cache_path)?;
+            let output_hash = hash::blake3_hash_file(&primary)?;
             node_outputs.insert(
                 node_name.clone(),
                 NodeOutput {
                     hash: mat_hash,
+                    output_hash,
                     output_dir: cache_path,
                 },
             );
@@ -330,10 +336,13 @@ pub async fn run(
         std::fs::create_dir_all(&cache_path)?;
         copy_dir_sync(&ws_output, &cache_path)?;
 
+        let primary = find_primary_output(&cache_path)?;
+        let output_hash = hash::blake3_hash_file(&primary)?;
         node_outputs.insert(
             node_name.clone(),
             NodeOutput {
                 hash: mat_hash,
+                output_hash,
                 output_dir: cache_path,
             },
         );
@@ -651,7 +660,7 @@ fn resolve_input_hashes(
                             src_node
                         )
                     })?
-                    .hash
+                    .output_hash
                     .clone(),
             };
             hashes.push((input_name.clone(), input_hash));
