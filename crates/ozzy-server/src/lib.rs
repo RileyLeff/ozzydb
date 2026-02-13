@@ -10,6 +10,7 @@ pub mod config;
 pub mod db;
 pub mod environments;
 pub mod git;
+pub mod runners;
 pub mod storage;
 
 use std::sync::Arc;
