@@ -44,7 +44,10 @@
 			const url = URL.createObjectURL(blob);
 			const a = document.createElement('a');
 			a.href = url;
-			a.download = name;
+			// Extract filename from Content-Disposition header if available
+			const disposition = res.headers.get('content-disposition');
+			const filenameMatch = disposition?.match(/filename="?([^";\s]+)"?/);
+			a.download = filenameMatch?.[1] ?? name;
 			a.click();
 			URL.revokeObjectURL(url);
 		} catch (err: unknown) {

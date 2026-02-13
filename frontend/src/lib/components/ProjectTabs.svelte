@@ -3,14 +3,14 @@
 
 	let { owner, project }: { owner: string; project: string } = $props();
 
-	const tabs = [
+	let tabs = $derived([
 		{ label: 'Overview', href: `/${owner}/${project}` },
 		{ label: 'Data', href: `/${owner}/${project}/data` },
 		{ label: 'Collections', href: `/${owner}/${project}/collections` },
 		{ label: 'Endpoints', href: `/${owner}/${project}/endpoints` },
 		{ label: 'Commits', href: `/${owner}/${project}/commits` },
 		{ label: 'Settings', href: `/${owner}/${project}/settings` }
-	];
+	]);
 
 	let currentPath = $derived(page.url.pathname);
 

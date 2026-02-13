@@ -153,7 +153,7 @@
 										<span class="badge badge-type">{member.member_type}</span>
 									</td>
 									<td>
-										{#if member.member_type === 'atom'}
+										{#if member.member_type === 'data'}
 											<a href="/{owner}/{slug}/data/{member.member_ref}" class="member-link">
 												{member.member_ref}
 											</a>

@@ -22,9 +22,12 @@
 	let collectionCount = $state(0);
 	let endpointCount = $state(0);
 	let recentCommits: CommitSummary[] = $state([]);
+	let retryCount = $state(0);
 
 	$effect(() => {
 		if (!owner || !slug) return;
+		// eslint-disable-next-line @typescript-eslint/no-unused-expressions
+		retryCount; // Subscribe to retryCount so retry triggers re-fetch
 		const currentOwner = owner;
 		const currentSlug = slug;
 
@@ -87,7 +90,7 @@
 	{:else if error}
 		<div class="error-state">
 			<p class="error-message">{error}</p>
-			<button class="btn btn-outline" onclick={() => { loading = true; error = null; }}>
+			<button class="btn btn-outline" onclick={() => { retryCount++; }}>
 				Retry
 			</button>
 		</div>

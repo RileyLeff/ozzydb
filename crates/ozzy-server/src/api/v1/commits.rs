@@ -81,23 +81,30 @@ async fn list_commits(
 
     enforce_read_access(&state, &project, &owner, &slug, &auth).await?;
 
+    let limit = query.limit.max(1).min(100);
     let commits = state
         .db
-        .list_commits(project.id, query.limit.min(100))
+        .list_commits(project.id, limit)
         .await?;
 
-    let summaries: Vec<CommitSummary> = commits
-        .into_iter()
-        .map(|c| CommitSummary {
+    let mut summaries = Vec::with_capacity(commits.len());
+    for c in commits {
+        let username = state
+            .db
+            .get_user_by_id(c.pushed_by)
+            .await?
+            .map(|u| u.username)
+            .unwrap_or_else(|| c.pushed_by.to_string());
+        summaries.push(CommitSummary {
             id: c.id.to_string(),
             git_commit_sha: c.git_commit_sha,
             git_provider: c.git_provider,
             git_repo: c.git_repo,
             message: c.message,
-            pushed_by: c.pushed_by.to_string(),
+            pushed_by: username,
             created_at: c.created_at,
-        })
-        .collect();
+        });
+    }
 
     Ok(Json(summaries))
 }
@@ -132,6 +139,13 @@ async fn get_commit(
         ),
     };
 
+    let username = state
+        .db
+        .get_user_by_id(commit.pushed_by)
+        .await?
+        .map(|u| u.username)
+        .unwrap_or_else(|| commit.pushed_by.to_string());
+
     Ok(Json(CommitDetail {
         id: commit.id.to_string(),
         git_commit_sha: commit.git_commit_sha,
@@ -139,7 +153,7 @@ async fn get_commit(
         git_repo: commit.git_repo,
         ozzy_toml_hash: commit.ozzy_toml_hash,
         message: commit.message,
-        pushed_by: commit.pushed_by.to_string(),
+        pushed_by: username,
         created_at: commit.created_at,
         environments,
         transforms,
