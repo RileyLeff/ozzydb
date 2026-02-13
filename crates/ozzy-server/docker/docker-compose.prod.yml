@@ -58,6 +58,12 @@ services:
       COMPUTE_TIMEOUT_SECS: ${COMPUTE_TIMEOUT_SECS:-300}
       COMPUTE_TMPFS_SIZE: ${COMPUTE_TMPFS_SIZE:-512m}
       ALLOWED_LOGINS: ${ALLOWED_LOGINS:-}
+      # GitHub App (optional — enables private repo access via push)
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      # Secrets encryption (hex-encoded 32-byte key; required for project secrets)
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
       RUST_LOG: ${RUST_LOG:-info,ozzy_server=debug}
     volumes:
       # Docker socket for server-side compute (transform execution)
