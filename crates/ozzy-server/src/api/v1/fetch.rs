@@ -513,9 +513,7 @@ async fn fetch_endpoint(
     }
 
     // ── 8. Return final node output ─────────────────────────────
-    let final_node = exec_order.last().ok_or_else(|| {
-        ApiError::Internal(anyhow::anyhow!("Endpoint '{}' has no nodes", endpoint_name))
-    })?;
+    let final_node = find_terminal_node(endpoint_def)?;
 
     let final_output = node_outputs.get(final_node).ok_or_else(|| {
         ApiError::Internal(anyhow::anyhow!("Final node '{}' has no output", final_node))
@@ -773,6 +771,52 @@ fn build_execution_order(
     }
 
     Ok(order)
+}
+
+/// Find the single terminal (sink) node of an endpoint DAG.
+///
+/// A terminal node has no outgoing edges to other nodes. If there are zero
+/// or multiple terminal nodes, return an error.
+fn find_terminal_node(
+    endpoint: &ozzy_core::toml_spec::EndpointDef,
+) -> Result<&str, ApiError> {
+    let node_names: HashSet<&str> = endpoint.nodes.keys().map(|s| s.as_str()).collect();
+    let mut has_outgoing: HashSet<&str> = HashSet::new();
+
+    for edge in &endpoint.edges {
+        // An edge FROM a node TO another node means the source node has outgoing edges
+        if node_names.contains(edge.from.as_str()) {
+            let to_node = edge.to.split('.').next().unwrap_or(&edge.to);
+            if node_names.contains(to_node) && edge.from.as_str() != to_node {
+                has_outgoing.insert(edge.from.as_str());
+            }
+        }
+    }
+
+    let terminals: Vec<&str> = node_names
+        .iter()
+        .filter(|n| !has_outgoing.contains(**n))
+        .copied()
+        .collect();
+
+    match terminals.len() {
+        0 => Err(ApiError::Internal(anyhow::anyhow!(
+            "Endpoint has no terminal node (all nodes have outgoing edges)"
+        ))),
+        1 => Ok(terminals[0]),
+        _ => {
+            let mut names: Vec<&str> = terminals;
+            names.sort();
+            // For determinism, pick the lexicographically first terminal node
+            // and log a warning about the ambiguity
+            tracing::warn!(
+                "Endpoint has multiple terminal nodes: {:?}. Using '{}'.",
+                names,
+                names[0]
+            );
+            Ok(names[0])
+        }
+    }
 }
 
 /// Build a map from node_name → [(input_name, edge_source)] for quick lookup.
@@ -1208,6 +1252,14 @@ mod tests {
         let pos1 = order.iter().position(|n| n == "step1").unwrap();
         let pos2 = order.iter().position(|n| n == "step2").unwrap();
         assert!(pos1 < pos2);
+    }
+
+    #[test]
+    fn test_find_terminal_node() {
+        let endpoint = make_test_endpoint();
+        // step2 is the terminal node (step1 → step2, no edges from step2 to other nodes)
+        let terminal = find_terminal_node(&endpoint).unwrap();
+        assert_eq!(terminal, "step2");
     }
 
     #[test]

@@ -47,8 +47,9 @@ pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult
     }
 
     // Build docker run command
+    let container_name = format!("ozzydb-{}", &workspace_id[..8]);
     let mut cmd = Command::new("docker");
-    cmd.arg("run").arg("--rm");
+    cmd.arg("run").arg("--rm").args(["--name", &container_name]);
 
     // Resource limits
     if let Some(ref mem) = request.memory_limit {
@@ -88,19 +89,36 @@ pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult
     cmd.arg(&request.image);
     cmd.args(["/bin/sh", "/workspace/init.sh"]);
 
-    // Execute with timeout — clean up workspace on failure
+    // Execute with timeout — kill child and clean up workspace on failure.
+    // We use spawn() + wait_with_output() so we can kill the child on timeout.
+    let child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to spawn docker run")?;
+
     let output = match tokio::time::timeout(
         std::time::Duration::from_secs(request.timeout_secs),
-        cmd.output(),
+        child.wait_with_output(),
     )
     .await
     {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => {
-            cleanup_workspace(workspace).await;
-            return Err(e).context("Failed to execute docker run");
-        }
+        Ok(result) => match result {
+            Ok(output) => output,
+            Err(e) => {
+                cleanup_workspace(workspace).await;
+                return Err(e).context("Failed to execute docker run");
+            }
+        },
         Err(_) => {
+            // Timeout: kill the child process. wait_with_output() was cancelled
+            // by the timeout, but it takes ownership of child. We need to
+            // forcefully stop the container instead.
+            let container_name = format!("ozzydb-{}", workspace_id);
+            let _ = tokio::process::Command::new("docker")
+                .args(["kill", &container_name])
+                .output()
+                .await;
             cleanup_workspace(workspace).await;
             anyhow::bail!(
                 "Transform execution timed out after {}s",

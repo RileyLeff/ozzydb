@@ -348,8 +348,8 @@ pub async fn run(
         );
     }
 
-    // 11. Write final output (from the last node)
-    let final_node = execution_order.last().unwrap();
+    // 11. Write final output (from the terminal/sink node)
+    let final_node = find_terminal_node(endpoint)?;
     let final_output = &node_outputs[final_node];
     write_final_output(&final_output.output_dir, output)?;
 
@@ -595,6 +595,48 @@ fn build_execution_order(endpoint: &EndpointDef) -> Result<Vec<String>> {
     }
 
     Ok(order)
+}
+
+/// Find the single terminal (sink) node of an endpoint DAG.
+///
+/// A terminal node has no outgoing edges to other nodes.
+fn find_terminal_node(endpoint: &EndpointDef) -> Result<&str> {
+    use std::collections::HashSet;
+    let node_names: HashSet<&str> = endpoint.nodes.keys().map(|s| s.as_str()).collect();
+    let mut has_outgoing: HashSet<String> = HashSet::new();
+
+    for edge in &endpoint.edges {
+        let source = parse_edge_source(&edge.from);
+        if let EdgeSource::Node(src_node) = source {
+            if node_names.contains(src_node.as_str()) {
+                if let Some((tgt_node, _)) = parse_edge_target(&edge.to) {
+                    if node_names.contains(tgt_node.as_str()) && src_node != tgt_node {
+                        has_outgoing.insert(src_node);
+                    }
+                }
+            }
+        }
+    }
+
+    let terminals: Vec<&str> = node_names
+        .iter()
+        .filter(|n| !has_outgoing.contains(**n))
+        .copied()
+        .collect();
+
+    match terminals.len() {
+        0 => bail!("Endpoint has no terminal node"),
+        1 => Ok(terminals[0]),
+        _ => {
+            let mut names = terminals;
+            names.sort();
+            eprintln!(
+                "Warning: endpoint has multiple terminal nodes: {:?}. Using '{}'.",
+                names, names[0]
+            );
+            Ok(names[0])
+        }
+    }
 }
 
 /// Build a map of each node's inputs to their edge sources.
