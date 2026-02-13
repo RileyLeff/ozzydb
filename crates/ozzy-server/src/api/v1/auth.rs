@@ -365,6 +365,9 @@ pub enum ApiError {
     /// 410 Gone - resource has been yanked/retracted
     #[error("{0}")]
     Gone(String),
+    /// 503 Service Unavailable - feature not enabled or dependency not ready
+    #[error("{0}")]
+    ServiceUnavailable(String),
     /// 500 Internal Server Error - unexpected error
     #[error(transparent)]
     Internal(anyhow::Error),
@@ -393,6 +396,10 @@ impl ApiError {
 
     pub fn gone(msg: impl Into<String>) -> Self {
         Self::Gone(msg.into())
+    }
+
+    pub fn service_unavailable(msg: impl Into<String>) -> Self {
+        Self::ServiceUnavailable(msg.into())
     }
 }
 
@@ -445,6 +452,9 @@ impl axum::response::IntoResponse for ApiError {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg),
             ApiError::Gone(msg) => (StatusCode::GONE, "gone", msg),
+            ApiError::ServiceUnavailable(msg) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable", msg)
+            }
             ApiError::Internal(err) => {
                 tracing::error!("Internal error: {:?}", err);
                 (

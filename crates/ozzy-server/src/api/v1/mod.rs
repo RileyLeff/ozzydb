@@ -5,6 +5,7 @@ pub mod auth;
 mod collections;
 mod data;
 mod endpoints;
+mod fetch;
 mod projects;
 mod push;
 mod secrets;
@@ -25,4 +26,5 @@ pub fn router() -> Router<AppState> {
         .nest("/projects", projects::router())
         .nest("/endpoints", endpoints::router())
         .nest("/webhooks", webhooks::router())
+        .nest("/fetch", fetch::router())
 }

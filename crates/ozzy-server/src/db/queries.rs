@@ -1529,6 +1529,22 @@ impl Database {
         Ok(secret)
     }
 
+    /// Get secret metadata by name (without the encrypted value).
+    pub async fn get_secret_info(
+        &self,
+        project_id: Uuid,
+        name: &str,
+    ) -> Result<Option<SecretInfo>> {
+        let info = sqlx::query_as::<_, SecretInfo>(
+            "SELECT id, name, version_id, created_at, updated_at FROM secrets WHERE project_id = $1 AND name = $2",
+        )
+        .bind(project_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(info)
+    }
+
     pub async fn delete_secret(&self, project_id: Uuid, name: &str) -> Result<bool> {
         let result = sqlx::query("DELETE FROM secrets WHERE project_id = $1 AND name = $2")
             .bind(project_id)
