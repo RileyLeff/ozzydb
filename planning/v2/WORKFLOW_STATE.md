@@ -1,8 +1,8 @@
 # v2 Workflow State
 
 **Current Phase:** 4 — Execution
-**Current Step:** Complete — starting exhaustive review
-**Status:** All 6 steps implemented and committed. Running exhaustive review.
+**Current Step:** Complete — exhaustive review in progress (round 18 done)
+**Status:** All 6 steps implemented. 18 review rounds complete, ~45 bugs fixed. Need 2 consecutive clean rounds. Blocked on Codex rate limit (resets 7:30 AM ET).
 
 ## Progress
 
@@ -96,4 +96,11 @@ None.
     - `ozzy cache ls/size/clear`
     - Recursive directory size computation
     - Human-readable size formatting
-- Starting Phase 4 exhaustive review
+- Phase 4 exhaustive review in progress:
+  - 18 rounds of Claude Opus via Codex (Gemini consistently fails at ~260k tokens)
+  - ~45 issues found and fixed
+  - Key fixes: env hash alignment, timeout kill, terminal node detection, path containment, secret blocklists, importlib runners, auth ordering
+  - 43 known limitations documented
+  - 90 core + 110 server + 4 CLI unit = 204 tests passing
+  - Review artifacts: #27-#44 in planning/reviews/v2/
+  - Blocked on Codex rate limit for round 19 (resets 7:30 AM ET 2026-02-13)

@@ -62,3 +62,19 @@ Chronological observations from agents working on OzzyDB.
 - Gemini CLI gotcha: `-p` flag + stdin doesn't work together. Use `gemini --sandbox -o text < file.txt` (stdin only).
 - compute_env_hash changed from Option<String> to String — all tiers now produce a blake3 hash (Prebuilt included).
 - Round 8 found only 1 low-severity issue (missed instance of round 7 temp file cleanup pattern in get() hydrate path). All 3 round 7 fixes verified present. Approaching convergence — need 2 consecutive clean rounds.
+- 18 review rounds completed. Highlights from rounds 13-18:
+  - Reserved param names (ref, format) and hyphen rejection for shell safety
+  - Poetry.lock rejection (requires pyproject.toml, BaseLockfile tier can't support)
+  - Push source cache failure now fatal for source-based transforms
+  - Prebuilt environments synthesize DB records directly (no race with async builder)
+  - Collection add hash-based dedup (DB has UNIQUE constraint, code must match)
+  - Python runner switched from dotted imports to importlib (handles hyphens in paths)
+  - Token creation access check (was leaking private project existence)
+  - Push scope check moved before project creation (side-effect prevention)
+  - Reserved runtime env var blocklist for secrets (PYTHONHASHSEED, PATH, etc.)
+  - CLI path containment (ensure_within_dir for source/lockfile/dockerfile)
+  - Failed env builds: pending rows cleaned up for retry on re-push
+  - Docker timeout: child process now explicitly killed via `docker kill --name`
+  - Terminal node detection: find_terminal_node() replaces fragile exec_order.last()
+- Codex rate limited after round 18. 43 known limitations. 204 tests pass.
+- Gemini CLI consistently fails with exit code 13 on ~260k token contexts (tried multiple exclusion strategies). Claude-only reviews for Phase 4.
