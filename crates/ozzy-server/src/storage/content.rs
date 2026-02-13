@@ -40,9 +40,13 @@ impl ContentStorage {
         // Accept both BLAKE3 (64 chars) and Git SHA-1 (40 chars) hashes.
         // The source storage uses git commit SHAs as keys.
         let len = content_hash.len();
-        if (len != 40 && len != 64) || !content_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        if (len != 40 && len != 64)
+            || !content_hash
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
             anyhow::bail!(
-                "Invalid content hash '{}': expected 40 or 64 hexadecimal characters",
+                "Invalid content hash '{}': expected 40 or 64 lowercase hexadecimal characters",
                 content_hash
             );
         }

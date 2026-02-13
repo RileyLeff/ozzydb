@@ -201,11 +201,12 @@ pub async fn login() -> Result<()> {
     };
 
     loop {
-        tokio::time::sleep(poll_interval).await;
-
         if tokio::time::Instant::now() >= deadline {
             bail!("Device code expired. Run `ozzy auth login` again.");
         }
+
+        // Wait before polling (GitHub requires minimum interval between requests)
+        tokio::time::sleep(poll_interval).await;
 
         let resp = client
             .post(format!("{}/v1/auth/github/poll", registry_url))

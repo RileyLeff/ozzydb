@@ -117,6 +117,15 @@ async fn push(
         }
     }
 
+    // Validate commit message length
+    if let Some(ref msg) = req.message {
+        if msg.len() > 10_000 {
+            return Err(ApiError::BadRequest(
+                "Commit message too long (max 10,000 characters)".to_string(),
+            ));
+        }
+    }
+
     // Verify the pusher's username matches the project owner
     if auth.user.username != owner {
         // Check if user has write access to an existing project
@@ -153,6 +162,15 @@ async fn push(
         .get_commit_by_sha(project.id, &git_commit_sha)
         .await?
     {
+        // Still update the ref if a new one was specified
+        if let Some(ref ref_name) = req.ref_name {
+            state
+                .db
+                .upsert_ref(project.id, ref_name, "branch", existing.id)
+                .await
+                .map_err(ApiError::Internal)?;
+        }
+
         // Idempotent: return success with existing commit info
         return Ok(Json(PushResponse {
             commit_id: existing.id.to_string(),
@@ -339,8 +357,8 @@ async fn cache_source_tarball(
         .store_with_hash(git_commit_sha, &tarball, "tar.gz")
         .await?;
 
-    // Record in source_cache table
-    let r2_key = format!("source/{}.tar.gz", git_commit_sha);
+    // Record in source_cache table (use the actual sharded key from storage)
+    let r2_key = source_storage.storage_key(git_commit_sha, "tar.gz")?;
     state
         .db
         .insert_source_cache(git_provider, git_repo, git_commit_sha, &r2_key, byte_size)

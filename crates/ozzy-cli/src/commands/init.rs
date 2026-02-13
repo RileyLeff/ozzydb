@@ -63,6 +63,13 @@ pub fn run(cwd: &Path) -> Result<()> {
         toml.push_str(&format!("provider = \"{}\"\n", provider));
         toml.push_str(&format!("repo = \"{}\"\n", repo));
         toml.push('\n');
+
+        if provider != "github" {
+            println!(
+                "Warning: provider '{}' detected, but only 'github' is currently supported for push/fetch.",
+                provider
+            );
+        }
     }
 
     toml.push_str("[remote]\n");
