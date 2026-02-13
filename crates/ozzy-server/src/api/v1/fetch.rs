@@ -560,9 +560,11 @@ fn validate_and_resolve_params(
 
     for (name, param_def) in &endpoint.params {
         let value = if let Some(v) = consumer_params.get(name) {
+            // Coerce string values from query params to declared type
+            let coerced = coerce_param_value(v, &param_def.type_);
             // Validate type
-            validate_param_value(name, v, param_def)?;
-            v.clone()
+            validate_param_value(name, &coerced, param_def)?;
+            coerced
         } else if let Some(default) = &param_def.default {
             default.clone()
         } else {
@@ -576,6 +578,34 @@ fn validate_and_resolve_params(
     }
 
     Ok(serde_json::Value::Object(resolved))
+}
+
+/// Coerce a query-string parameter value to the declared type.
+///
+/// URL query params are always strings. This function converts string values
+/// to the appropriate JSON type (number, bool) based on the declared param type.
+fn coerce_param_value(value: &serde_json::Value, declared_type: &str) -> serde_json::Value {
+    if let serde_json::Value::String(s) = value {
+        match declared_type {
+            "float" | "number" => {
+                if let Ok(n) = s.parse::<f64>() {
+                    return serde_json::Value::from(n);
+                }
+            }
+            "int" | "integer" => {
+                if let Ok(n) = s.parse::<i64>() {
+                    return serde_json::Value::from(n);
+                }
+            }
+            "bool" | "boolean" => match s.as_str() {
+                "true" | "1" | "yes" => return serde_json::Value::Bool(true),
+                "false" | "0" | "no" => return serde_json::Value::Bool(false),
+                _ => {}
+            },
+            _ => {} // "string" or unknown — keep as-is
+        }
+    }
+    value.clone()
 }
 
 /// Validate a parameter value against its definition (min/max/enum).
@@ -1253,5 +1283,46 @@ mod tests {
         // other_param bound to "othernode.value" should NOT appear on "mynode"
         assert!(resolved.get("other_param").is_none());
         assert!(resolved.get("value").is_none());
+    }
+
+    #[test]
+    fn test_coerce_param_value_float() {
+        let v = serde_json::json!("12.5");
+        let c = coerce_param_value(&v, "float");
+        assert_eq!(c, serde_json::json!(12.5));
+    }
+
+    #[test]
+    fn test_coerce_param_value_int() {
+        let v = serde_json::json!("42");
+        let c = coerce_param_value(&v, "int");
+        assert_eq!(c, serde_json::json!(42));
+    }
+
+    #[test]
+    fn test_coerce_param_value_bool() {
+        assert_eq!(
+            coerce_param_value(&serde_json::json!("true"), "bool"),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            coerce_param_value(&serde_json::json!("false"), "bool"),
+            serde_json::json!(false)
+        );
+    }
+
+    #[test]
+    fn test_coerce_param_value_string_passthrough() {
+        let v = serde_json::json!("hello");
+        let c = coerce_param_value(&v, "string");
+        assert_eq!(c, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn test_coerce_param_value_already_typed() {
+        // Already a number — should pass through unchanged
+        let v = serde_json::json!(12.5);
+        let c = coerce_param_value(&v, "float");
+        assert_eq!(c, serde_json::json!(12.5));
     }
 }

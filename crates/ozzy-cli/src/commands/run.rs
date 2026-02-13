@@ -151,7 +151,7 @@ pub async fn run(
             .source
             .as_deref()
             .and_then(|s| s.rsplit_once(':').map(|(_, f)| f))
-            .unwrap_or("__command__");
+            .unwrap_or("command");
 
         // Compute transform hash
         let t_hash = hash::transform_hash(
@@ -780,7 +780,7 @@ async fn resolve_local_environment(
 
             // Note: uv.lock is TOML-based and cannot be pip-installed directly.
             // Users should provide requirements.txt (via `uv export`).
-            let install_cmd = if lockfile.contains("poetry.lock") {
+            let install_cmd = if lockfile == "poetry.lock" || lockfile.ends_with("/poetry.lock") {
                 "pip install poetry && cd /tmp && poetry install --no-interaction --no-ansi"
             } else {
                 // requirements.txt or any pip-compatible lockfile

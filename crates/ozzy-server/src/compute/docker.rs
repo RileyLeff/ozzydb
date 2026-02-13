@@ -37,38 +37,13 @@ pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult
     let inputs_dir = workspace.join("inputs");
     let output_dir = workspace.join("output");
     let source_dir = workspace.join("source");
-    tokio::fs::create_dir_all(&inputs_dir).await?;
-    tokio::fs::create_dir_all(&output_dir).await?;
-    tokio::fs::create_dir_all(&source_dir).await?;
 
-    // Write runner script
-    let runner_path = workspace.join(format!("runner.{}", request.runner_ext));
-    tokio::fs::write(&runner_path, &request.runner_script).await?;
-
-    // Write init script
-    let init_path = workspace.join("init.sh");
-    tokio::fs::write(&init_path, &request.init_script).await?;
-
-    // Link/copy inputs to workspace
-    for input in &request.inputs {
-        let dest = inputs_dir.join(&input.name);
-        if input.is_collection {
-            // For collections, copy the entire directory
-            copy_dir(&input.local_path, &dest).await?;
-        } else {
-            // For single files, hard link (same filesystem) or copy
-            if tokio::fs::hard_link(&input.local_path, &dest)
-                .await
-                .is_err()
-            {
-                tokio::fs::copy(&input.local_path, &dest).await?;
-            }
-        }
-    }
-
-    // If source directory is provided, copy it
-    if let Some(src) = &request.source_dir {
-        copy_dir(src, &source_dir).await?;
+    // Set up workspace — clean up on any setup failure
+    if let Err(e) =
+        setup_workspace(request, &workspace, &inputs_dir, &output_dir, &source_dir).await
+    {
+        cleanup_workspace(workspace).await;
+        return Err(e);
     }
 
     // Build docker run command
@@ -113,19 +88,26 @@ pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult
     cmd.arg(&request.image);
     cmd.args(["/bin/sh", "/workspace/init.sh"]);
 
-    // Execute with timeout
-    let output = tokio::time::timeout(
+    // Execute with timeout — clean up workspace on failure
+    let output = match tokio::time::timeout(
         std::time::Duration::from_secs(request.timeout_secs),
         cmd.output(),
     )
     .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "Transform execution timed out after {}s",
-            request.timeout_secs
-        )
-    })?
-    .context("Failed to execute docker run")?;
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => {
+            cleanup_workspace(workspace).await;
+            return Err(e).context("Failed to execute docker run");
+        }
+        Err(_) => {
+            cleanup_workspace(workspace).await;
+            anyhow::bail!(
+                "Transform execution timed out after {}s",
+                request.timeout_secs
+            );
+        }
+    };
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -139,6 +121,49 @@ pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult
         logs,
         duration_ms,
     })
+}
+
+/// Set up the workspace: create dirs, write scripts, copy inputs/source.
+async fn setup_workspace(
+    request: &ComputeRequest,
+    workspace: &Path,
+    inputs_dir: &Path,
+    output_dir: &Path,
+    source_dir: &Path,
+) -> Result<()> {
+    tokio::fs::create_dir_all(inputs_dir).await?;
+    tokio::fs::create_dir_all(output_dir).await?;
+    tokio::fs::create_dir_all(source_dir).await?;
+
+    // Write runner script
+    let runner_path = workspace.join(format!("runner.{}", request.runner_ext));
+    tokio::fs::write(&runner_path, &request.runner_script).await?;
+
+    // Write init script
+    let init_path = workspace.join("init.sh");
+    tokio::fs::write(&init_path, &request.init_script).await?;
+
+    // Link/copy inputs to workspace
+    for input in &request.inputs {
+        let dest = inputs_dir.join(&input.name);
+        if input.is_collection {
+            copy_dir(&input.local_path, &dest).await?;
+        } else {
+            if tokio::fs::hard_link(&input.local_path, &dest)
+                .await
+                .is_err()
+            {
+                tokio::fs::copy(&input.local_path, &dest).await?;
+            }
+        }
+    }
+
+    // If source directory is provided, copy it
+    if let Some(src) = &request.source_dir {
+        copy_dir(src, source_dir).await?;
+    }
+
+    Ok(())
 }
 
 /// Recursively copy a directory, skipping symlinks.
