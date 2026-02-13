@@ -1015,18 +1015,15 @@ if (inherits(result, "data.frame") || inherits(result, "ArrowTabular")) {{
 }
 
 /// Generate the Python runner script (same template as server's runners/python.rs).
+/// Uses importlib to load modules by file path, supporting any valid filename.
 fn generate_python_runner(source_file: &str, function_name: &str) -> String {
-    let module = source_file
-        .strip_suffix(".py")
-        .unwrap_or(source_file)
-        .replace('/', ".");
-
     format!(
         r#"#!/usr/bin/env python3
 """OzzyDB Python runner. Auto-generated — do not edit."""
 import sys
 import os
 import json
+import importlib.util
 
 sys.path.insert(0, '/workspace/source')
 
@@ -1094,7 +1091,11 @@ def _write_item(item, path):
         raise TypeError(f"Unsupported output type: {{type(item)}}")
 
 
-from {module} import {function_name}
+_source_path = os.path.join('/workspace/source', '{source_file}')
+_spec = importlib.util.spec_from_file_location('_ozzy_user_module', _source_path)
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+{function_name} = getattr(_mod, '{function_name}')
 
 result = {function_name}(inputs, params)
 
@@ -1113,7 +1114,7 @@ else:
     out_path = os.path.join(output_dir, "result")
     _write_item(result, out_path)
 "#,
-        module = module,
+        source_file = source_file,
         function_name = function_name,
     )
 }
@@ -1392,7 +1393,9 @@ to = "cal.data"
     #[test]
     fn test_generate_python_runner() {
         let script = generate_python_runner("transforms/qc.py", "quality_control");
-        assert!(script.contains("from transforms.qc import quality_control"));
+        assert!(script.contains("importlib.util.spec_from_file_location"));
+        assert!(script.contains("'transforms/qc.py'"));
+        assert!(script.contains("quality_control = getattr(_mod, 'quality_control')"));
         assert!(script.contains("result = quality_control(inputs, params)"));
     }
 

@@ -356,7 +356,19 @@ async fn fetch_endpoint(
             env_vars.insert(key, value);
         }
 
-        // Inject secrets (skip reserved env var names to prevent overwriting runtime vars)
+        // Inject secrets (block reserved env var names to prevent overwriting runtime controls)
+        const RESERVED_SECRET_NAMES: &[&str] = &[
+            "PATH",
+            "HOME",
+            "PYTHONHASHSEED",
+            "OMP_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+            "PYTHONDONTWRITEBYTECODE",
+            "PYTHONUNBUFFERED",
+        ];
         if !transform_def.secrets.is_empty() {
             let enc_key = state.config.secrets_encryption_key.as_ref().ok_or_else(|| {
                 ApiError::service_unavailable(format!(
@@ -368,6 +380,13 @@ async fn fetch_endpoint(
                 if secret_name.starts_with("OZZY_") {
                     return Err(ApiError::BadRequest(format!(
                         "Secret '{}' uses reserved prefix 'OZZY_'. Secrets must not override runtime environment variables.",
+                        secret_name
+                    )));
+                }
+                if RESERVED_SECRET_NAMES.iter().any(|&r| r.eq_ignore_ascii_case(secret_name)) {
+                    return Err(ApiError::BadRequest(format!(
+                        "Secret '{}' would override a reserved runtime environment variable. \
+                         Choose a different name.",
                         secret_name
                     )));
                 }

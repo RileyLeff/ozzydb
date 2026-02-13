@@ -126,35 +126,45 @@ async fn push(
         }
     }
 
-    // Verify the pusher's username matches the project owner
-    if auth.user.username != owner {
-        // Check if user has write access to an existing project
-        if let Some(project) = state.db.get_project(owner, slug).await? {
-            enforce_write_access(&state, &project, owner, slug, &auth.user, &auth.scope).await?;
-        } else {
-            return Err(ApiError::forbidden(
-                "You can only create projects under your own username",
-            ));
-        }
-    }
-
-    // ── Get or create project ────────────────────────────────────
-    // Resolve the project owner's user_id (may differ from the authenticated
-    // user if a collaborator is pushing).
+    // ── Resolve project owner ────────────────────────────────────
     let owner_user = state
         .db
         .get_user_by_username(owner)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("User '{}' not found", owner)))?;
 
+    // ── Auth: verify access before any side effects ──────────────
+    // Check existing project first to avoid creating projects as a side effect
+    // of unauthorized push attempts.
+    let existing_project = state.db.get_project(owner, slug).await?;
+
+    if auth.user.username != owner {
+        // Non-owner: must be a collaborator on an existing project
+        if let Some(ref project) = existing_project {
+            enforce_write_access(&state, project, owner, slug, &auth.user, &auth.scope).await?;
+        } else {
+            return Err(ApiError::forbidden(
+                "You can only create projects under your own username",
+            ));
+        }
+    } else if let Some(ref project) = existing_project {
+        // Owner, existing project: verify token scope
+        enforce_write_access(&state, project, owner, slug, &auth.user, &auth.scope).await?;
+    } else {
+        // Owner, new project: creating requires account scope (not a project-scoped token)
+        if auth.scope != "account" {
+            return Err(ApiError::forbidden(
+                "Creating new projects requires an account-scoped token",
+            ));
+        }
+    }
+
+    // ── Get or create project (safe — access verified above) ─────
     let project = state
         .db
         .get_or_create_project(owner_user.id, slug, "private")
         .await
         .map_err(ApiError::Internal)?;
-
-    // Verify write access via token scope
-    enforce_write_access(&state, &project, owner, slug, &auth.user, &auth.scope).await?;
 
     // Check for duplicate push (same SHA already registered)
     if let Some(existing) = state
