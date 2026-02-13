@@ -414,11 +414,11 @@ Update production Docker Compose for v2:
 
 Full E2E flow: init → data upload → write transform → push → fetch → verify cache hit → yank → verify yank error.
 
-### Step 7.3: Deploy to production
+### Step 7.3: Deploy to production (existing Hetzner CX22 at 46.225.111.110)
 
 - Drop v1 database
 - Run v2 migrations
-- Deploy new server
+- Deploy v2 server code to existing Hetzner instance (git pull + docker compose rebuild)
 - Rebuild frontend
 - Restart Caddy
 - Smoke test
