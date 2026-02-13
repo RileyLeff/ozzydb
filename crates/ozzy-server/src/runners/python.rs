@@ -8,25 +8,17 @@
 
 /// Generate a Python runner script for a transform.
 ///
-/// The `module_path` is the Python import path relative to `/workspace/source/`,
-/// and `function_name` is the function to call.
-///
-/// Example: `generate("transforms/qc.py", "quality_control")` produces a script
-/// that does `from transforms.qc import quality_control`.
+/// Uses `importlib` to load the module from a file path, which handles
+/// any valid filename (including hyphens, dots, etc.) that would break
+/// dotted `from X import Y` syntax.
 pub fn generate(source_file: &str, function_name: &str) -> String {
-    // Convert file path to Python module path:
-    // "transforms/qc.py" → "transforms.qc"
-    let module = source_file
-        .strip_suffix(".py")
-        .unwrap_or(source_file)
-        .replace('/', ".");
-
     format!(
         r#"#!/usr/bin/env python3
 """OzzyDB Python runner. Auto-generated — do not edit."""
 import sys
 import os
 import json
+import importlib.util
 
 sys.path.insert(0, '/workspace/source')
 
@@ -98,7 +90,11 @@ def _write_item(item, path):
 
 
 # --- Import and call the user's function ---
-from {module} import {function_name}
+_source_path = os.path.join('/workspace/source', '{source_file}')
+_spec = importlib.util.spec_from_file_location('_ozzy_user_module', _source_path)
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+{function_name} = getattr(_mod, '{function_name}')
 
 result = {function_name}(inputs, params)
 
@@ -118,7 +114,7 @@ else:
     out_path = os.path.join(output_dir, "result")
     _write_item(result, out_path)
 "#,
-        module = module,
+        source_file = source_file,
         function_name = function_name,
     )
 }
@@ -130,7 +126,9 @@ mod tests {
     #[test]
     fn test_generate_basic() {
         let script = generate("transforms/qc.py", "quality_control");
-        assert!(script.contains("from transforms.qc import quality_control"));
+        assert!(script.contains("importlib.util.spec_from_file_location"));
+        assert!(script.contains("'transforms/qc.py'"));
+        assert!(script.contains("quality_control = getattr(_mod, 'quality_control')"));
         assert!(script.contains("result = quality_control(inputs, params)"));
         assert!(script.contains("OZZY_INPUT_MANIFEST"));
         assert!(script.contains("OZZY_PARAMS"));
@@ -139,13 +137,15 @@ mod tests {
     #[test]
     fn test_generate_nested_module() {
         let script = generate("src/analysis/pipeline.py", "run");
-        assert!(script.contains("from src.analysis.pipeline import run"));
+        assert!(script.contains("'src/analysis/pipeline.py'"));
+        assert!(script.contains("run = getattr(_mod, 'run')"));
     }
 
     #[test]
     fn test_generate_top_level_module() {
         let script = generate("main.py", "process");
-        assert!(script.contains("from main import process"));
+        assert!(script.contains("'main.py'"));
+        assert!(script.contains("process = getattr(_mod, 'process')"));
     }
 
     #[test]
@@ -166,5 +166,14 @@ mod tests {
         let script = generate("f.py", "func");
         assert!(script.contains("polars"));
         assert!(script.contains("read_parquet"));
+    }
+
+    #[test]
+    fn test_generate_handles_hyphenated_path() {
+        // Hyphens in file paths are valid but would break dotted imports.
+        // importlib approach handles this correctly.
+        let script = generate("my-transforms/qc-check.py", "run_check");
+        assert!(script.contains("'my-transforms/qc-check.py'"));
+        assert!(script.contains("run_check = getattr(_mod, 'run_check')"));
     }
 }

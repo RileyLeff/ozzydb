@@ -1111,7 +1111,7 @@ impl Database {
             Vec::new()
         };
 
-        // Merge: keep existing, append new (skip duplicates by type+ref)
+        // Merge: keep existing, append new (skip duplicates by type+ref AND by hash)
         let mut all: Vec<(String, String, String, i32)> = current
             .iter()
             .map(|m| {
@@ -1126,7 +1126,12 @@ impl Database {
 
         let mut next_ordinal = all.iter().map(|(_, _, _, o)| *o).max().unwrap_or(-1) + 1;
         for (mtype, mref, mhash) in new_members {
+            // Skip if same type+ref already exists
             if all.iter().any(|(t, r, _, _)| t == mtype && r == mref) {
+                continue;
+            }
+            // Skip if same hash already exists (DB enforces UNIQUE on member_hash per version)
+            if all.iter().any(|(_, _, h, _)| h == mhash) {
                 continue;
             }
             all.push((mtype.clone(), mref.clone(), mhash.clone(), next_ordinal));

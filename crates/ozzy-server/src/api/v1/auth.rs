@@ -250,6 +250,20 @@ async fn create_token(
                 .get_project(owner, slug)
                 .await?
                 .ok_or_else(|| ApiError::not_found(format!("Project {}", target)))?;
+
+            // Verify the caller has access to this project (owner or collaborator)
+            let has_access = project.owner_id == user.id
+                || state
+                    .db
+                    .get_project_collaborator(project.id, user.id)
+                    .await?
+                    .is_some();
+            if !has_access {
+                return Err(ApiError::forbidden(
+                    "You do not have access to this project",
+                ));
+            }
+
             Some(project.id)
         } else {
             return Err(ApiError::bad_request(
