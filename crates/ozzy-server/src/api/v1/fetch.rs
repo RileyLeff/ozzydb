@@ -204,6 +204,18 @@ async fn fetch_endpoint(
                 })?;
             let hash = if let Some(ref sd) = source_dir {
                 let full_path = sd.path().join(file_path);
+                // Verify path stays within source dir (defense-in-depth)
+                let canonical = full_path.canonicalize().ok();
+                let within_source = canonical
+                    .as_ref()
+                    .and_then(|c| sd.path().canonicalize().ok().map(|sd| c.starts_with(sd)))
+                    .unwrap_or(false);
+                if !within_source {
+                    return Err(ApiError::BadRequest(format!(
+                        "Source path '{}' escapes source directory",
+                        file_path,
+                    )));
+                }
                 tokio::fs::read(&full_path)
                     .await
                     .map(|bytes| ozzy_core::hash::blake3_hash(&bytes))

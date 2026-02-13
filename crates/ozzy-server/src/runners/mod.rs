@@ -47,6 +47,10 @@ pub fn validate_source_ref(source: &str) -> Result<(&str, &str), &'static str> {
             "source file path contains invalid characters (allowed: alphanumeric, /, ., _, -)",
         );
     }
+    // Reject path traversal components (defense-in-depth: push also validates via git API)
+    if file_path.split('/').any(|seg| seg == "..") {
+        return Err("source file path must not contain '..' components");
+    }
     if func_name.is_empty() || !func_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err("function name must be a valid identifier (alphanumeric + underscore)");
     }
