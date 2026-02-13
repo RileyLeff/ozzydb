@@ -36,6 +36,15 @@ pub fn validate_source_ref(source: &str) -> Result<(&str, &str), &'static str> {
     if file_path.is_empty() {
         return Err("source file path must not be empty");
     }
+    // Validate file_path characters to prevent code injection in generated runner scripts.
+    // Python runner does `from {module} import ...` and R runner does `source("{file_path}")`,
+    // so we restrict to safe path characters only.
+    if !file_path
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+    {
+        return Err("source file path contains invalid characters (allowed: alphanumeric, /, ., _, -)");
+    }
     if func_name.is_empty() || !func_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err("function name must be a valid identifier (alphanumeric + underscore)");
     }
@@ -128,5 +137,26 @@ mod tests {
     #[test]
     fn test_validate_source_ref_rejects_missing_colon() {
         assert!(validate_source_ref("main.py").is_err());
+    }
+
+    #[test]
+    fn test_validate_source_ref_rejects_injection_in_file_path() {
+        // Python injection: `from evil import os; os.system("bad"); # import func`
+        assert!(validate_source_ref("evil import os; os.system(\"bad\"); #.py:func").is_err());
+        // R injection: `source("/workspace/source/foo.R"); system("evil")`
+        assert!(validate_source_ref("foo.R\"); system(\"evil:func").is_err());
+        // Spaces in path
+        assert!(validate_source_ref("bad path.py:func").is_err());
+        // Parens in path
+        assert!(validate_source_ref("evil().py:func").is_err());
+        // Semicolons in path
+        assert!(validate_source_ref("evil;cmd.py:func").is_err());
+    }
+
+    #[test]
+    fn test_validate_source_ref_allows_valid_paths() {
+        assert!(validate_source_ref("transforms/qc.py:func").is_ok());
+        assert!(validate_source_ref("src/my-module/analysis_v2.py:run").is_ok());
+        assert!(validate_source_ref("main.R:process").is_ok());
     }
 }

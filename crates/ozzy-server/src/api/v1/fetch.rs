@@ -573,6 +573,8 @@ fn validate_and_resolve_params(
             validate_param_value(name, &coerced, param_def)?;
             coerced
         } else if let Some(default) = &param_def.default {
+            // Validate default value too (catches bad ozzy.toml definitions)
+            validate_param_value(name, default, param_def)?;
             default.clone()
         } else {
             return Err(ApiError::BadRequest(format!(
@@ -1446,5 +1448,31 @@ mod tests {
         consumer.insert("threshold".to_string(), serde_json::json!("12.5"));
         let resolved = validate_and_resolve_params(&endpoint, &consumer).unwrap();
         assert_eq!(resolved.get("threshold").unwrap(), 12.5);
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_default_value() {
+        let mut params = HashMap::new();
+        params.insert(
+            "threshold".to_string(),
+            EndpointParamDef {
+                type_: "float".to_string(),
+                description: None,
+                default: Some(serde_json::json!(200.0)), // exceeds max
+                binds: "node.threshold".to_string(),
+                min: None,
+                max: Some(100.0),
+                enum_values: None,
+            },
+        );
+        let endpoint = EndpointDef {
+            description: None,
+            params,
+            nodes: HashMap::new(),
+            edges: vec![],
+        };
+        // Should reject the default that violates max constraint
+        let err = validate_and_resolve_params(&endpoint, &HashMap::new());
+        assert!(err.is_err(), "Default value exceeding max should be rejected");
     }
 }

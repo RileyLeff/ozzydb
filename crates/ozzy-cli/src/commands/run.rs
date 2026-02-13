@@ -360,32 +360,45 @@ pub async fn run(
 // Param resolution
 // ============================================================================
 
-/// Parse `--param key=value` args into a map.
-fn parse_param_args(params: &[String]) -> Result<HashMap<String, serde_json::Value>> {
+/// Parse `--param key=value` args into a map of string values.
+///
+/// Values are kept as strings and coerced to declared types later in
+/// `resolve_endpoint_params`, matching the server's query-param flow.
+fn parse_param_args(params: &[String]) -> Result<HashMap<String, String>> {
     let mut map = HashMap::new();
     for param in params {
         let (key, value) = param
             .split_once('=')
             .ok_or_else(|| anyhow::anyhow!("Invalid param '{}'. Expected key=value", param))?;
-        let parsed = parse_param_value(value);
-        map.insert(key.to_string(), parsed);
+        map.insert(key.to_string(), value.to_string());
     }
     Ok(map)
 }
 
-/// Parse a param value string into a JSON value, inferring type.
-fn parse_param_value(s: &str) -> serde_json::Value {
-    if s == "true" {
-        serde_json::Value::Bool(true)
-    } else if s == "false" {
-        serde_json::Value::Bool(false)
-    } else if let Ok(i) = s.parse::<i64>() {
-        serde_json::json!(i)
-    } else if let Ok(f) = s.parse::<f64>() {
-        serde_json::json!(f)
-    } else {
-        serde_json::Value::String(s.to_string())
+/// Coerce a string param value to the declared JSON type.
+///
+/// Matches the server's `coerce_param_value` logic so CLI and server produce
+/// identical materialized hashes for the same inputs.
+fn coerce_param_value(s: &str, declared_type: &str) -> serde_json::Value {
+    match declared_type {
+        "float" | "number" => {
+            if let Ok(n) = s.parse::<f64>() {
+                return serde_json::Value::from(n);
+            }
+        }
+        "int" | "integer" => {
+            if let Ok(n) = s.parse::<i64>() {
+                return serde_json::Value::from(n);
+            }
+        }
+        "bool" | "boolean" => match s {
+            "true" | "1" | "yes" => return serde_json::Value::Bool(true),
+            "false" | "0" | "no" => return serde_json::Value::Bool(false),
+            _ => {}
+        },
+        _ => {} // "string" and unknown types stay as strings
     }
+    serde_json::Value::String(s.to_string())
 }
 
 /// Parse `--local-data name=path` args into a map.
@@ -407,7 +420,7 @@ fn parse_local_data_args(args: &[String]) -> Result<HashMap<String, PathBuf>> {
 /// Resolve endpoint params: apply user overrides, then fill defaults.
 fn resolve_endpoint_params(
     endpoint: &EndpointDef,
-    user_params: &HashMap<String, serde_json::Value>,
+    user_params: &HashMap<String, String>,
 ) -> Result<HashMap<String, serde_json::Value>> {
     // Check for unrecognized params
     for key in user_params.keys() {
@@ -420,7 +433,9 @@ fn resolve_endpoint_params(
     let mut resolved = HashMap::new();
     for (name, def) in &endpoint.params {
         if let Some(value) = user_params.get(name) {
-            resolved.insert(name.clone(), value.clone());
+            // Coerce string value to declared type (matches server's coerce_param_value)
+            let coerced = coerce_param_value(value, &def.type_);
+            resolved.insert(name.clone(), coerced);
         } else if let Some(default) = &def.default {
             resolved.insert(name.clone(), default.clone());
         } else {
@@ -1236,7 +1251,7 @@ to = "cal.data"
     fn test_resolve_endpoint_params_with_defaults() {
         let spec = test_spec();
         let ep = &spec.endpoints["corrected"];
-        let user_params = HashMap::new();
+        let user_params: HashMap<String, String> = HashMap::new();
         let resolved = resolve_endpoint_params(ep, &user_params).unwrap();
         assert_eq!(
             resolved.get("cal_method"),
@@ -1249,7 +1264,7 @@ to = "cal.data"
         let spec = test_spec();
         let ep = &spec.endpoints["corrected"];
         let mut user_params = HashMap::new();
-        user_params.insert("cal_method".to_string(), serde_json::json!("smith_2023"));
+        user_params.insert("cal_method".to_string(), "smith_2023".to_string());
         let resolved = resolve_endpoint_params(ep, &user_params).unwrap();
         assert_eq!(
             resolved.get("cal_method"),
@@ -1269,20 +1284,35 @@ to = "cal.data"
     }
 
     #[test]
-    fn test_parse_param_value() {
-        assert_eq!(parse_param_value("true"), serde_json::json!(true));
-        assert_eq!(parse_param_value("false"), serde_json::json!(false));
-        assert_eq!(parse_param_value("42"), serde_json::json!(42));
-        assert_eq!(parse_param_value("3.14"), serde_json::json!(3.14));
-        assert_eq!(parse_param_value("hello"), serde_json::json!("hello"));
+    fn test_coerce_param_value() {
+        // Float coercion
+        assert_eq!(coerce_param_value("3.14", "float"), serde_json::json!(3.14));
+        assert_eq!(coerce_param_value("42", "number"), serde_json::json!(42.0));
+        // Integer coercion
+        assert_eq!(coerce_param_value("42", "int"), serde_json::json!(42));
+        assert_eq!(coerce_param_value("42", "integer"), serde_json::json!(42));
+        // Boolean coercion (matches server: true/1/yes, false/0/no)
+        assert_eq!(coerce_param_value("true", "bool"), serde_json::json!(true));
+        assert_eq!(coerce_param_value("1", "bool"), serde_json::json!(true));
+        assert_eq!(coerce_param_value("yes", "boolean"), serde_json::json!(true));
+        assert_eq!(coerce_param_value("false", "bool"), serde_json::json!(false));
+        assert_eq!(coerce_param_value("0", "bool"), serde_json::json!(false));
+        assert_eq!(coerce_param_value("no", "boolean"), serde_json::json!(false));
+        // String stays as string
+        assert_eq!(coerce_param_value("hello", "string"), serde_json::json!("hello"));
+        // Numeric-looking value stays string when declared as string
+        assert_eq!(coerce_param_value("123", "string"), serde_json::json!("123"));
+        assert_eq!(coerce_param_value("true", "string"), serde_json::json!("true"));
+        // Failed coercion falls back to string
+        assert_eq!(coerce_param_value("not-a-number", "float"), serde_json::json!("not-a-number"));
     }
 
     #[test]
     fn test_parse_param_args() {
         let args = vec!["threshold=12.5".to_string(), "method=voltage".to_string()];
         let parsed = parse_param_args(&args).unwrap();
-        assert_eq!(parsed.get("threshold"), Some(&serde_json::json!(12.5)));
-        assert_eq!(parsed.get("method"), Some(&serde_json::json!("voltage")));
+        assert_eq!(parsed.get("threshold"), Some(&"12.5".to_string()));
+        assert_eq!(parsed.get("method"), Some(&"voltage".to_string()));
     }
 
     #[test]
