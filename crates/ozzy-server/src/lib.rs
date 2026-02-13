@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod compute;
 pub mod config;
 pub mod db;
 pub mod environments;
