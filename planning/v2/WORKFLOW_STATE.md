@@ -1,8 +1,8 @@
 # v2 Workflow State
 
-**Current Phase:** 5 — Frontend (COMPLETE)
-**Current Step:** Done — exhaustive review converged
-**Status:** All 8 steps implemented. Exhaustive review converged (5 rounds, 2 consecutive clean).
+**Current Phase:** 6 — Python Client (IMPLEMENTATION COMPLETE)
+**Current Step:** Exhaustive review in progress
+**Status:** All 5 steps implemented. 44 unit tests passing. Ready for exhaustive review.
 
 ## Progress
 
@@ -35,7 +35,10 @@
 | 5 | 5.7 | Settings + secrets management | Done |
 | 5 | 5.8 | User profile update | Done |
 | 5 | review | Exhaustive review (5 rounds, converged) | Done |
-| 6 | 6.1-6.3 | Python client | Pending |
+| 6 | 6.1 | Types + HTTP client foundation | Done |
+| 6 | 6.2-6.3 | fetch, inspect, run, upload, download | Done |
+| 6 | 6.4 | Unit tests (44 passing) | Done |
+| 6 | 6.5 | Package exports + README | Done |
 | 7 | 7.1-7.3 | Deployment + integration | Pending |
 
 ## Blockers
@@ -127,3 +130,8 @@ None.
   - Key fixes: ProjectTabs reactivity, UUID→username resolution (data/collections/commits), Object URL lifecycle, stale state on navigation, ref param collision, negative limit clamping
   - Rounds 4+5 both clean → convergence
   - Review artifacts: #48-#52 in planning/reviews/v2/
+- Phase 6 implementation complete:
+  - Step 6.1 (53b6744): Types + HTTP client (20+ dataclasses, OzzyClient with auth)
+  - Step 6.2-6.3 (7394e12): All client functions (fetch, fetch_lazy, inspect, inspect_project, run, upload, download, download_dataframe)
+  - Step 6.4 (68e0b91): Unit tests (44 passing) with mocked HTTP
+  - Step 6.5 (4c105bb): README and package exports
