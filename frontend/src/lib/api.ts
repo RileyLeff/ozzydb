@@ -181,12 +181,13 @@ export function fetchEndpoint(
 	ref?: string
 ) {
 	const searchParams = new URLSearchParams();
-	if (ref) searchParams.set('ref', ref);
 	if (params) {
 		for (const [k, v] of Object.entries(params)) {
 			searchParams.set(k, v);
 		}
 	}
+	// Set ref after params so it cannot be overridden by a param named "ref"
+	if (ref) searchParams.set('ref', ref);
 	const qs = searchParams.toString();
 	return rawRequest(`/fetch/${owner}/${project}/${endpoint}${qs ? '?' + qs : ''}`);
 }

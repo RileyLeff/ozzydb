@@ -56,7 +56,7 @@ struct DataAtomDetail {
     hash: String,
     content_type: String,
     byte_size: i64,
-    uploaded_by: Uuid,
+    uploaded_by: String,
     yanked: bool,
     yank_reason: Option<String>,
     yanked_at: Option<DateTime<Utc>>,
@@ -79,7 +79,7 @@ struct DescribeRequest {
 struct MetadataEntryResponse {
     field: String,
     value: serde_json::Value,
-    set_by: Uuid,
+    set_by: String,
     created_at: DateTime<Utc>,
 }
 
@@ -435,13 +435,20 @@ async fn get_data_atom(
         metadata.insert(entry.field, entry.value);
     }
 
+    let uploaded_by = state
+        .db
+        .get_user_by_id(atom.uploaded_by)
+        .await?
+        .map(|u| u.username)
+        .unwrap_or_else(|| atom.uploaded_by.to_string());
+
     Ok(Json(DataAtomDetail {
         id: atom.id,
         name: atom.name,
         hash: atom.hash,
         content_type: atom.content_type,
         byte_size: atom.byte_size,
-        uploaded_by: atom.uploaded_by,
+        uploaded_by,
         yanked: atom.yanked,
         yank_reason: atom.yank_reason,
         yanked_at: atom.yanked_at,
@@ -558,10 +565,17 @@ async fn describe_data(
         .append_metadata(atom.id, &req.field, &req.value, user.id)
         .await?;
 
+    let set_by = state
+        .db
+        .get_user_by_id(entry.set_by)
+        .await?
+        .map(|u| u.username)
+        .unwrap_or_else(|| entry.set_by.to_string());
+
     Ok(Json(MetadataEntryResponse {
         field: entry.field,
         value: entry.value,
-        set_by: entry.set_by,
+        set_by,
         created_at: entry.created_at,
     }))
 }
@@ -588,15 +602,21 @@ async fn get_metadata(
 
     let entries = state.db.get_full_metadata_history(atom.id).await?;
 
-    let items: Vec<MetadataEntryResponse> = entries
-        .into_iter()
-        .map(|e| MetadataEntryResponse {
+    let mut items = Vec::with_capacity(entries.len());
+    for e in entries {
+        let set_by = state
+            .db
+            .get_user_by_id(e.set_by)
+            .await?
+            .map(|u| u.username)
+            .unwrap_or_else(|| e.set_by.to_string());
+        items.push(MetadataEntryResponse {
             field: e.field,
             value: e.value,
-            set_by: e.set_by,
+            set_by,
             created_at: e.created_at,
-        })
-        .collect();
+        });
+    }
 
     Ok(Json(items))
 }

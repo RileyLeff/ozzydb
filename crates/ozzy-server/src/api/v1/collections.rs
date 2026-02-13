@@ -21,6 +21,16 @@ use crate::{
     db::queries::CollectionMutResult,
 };
 
+/// Resolve a user UUID to their username, falling back to the UUID string.
+async fn resolve_username(state: &AppState, user_id: Uuid) -> Result<String, ApiError> {
+    Ok(state
+        .db
+        .get_user_by_id(user_id)
+        .await?
+        .map(|u| u.username)
+        .unwrap_or_else(|| user_id.to_string()))
+}
+
 // ============================================================================
 // Wire types
 // ============================================================================
@@ -55,7 +65,7 @@ struct CollectionDetail {
 struct VersionDetail {
     version_number: i32,
     hash: String,
-    created_by: Uuid,
+    created_by: String,
     created_at: DateTime<Utc>,
     members: Vec<MemberInfo>,
 }
@@ -72,7 +82,7 @@ struct MemberInfo {
 struct VersionLogEntry {
     version_number: i32,
     hash: String,
-    created_by: Uuid,
+    created_by: String,
     created_at: DateTime<Utc>,
 }
 
@@ -365,10 +375,11 @@ async fn get_collection(
 
     let version = if let Some(ver) = state.db.get_latest_collection_version(coll.id).await? {
         let members = state.db.get_collection_members(ver.id).await?;
+        let created_by = resolve_username(&state, ver.created_by).await?;
         Some(VersionDetail {
             version_number: ver.version_number,
             hash: ver.hash,
-            created_by: ver.created_by,
+            created_by,
             created_at: ver.created_at,
             members: members
                 .into_iter()
@@ -417,15 +428,16 @@ async fn collection_log(
 
     let versions = state.db.list_collection_versions(coll.id).await?;
 
-    let entries: Vec<VersionLogEntry> = versions
-        .into_iter()
-        .map(|v| VersionLogEntry {
+    let mut entries = Vec::with_capacity(versions.len());
+    for v in versions {
+        let created_by = resolve_username(&state, v.created_by).await?;
+        entries.push(VersionLogEntry {
             version_number: v.version_number,
             hash: v.hash,
-            created_by: v.created_by,
+            created_by,
             created_at: v.created_at,
-        })
-        .collect();
+        });
+    }
 
     Ok(Json(entries))
 }
@@ -517,10 +529,12 @@ async fn add_members(
         }
     };
 
+    let created_by = resolve_username(&state, ver.created_by).await?;
+
     Ok(Json(VersionDetail {
         version_number: ver.version_number,
         hash: ver.hash,
-        created_by: ver.created_by,
+        created_by,
         created_at: ver.created_at,
         members: members
             .into_iter()
@@ -601,10 +615,12 @@ async fn remove_members(
         CollectionMutResult::CycleDetected(_) => unreachable!("remove does not check cycles"),
     };
 
+    let created_by = resolve_username(&state, ver.created_by).await?;
+
     Ok(Json(VersionDetail {
         version_number: ver.version_number,
         hash: ver.hash,
-        created_by: ver.created_by,
+        created_by,
         created_at: ver.created_at,
         members: members
             .into_iter()

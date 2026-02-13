@@ -77,6 +77,8 @@
 		if (!endpoint) return;
 		executing = true;
 		execError = null;
+		// Revoke previous Object URL to prevent memory leak
+		if (execResult) URL.revokeObjectURL(execResult.url);
 		execResult = null;
 
 		// Build param overrides (only non-empty values)
