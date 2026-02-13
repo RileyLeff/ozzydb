@@ -745,7 +745,7 @@ fn resolve_input_files(
 
 /// Find the primary output file in a node's output directory.
 fn find_primary_output(output_dir: &Path) -> Result<PathBuf> {
-    let entries: Vec<_> = std::fs::read_dir(output_dir)?
+    let mut entries: Vec<_> = std::fs::read_dir(output_dir)?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .collect();
@@ -753,6 +753,9 @@ fn find_primary_output(output_dir: &Path) -> Result<PathBuf> {
     if entries.is_empty() {
         bail!("No output files in {}", output_dir.display());
     }
+
+    // Sort for deterministic selection (matches server's list_output_files)
+    entries.sort_by_key(|e| e.file_name());
 
     // Prefer "result.*" files
     for entry in &entries {
@@ -763,7 +766,7 @@ fn find_primary_output(output_dir: &Path) -> Result<PathBuf> {
         }
     }
 
-    // Fall back to first file
+    // Fall back to first file alphabetically
     Ok(entries[0].path())
 }
 
