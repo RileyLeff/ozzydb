@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,6 @@ class OzzyClient:
     """HTTP client for the OzzyDB registry API."""
 
     DEFAULT_BASE_URL = "https://api.ozzydb.com"
-    CREDENTIALS_PATH = Path.home() / ".config" / "ozzy" / "credentials.json"
 
     def __init__(
         self,
@@ -92,28 +92,47 @@ class OzzyClient:
             return None
         return resp.json()
 
+    def close(self) -> None:
+        """Close the underlying HTTP session."""
+        self._session.close()
+
+    def __enter__(self) -> "OzzyClient":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
+
+    @staticmethod
+    def _credentials_path() -> Path:
+        """Compute credentials path at runtime (not import time)."""
+        return Path.home() / ".config" / "ozzy" / "credentials.json"
+
     def _load_credentials(self) -> dict[str, str]:
         """Load credentials from ~/.config/ozzy/credentials.json."""
         try:
-            with open(self.CREDENTIALS_PATH) as f:
+            with open(self._credentials_path()) as f:
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError, PermissionError):
             return {}
 
 
-# Module-level default client (lazy singleton)
+# Module-level default client (lazy singleton, thread-safe)
 _default_client: OzzyClient | None = None
+_default_client_lock = threading.Lock()
 
 
 def get_default_client() -> OzzyClient:
     """Get or create the default OzzyClient instance."""
     global _default_client
     if _default_client is None:
-        _default_client = OzzyClient()
+        with _default_client_lock:
+            if _default_client is None:
+                _default_client = OzzyClient()
     return _default_client
 
 
 def reset_default_client() -> None:
     """Reset the default client (useful for testing)."""
     global _default_client
-    _default_client = None
+    with _default_client_lock:
+        _default_client = None

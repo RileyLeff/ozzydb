@@ -174,6 +174,13 @@ class TestFromDict:
         assert len(result.version.members) == 1
         assert result.version.members[0].member_type == "data"
 
+    def test_extra_keys_ignored(self):
+        """Server adding new fields should not crash the client."""
+        data = {"username": "alice", "role": "admin", "new_field": "surprise"}
+        result = _from_dict(CollaboratorInfo, data)
+        assert result.username == "alice"
+        assert result.role == "admin"
+
     def test_collection_detail_without_version(self):
         data = {
             "id": "uuid-456",

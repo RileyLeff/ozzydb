@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dc_fields
 from typing import Any
 
 
@@ -338,5 +338,6 @@ def _from_dict(cls, data: dict) -> Any:
             transforms=data.get("transforms", {}),
             endpoints=data.get("endpoints", {}),
         )
-    # Simple dataclasses — construct directly from dict
-    return cls(**data)
+    # Simple dataclasses — construct from dict, filtering to known fields
+    known = {f.name for f in dc_fields(cls)}
+    return cls(**{k: v for k, v in data.items() if k in known})

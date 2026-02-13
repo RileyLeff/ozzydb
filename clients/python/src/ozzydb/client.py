@@ -31,7 +31,7 @@ def _parse_remote_ref(ref: str) -> tuple[str, str, str]:
     Raises ValueError if the format is invalid.
     """
     parts = ref.strip("/").split("/")
-    if len(parts) != 3:
+    if len(parts) != 3 or not all(parts):
         raise ValueError(
             f"Invalid reference '{ref}': expected 'owner/project/endpoint'"
         )
@@ -44,7 +44,7 @@ def _parse_project_ref(ref: str) -> tuple[str, str]:
     Raises ValueError if the format is invalid.
     """
     parts = ref.strip("/").split("/")
-    if len(parts) != 2:
+    if len(parts) != 2 or not all(parts):
         raise ValueError(
             f"Invalid reference '{ref}': expected 'owner/project'"
         )
@@ -154,14 +154,23 @@ def fetch_lazy(
 
     content_type = resp.headers.get("content-type", "application/octet-stream")
 
-    # Write to temp file — for lazy scanning we need it to persist
+    # Write to temp file
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet")
     tmp_path = tmp.name
-    for chunk in resp.iter_content(chunk_size=8192):
-        tmp.write(chunk)
-    tmp.close()
+    try:
+        for chunk in resp.iter_content(chunk_size=8192):
+            tmp.write(chunk)
+        tmp.close()
+    except Exception:
+        tmp.close()
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
 
     if "parquet" in content_type:
+        # For lazy scanning, the file must persist while the LazyFrame is alive.
+        # Register cleanup via atexit so the file is removed when Python exits.
+        import atexit
+        atexit.register(lambda p=tmp_path: Path(p).unlink(missing_ok=True))
         return pl.scan_parquet(tmp_path)
     else:
         # Fall back: read into DataFrame and convert to lazy
@@ -368,7 +377,6 @@ def download(
     resp = c.request(
         "GET",
         f"/data/{quote(owner, safe='')}/{quote(slug, safe='')}/{quote(name, safe='')}/download",
-        stream=True,
     )
     return resp.content
 
@@ -451,7 +459,7 @@ def _infer_content_type(path: str) -> str:
     # Check magic bytes for common formats
     try:
         with open(p, "rb") as f:
-            header = f.read(8)
+            header = f.read(64)
         if header[:4] == b"PAR1":
             return "application/vnd.apache.parquet"
         if header[:8] == b"ARROW1\x00\x00":
@@ -460,6 +468,20 @@ def _infer_content_type(path: str) -> str:
             return "image/png"
         if header[:2] == b"\xff\xd8":
             return "image/jpeg"
+        # Text format heuristics: check if content is valid UTF-8
+        try:
+            text = header.decode("utf-8")
+            # JSON starts with { or [
+            if text.lstrip().startswith(("{", "[")):
+                return "application/json"
+            # CSV: has commas and likely a header row
+            if "," in text and "\n" in text:
+                return "text/csv"
+            # TSV: has tabs and likely a header row
+            if "\t" in text and "\n" in text:
+                return "text/tab-separated-values"
+        except (UnicodeDecodeError, ValueError):
+            pass
     except (OSError, IOError):
         pass
 

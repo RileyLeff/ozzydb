@@ -60,6 +60,14 @@ class TestRefParsing:
         with pytest.raises(ValueError, match="owner/project"):
             _parse_project_ref("alice/proj/extra")
 
+    def test_parse_remote_ref_empty_component(self):
+        with pytest.raises(ValueError, match="owner/project/endpoint"):
+            _parse_remote_ref("alice//endpoint")
+
+    def test_parse_project_ref_empty_component(self):
+        with pytest.raises(ValueError, match="owner/project"):
+            _parse_project_ref("alice/")
+
 
 # ── Content type helpers ─────────────────────────────────────────
 
@@ -478,14 +486,14 @@ class TestRun:
 
 class TestAuth:
     def test_load_credentials(self, credentials_dir):
-        with patch.object(OzzyClient, "CREDENTIALS_PATH", credentials_dir):
+        with patch.object(OzzyClient, "_credentials_path", staticmethod(lambda: credentials_dir)):
             client = OzzyClient()
         assert client.base_url == "https://custom.ozzydb.com"
         assert client.authenticated
 
     def test_no_credentials(self, tmp_path):
         fake_creds = tmp_path / "nonexistent" / "credentials.json"
-        with patch.object(OzzyClient, "CREDENTIALS_PATH", fake_creds):
+        with patch.object(OzzyClient, "_credentials_path", staticmethod(lambda: fake_creds)):
             client = OzzyClient()
         assert client.base_url == "https://api.ozzydb.com"
         assert not client.authenticated
