@@ -3,47 +3,22 @@
 	import { auth } from '$lib/auth.svelte';
 	import { listProjects } from '$lib/api';
 	import type { ProjectInfo } from '$lib/types';
+	import { relativeTime } from '$lib/utils';
 
-	let loading = $state(false);
+	let loading = $state(true);
 	let error: string | null = $state(null);
 	let projects: ProjectInfo[] = $state([]);
 
-	let owner = $derived(page.params.owner);
+	let owner = $derived(page.params.owner ?? '');
 	let isOwnProfile = $derived(auth.user?.username === owner);
-
-	function relativeTime(iso: string): string {
-		const now = Date.now();
-		const then = new Date(iso).getTime();
-		const seconds = Math.floor((now - then) / 1000);
-
-		if (seconds < 60) return 'just now';
-		const minutes = Math.floor(seconds / 60);
-		if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
-		const hours = Math.floor(minutes / 60);
-		if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
-		const days = Math.floor(hours / 24);
-		if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`;
-		const months = Math.floor(days / 30);
-		if (months < 12) return `${months} month${months === 1 ? '' : 's'} ago`;
-		const years = Math.floor(months / 12);
-		return `${years} year${years === 1 ? '' : 's'} ago`;
-	}
 
 	function avatarInitial(username: string): string {
 		return username.charAt(0).toUpperCase();
 	}
 
 	$effect(() => {
+		if (!owner) return;
 		const currentOwner = owner;
-
-		if (!currentOwner) return;
-
-		// Only fetch projects if viewing own profile
-		if (auth.user?.username !== currentOwner) {
-			loading = false;
-			projects = [];
-			return;
-		}
 
 		loading = true;
 		error = null;
@@ -94,20 +69,20 @@
 	<section class="projects-section">
 		<h2 class="section-title">Projects</h2>
 
-		{#if isOwnProfile}
-			{#if loading}
-				<div class="loading-state">
-					<div class="spinner"></div>
-					<p class="loading-text">Loading projects...</p>
-				</div>
-			{:else if error}
-				<div class="empty-state">
-					<h3>Something went wrong</h3>
-					<p>{error}</p>
-					<button class="btn btn-outline" onclick={() => location.reload()}>Try again</button>
-				</div>
-			{:else if projects.length === 0}
-				<div class="empty-state">
+		{#if loading}
+			<div class="loading-state">
+				<div class="spinner"></div>
+				<p class="loading-text">Loading projects...</p>
+			</div>
+		{:else if error}
+			<div class="empty-state">
+				<h3>Something went wrong</h3>
+				<p>{error}</p>
+				<button class="btn btn-outline" onclick={() => location.reload()}>Try again</button>
+			</div>
+		{:else if projects.length === 0}
+			<div class="empty-state">
+				{#if isOwnProfile}
 					<h3>No projects yet</h3>
 					<p>
 						You haven't pushed any projects to OzzyDB yet.
@@ -116,35 +91,29 @@
 					<div class="empty-state-code">
 						<code>ozzy init my-project && ozzy push</code>
 					</div>
-				</div>
-			{:else}
-				<div class="projects-grid">
-					{#each projects as project (project.slug)}
-						<a class="project-card" href="/{project.owner}/{project.slug}">
-							<div class="project-card-header">
-								<h3 class="project-name">{project.slug}</h3>
-								<span class="badge {project.visibility === 'public' ? 'badge-public' : 'badge-private'}">
-									{project.visibility}
-								</span>
-							</div>
-							{#if project.description}
-								<p class="project-description">{project.description}</p>
-							{/if}
-							<div class="project-meta">
-								<span class="project-time">Updated {relativeTime(project.updated_at)}</span>
-							</div>
-						</a>
-					{/each}
-				</div>
-			{/if}
+				{:else}
+					<h3>No public projects</h3>
+					<p>{owner} hasn't published any public projects yet.</p>
+				{/if}
+			</div>
 		{:else}
-			<div class="empty-state">
-				<h3>Public projects</h3>
-				<p>
-					Public project listings are coming soon.
-					In the meantime, you can access projects directly at
-					<span class="mono">/{owner}/project-name</span>.
-				</p>
+			<div class="projects-grid">
+				{#each projects as project (project.slug)}
+					<a class="project-card" href="/{project.owner}/{project.slug}">
+						<div class="project-card-header">
+							<h3 class="project-name">{project.slug}</h3>
+							<span class="badge {project.visibility === 'public' ? 'badge-public' : 'badge-private'}">
+								{project.visibility}
+							</span>
+						</div>
+						{#if project.description}
+							<p class="project-description">{project.description}</p>
+						{/if}
+						<div class="project-meta">
+							<span class="project-time">Updated {relativeTime(project.updated_at)}</span>
+						</div>
+					</a>
+				{/each}
 			</div>
 		{/if}
 	</section>
