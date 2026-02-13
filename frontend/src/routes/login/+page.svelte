@@ -31,6 +31,21 @@
 		}
 	}
 
+	async function copyAndOpenGithub() {
+		if (!deviceData) return;
+
+		// Copy code to clipboard
+		try {
+			await navigator.clipboard.writeText(deviceData.user_code);
+			copied = true;
+		} catch {
+			// Fallback: user will copy manually
+		}
+
+		// Open GitHub in new tab
+		window.open(deviceData.verification_uri, '_blank', 'noopener,noreferrer');
+	}
+
 	async function beginPolling() {
 		if (!deviceData) return;
 
@@ -116,24 +131,44 @@
 
 		{:else if step === 'showing_code' && deviceData}
 			<div class="card-header">
-				<h1 class="card-title">Enter this code on GitHub</h1>
+				<h1 class="card-title">Sign in with GitHub</h1>
 				<p class="card-subtitle">
-					Go to
-					<a href={deviceData.verification_uri} target="_blank" rel="noopener noreferrer">
-						{deviceData.verification_uri}
-					</a>
-					and enter the code below.
+					Copy the code below, paste it on GitHub, then come back here.
 				</p>
 			</div>
 
-			<button class="user-code-box" onclick={handleCopy} aria-label="Copy code to clipboard">
-				<span class="user-code">{deviceData.user_code}</span>
-				<span class="copy-hint">{copied ? 'Copied!' : 'Click to copy'}</span>
-			</button>
+			<div class="step-list">
+				<div class="step-item">
+					<span class="step-number">1</span>
+					<div class="step-content">
+						<span class="step-label">Copy your code</span>
+						<button class="user-code-box" onclick={handleCopy} aria-label="Copy code to clipboard">
+							<span class="user-code">{deviceData.user_code}</span>
+							<span class="copy-hint">{copied ? 'Copied!' : 'Click to copy'}</span>
+						</button>
+					</div>
+				</div>
 
-			<button class="btn btn-primary" onclick={beginPolling}>
-				I've entered the code
-			</button>
+				<div class="step-item">
+					<span class="step-number">2</span>
+					<div class="step-content">
+						<span class="step-label">Paste it on GitHub</span>
+						<button class="btn btn-secondary" onclick={copyAndOpenGithub}>
+							Open GitHub &rarr;
+						</button>
+					</div>
+				</div>
+
+				<div class="step-item">
+					<span class="step-number">3</span>
+					<div class="step-content">
+						<span class="step-label">Confirm here</span>
+						<button class="btn btn-primary" onclick={beginPolling}>
+							I've authorized on GitHub
+						</button>
+					</div>
+				</div>
+			</div>
 
 			<button class="btn-link" onclick={reset}>Cancel</button>
 
@@ -283,6 +318,50 @@
 		gap: var(--space-sm);
 	}
 
+	/* ── Step list ────────────────────────────────────────── */
+
+	.step-list {
+		width: 100%;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-lg);
+	}
+
+	.step-item {
+		display: flex;
+		gap: var(--space-md);
+		align-items: flex-start;
+	}
+
+	.step-number {
+		flex-shrink: 0;
+		width: 28px;
+		height: 28px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 50%;
+		background: var(--bg-secondary);
+		border: 1px solid var(--border-strong);
+		font-size: 13px;
+		font-weight: 700;
+		color: var(--text-secondary);
+		margin-top: 2px;
+	}
+
+	.step-content {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-sm);
+	}
+
+	.step-label {
+		font-size: 14px;
+		font-weight: 600;
+		color: var(--text);
+	}
+
 	/* ── User code box ────────────────────────────────────── */
 
 	.user-code-box {
@@ -290,8 +369,8 @@
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		gap: var(--space-sm);
-		padding: var(--space-lg) var(--space-xl);
+		gap: var(--space-xs);
+		padding: var(--space-md) var(--space-lg);
 		border: 2px dashed var(--border-strong);
 		border-radius: var(--radius-lg);
 		background: var(--bg-secondary);
@@ -306,7 +385,7 @@
 
 	.user-code {
 		font-family: var(--font-mono);
-		font-size: 36px;
+		font-size: 28px;
 		font-weight: 700;
 		letter-spacing: 0.15em;
 		color: var(--text);
@@ -314,7 +393,7 @@
 	}
 
 	.copy-hint {
-		font-size: 12px;
+		font-size: 11px;
 		color: var(--text-muted);
 		transition: color 0.15s;
 	}
@@ -323,9 +402,33 @@
 		color: var(--pink);
 	}
 
+	/* ── Secondary button ────────────────────────────────── */
+
+	.btn-secondary {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 10px 16px;
+		font-size: 14px;
+		font-weight: 600;
+		color: var(--text);
+		background: var(--bg-secondary);
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius);
+		cursor: pointer;
+		transition: background 0.15s, border-color 0.15s;
+		gap: var(--space-xs);
+	}
+
+	.btn-secondary:hover {
+		background: var(--bg-hover);
+		border-color: var(--text-muted);
+	}
+
 	/* ── Buttons ──────────────────────────────────────────── */
 
-	.login-card > .btn {
+	.login-card > .btn,
+	.step-content > .btn {
 		width: 100%;
 		justify-content: center;
 		padding: 12px 20px;
