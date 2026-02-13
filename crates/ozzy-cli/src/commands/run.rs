@@ -621,6 +621,7 @@ fn compute_source_hash(cwd: &Path, transform: &TransformDef) -> Result<String> {
             anyhow::anyhow!("Invalid source '{}'. Expected path:function", source)
         })?;
         let full_path = cwd.join(file_path);
+        ensure_within_dir(cwd, &full_path)?;
         hash::blake3_hash_file(&full_path)
             .with_context(|| format!("Cannot read transform source '{}'", full_path.display()))
     } else if let Some(command) = &transform.command {
@@ -631,11 +632,30 @@ fn compute_source_hash(cwd: &Path, transform: &TransformDef) -> Result<String> {
     }
 }
 
+/// Verify that `path` resolves to a location inside `root_dir`.
+fn ensure_within_dir(root_dir: &Path, path: &Path) -> Result<()> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("Cannot resolve path '{}'", path.display()))?;
+    let canonical_root = root_dir
+        .canonicalize()
+        .with_context(|| format!("Cannot resolve root dir '{}'", root_dir.display()))?;
+    if !canonical.starts_with(&canonical_root) {
+        bail!(
+            "Path '{}' escapes project root '{}'. Only paths within the project directory are allowed.",
+            path.display(),
+            root_dir.display()
+        );
+    }
+    Ok(())
+}
+
 /// Compute the environment hash from local filesystem.
 fn compute_env_hash(cwd: &Path, env_def: &EnvironmentDef) -> Result<String> {
     match env_def.tier() {
         Some(EnvironmentTier::BaseLockfile { base, lockfile }) => {
             let lockfile_path = cwd.join(&lockfile);
+            ensure_within_dir(cwd, &lockfile_path)?;
             let lockfile_content = std::fs::read_to_string(&lockfile_path)
                 .with_context(|| format!("Cannot read lockfile '{}'", lockfile_path.display()))?;
             Ok(hash::blake3_hash_components(&[
@@ -645,6 +665,7 @@ fn compute_env_hash(cwd: &Path, env_def: &EnvironmentDef) -> Result<String> {
         }
         Some(EnvironmentTier::Dockerfile { dockerfile }) => {
             let df_path = cwd.join(&dockerfile);
+            ensure_within_dir(cwd, &df_path)?;
             let df_content = std::fs::read_to_string(&df_path)
                 .with_context(|| format!("Cannot read Dockerfile '{}'", df_path.display()))?;
             Ok(hash::blake3_hash(df_content.as_bytes()))

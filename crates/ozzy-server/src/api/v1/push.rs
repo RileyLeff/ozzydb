@@ -490,6 +490,10 @@ async fn build_environments_async(
             ozzy_core::toml_spec::EnvironmentTier::Prebuilt { .. } => EnvironmentContent::default(),
         };
 
+        // Pre-compute env hash so we can clean up on failure
+        let env_hash =
+            crate::environments::hash::compute_env_hash(&tier, &content);
+
         match build_environment(&state.db, &state.config.compute, env_name, &tier, &content).await {
             Ok(result) => {
                 tracing::info!(
@@ -502,6 +506,14 @@ async fn build_environments_async(
             }
             Err(e) => {
                 tracing::error!("Failed to build environment '{}': {}", env_name, e);
+                // Delete the pending row so a subsequent push can retry the build
+                if let Err(del_err) = state.db.delete_pending_environment_image(&env_hash).await {
+                    tracing::error!(
+                        "Failed to clean up pending env '{}' after build failure: {}",
+                        env_name,
+                        del_err
+                    );
+                }
             }
         }
     }
