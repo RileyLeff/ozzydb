@@ -621,6 +621,35 @@ fn validate_param_value(
     value: &serde_json::Value,
     param_def: &ozzy_core::toml_spec::EndpointParamDef,
 ) -> Result<(), ApiError> {
+    // Verify JSON type matches declared param type after coercion
+    match param_def.type_.as_str() {
+        "float" | "number" => {
+            if !value.is_f64() && !value.is_i64() && !value.is_u64() {
+                return Err(ApiError::BadRequest(format!(
+                    "Parameter '{}': expected numeric value, got {:?}",
+                    name, value
+                )));
+            }
+        }
+        "int" | "integer" => {
+            if !value.is_i64() && !value.is_u64() {
+                return Err(ApiError::BadRequest(format!(
+                    "Parameter '{}': expected integer value, got {:?}",
+                    name, value
+                )));
+            }
+        }
+        "bool" | "boolean" => {
+            if !value.is_boolean() {
+                return Err(ApiError::BadRequest(format!(
+                    "Parameter '{}': expected boolean value, got {:?}",
+                    name, value
+                )));
+            }
+        }
+        _ => {} // "string" or unknown — any JSON type is acceptable
+    }
+
     // Check min/max for numeric types
     if let Some(num) = value.as_f64() {
         if let Some(min) = param_def.min {
@@ -1331,5 +1360,91 @@ mod tests {
         let v = serde_json::json!(12.5);
         let c = coerce_param_value(&v, "float");
         assert_eq!(c, serde_json::json!(12.5));
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_float() {
+        // "not-a-number" fails coercion and should be rejected by validation
+        let mut params = HashMap::new();
+        params.insert(
+            "threshold".to_string(),
+            EndpointParamDef {
+                type_: "float".to_string(),
+                default: None,
+                binds: "step1.threshold".to_string(),
+                min: None,
+                max: None,
+                enum_values: None,
+                description: None,
+            },
+        );
+        let endpoint = EndpointDef {
+            description: None,
+            params,
+            nodes: HashMap::new(),
+            edges: vec![],
+        };
+
+        let mut consumer = HashMap::new();
+        consumer.insert("threshold".to_string(), serde_json::json!("not-a-number"));
+        let err = validate_and_resolve_params(&endpoint, &consumer);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_bool() {
+        let mut params = HashMap::new();
+        params.insert(
+            "flag".to_string(),
+            EndpointParamDef {
+                type_: "bool".to_string(),
+                default: None,
+                binds: "step1.flag".to_string(),
+                min: None,
+                max: None,
+                enum_values: None,
+                description: None,
+            },
+        );
+        let endpoint = EndpointDef {
+            description: None,
+            params,
+            nodes: HashMap::new(),
+            edges: vec![],
+        };
+
+        let mut consumer = HashMap::new();
+        consumer.insert("flag".to_string(), serde_json::json!("maybe"));
+        let err = validate_and_resolve_params(&endpoint, &consumer);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_coerced_string_float() {
+        // "12.5" coerces to 12.5 for float type — should pass
+        let mut params = HashMap::new();
+        params.insert(
+            "threshold".to_string(),
+            EndpointParamDef {
+                type_: "float".to_string(),
+                default: None,
+                binds: "step1.threshold".to_string(),
+                min: Some(0.0),
+                max: Some(100.0),
+                enum_values: None,
+                description: None,
+            },
+        );
+        let endpoint = EndpointDef {
+            description: None,
+            params,
+            nodes: HashMap::new(),
+            edges: vec![],
+        };
+
+        let mut consumer = HashMap::new();
+        consumer.insert("threshold".to_string(), serde_json::json!("12.5"));
+        let resolved = validate_and_resolve_params(&endpoint, &consumer).unwrap();
+        assert_eq!(resolved.get("threshold").unwrap(), 12.5);
     }
 }
