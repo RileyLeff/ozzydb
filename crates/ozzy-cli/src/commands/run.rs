@@ -1006,19 +1006,26 @@ for name, spec in input_manifest.items():
 
 
 def _write_item(item, path):
+    """Write a single output item. Returns the actual path written."""
     if hasattr(item, 'collect'):
         item = item.collect()
     if hasattr(item, 'write_parquet'):
-        item.write_parquet(path + ".parquet")
+        actual = path + ".parquet"
+        item.write_parquet(actual)
+        return actual
     elif isinstance(item, (bytes, bytearray)):
         with open(path, "wb") as f:
             f.write(item)
+        return path
     elif isinstance(item, str):
         with open(path, "w") as f:
             f.write(item)
+        return path
     elif isinstance(item, dict):
-        with open(path + ".json", "w") as f:
+        actual = path + ".json"
+        with open(actual, "w") as f:
             json.dump(item, f)
+        return actual
     else:
         raise TypeError(f"Unsupported output type: {{type(item)}}")
 
@@ -1034,8 +1041,8 @@ if isinstance(result, list):
     manifest = []
     for i, item in enumerate(result):
         out_path = os.path.join(output_dir, f"item_{{i:06d}}")
-        _write_item(item, out_path)
-        manifest.append({{"index": i, "path": out_path}})
+        actual_path = _write_item(item, out_path)
+        manifest.append({{"index": i, "path": actual_path}})
     with open(os.path.join(output_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f)
 else:

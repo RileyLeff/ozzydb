@@ -411,7 +411,7 @@ async fn fetch_endpoint(
         let compute_duration_ms = result.duration_ms;
         let read_result: Result<(Vec<u8>, String), ApiError> = async {
             let output_files = list_output_files(&result.output_dir).await?;
-            let primary_output = output_files.first().ok_or_else(|| {
+            let primary_output = find_primary_output(&output_files).ok_or_else(|| {
                 ApiError::Internal(anyhow::anyhow!(
                     "Transform '{}' produced no output files",
                     node_def.transform
@@ -995,6 +995,23 @@ async fn list_output_files(dir: &std::path::Path) -> Result<Vec<std::path::PathB
     }
     files.sort();
     Ok(files)
+}
+
+/// Select the primary output file from a sorted list.
+///
+/// Prefers files starting with "result" (matching CLI's `find_primary_output`),
+/// falling back to the first file alphabetically.
+fn find_primary_output(files: &[std::path::PathBuf]) -> Option<&std::path::PathBuf> {
+    // Prefer "result.*" files (standard runner output)
+    for f in files {
+        if let Some(name) = f.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with("result") {
+                return Some(f);
+            }
+        }
+    }
+    // Fall back to first file alphabetically (already sorted)
+    files.first()
 }
 
 /// Infer content type from file extension.
