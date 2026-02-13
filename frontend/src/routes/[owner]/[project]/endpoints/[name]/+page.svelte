@@ -30,6 +30,8 @@
 		error = null;
 		dag = null;
 		showDag = false;
+		// Revoke previous Object URL before discarding reference
+		if (execResult) URL.revokeObjectURL(execResult.url);
 		execResult = null;
 		execError = null;
 

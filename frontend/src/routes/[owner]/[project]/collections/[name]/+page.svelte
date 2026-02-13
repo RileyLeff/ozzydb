@@ -24,6 +24,9 @@
 
 		loading = true;
 		error = null;
+		flattenedAtoms = null;
+		showFlatten = false;
+		flattenLoading = false;
 
 		Promise.all([
 			getCollection(owner, slug, name),
