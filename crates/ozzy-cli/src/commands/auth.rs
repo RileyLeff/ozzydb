@@ -171,7 +171,7 @@ pub async fn login() -> Result<()> {
 
     // Step 1: Initiate device flow
     let resp = client
-        .post(format!("{}/v1/auth/github/device", registry_url))
+        .post(format!("{}/api/v1/auth/github/device", registry_url))
         .send()
         .await
         .context("Failed to contact registry")?;
@@ -209,7 +209,7 @@ pub async fn login() -> Result<()> {
         tokio::time::sleep(poll_interval).await;
 
         let resp = client
-            .post(format!("{}/v1/auth/github/poll", registry_url))
+            .post(format!("{}/api/v1/auth/github/poll", registry_url))
             .json(&poll_req)
             .send()
             .await
@@ -274,7 +274,7 @@ pub async fn status() -> Result<()> {
 
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!("{}/v1/auth/me", creds.registry_url))
+        .get(format!("{}/api/v1/auth/me", creds.registry_url))
         .bearer_auth(&creds.token)
         .send()
         .await
@@ -316,7 +316,7 @@ pub async fn token_create(name: &str, scope: &str, expires: Option<u32>) -> Resu
 
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/v1/auth/token", creds.registry_url))
+        .post(format!("{}/api/v1/auth/token", creds.registry_url))
         .bearer_auth(&creds.token)
         .json(&req)
         .send()
@@ -358,7 +358,7 @@ pub async fn token_list() -> Result<()> {
 
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!("{}/v1/auth/token", creds.registry_url))
+        .get(format!("{}/api/v1/auth/token", creds.registry_url))
         .bearer_auth(&creds.token)
         .send()
         .await
@@ -410,7 +410,7 @@ pub async fn token_revoke(name: &str) -> Result<()> {
 
     let client = reqwest::Client::new();
     let resp = client
-        .delete(format!("{}/v1/auth/token/{}", creds.registry_url, name))
+        .delete(format!("{}/api/v1/auth/token/{}", creds.registry_url, name))
         .bearer_auth(&creds.token)
         .send()
         .await
