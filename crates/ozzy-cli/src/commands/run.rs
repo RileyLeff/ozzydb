@@ -868,12 +868,15 @@ async fn resolve_local_environment(
                      in ozzy.toml"
                 );
             }
-            let install_cmd = if lockfile == "poetry.lock" || lockfile.ends_with("/poetry.lock") {
-                "pip install poetry && cd /tmp && poetry install --no-interaction --no-ansi"
-            } else {
-                // requirements.txt or any pip-compatible lockfile
-                "pip install --no-cache-dir -r /tmp/lockfile"
-            };
+            if lockfile == "poetry.lock" || lockfile.ends_with("/poetry.lock") {
+                bail!(
+                    "poetry.lock is not directly installable without pyproject.toml. Export it to \
+                     requirements.txt with `poetry export -f requirements.txt -o requirements.txt` \
+                     and set lockfile = \"requirements.txt\" in ozzy.toml"
+                );
+            }
+            // requirements.txt or any pip-compatible lockfile
+            let install_cmd = "pip install --no-cache-dir -r /tmp/lockfile";
 
             let dockerfile = format!(
                 "FROM {}\nCOPY lockfile /tmp/lockfile\nRUN {}\n",

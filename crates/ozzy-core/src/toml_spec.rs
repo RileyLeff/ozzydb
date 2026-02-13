@@ -426,6 +426,15 @@ impl OzzyToml {
                         ),
                         suggestion: None,
                     });
+                } else if param_name.contains('-') {
+                    errors.push(ValidationError {
+                        location: format!("transforms.{}.params.{}", name, param_name),
+                        message: format!(
+                            "Param name \"{}\" contains hyphens. Use underscores instead — hyphens produce invalid shell env var names (OZZY_PARAM_{}).",
+                            param_name, param_name
+                        ),
+                        suggestion: Some(format!("Rename to \"{}\"", param_name.replace('-', "_"))),
+                    });
                 }
             }
         }
@@ -461,6 +470,15 @@ impl OzzyToml {
                             param_name
                         ),
                         suggestion: None,
+                    });
+                } else if param_name.contains('-') {
+                    errors.push(ValidationError {
+                        location: format!("endpoints.{}.params.{}", name, param_name),
+                        message: format!(
+                            "Param name \"{}\" contains hyphens. Use underscores instead — hyphens produce invalid shell env var names (OZZY_PARAM_{}).",
+                            param_name, param_name
+                        ),
+                        suggestion: Some(format!("Rename to \"{}\"", param_name.replace('-', "_"))),
                     });
                 }
             }

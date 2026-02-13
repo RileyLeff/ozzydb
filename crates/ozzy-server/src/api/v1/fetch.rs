@@ -925,8 +925,20 @@ async fn resolve_environment_image(
     match &tier {
         ozzy_core::toml_spec::EnvironmentTier::Prebuilt { image } => {
             let env_hash = ozzy_core::hash::blake3_hash(image.as_bytes());
-            let env_image = state.db.get_environment_image(&env_hash).await?;
-            Ok((env_image, env_hash))
+            // For prebuilt, the image ref is already known — synthesize a ready record
+            // rather than requiring an async DB insert to complete first.
+            let env_image = crate::db::EnvironmentImage {
+                id: uuid::Uuid::nil(),
+                env_hash: env_hash.clone(),
+                build_type: "prebuilt".to_string(),
+                image_ref: image.clone(),
+                base_image: None,
+                build_log_r2_key: None,
+                build_duration_ms: None,
+                built_at: Some(chrono::Utc::now()),
+                created_at: chrono::Utc::now(),
+            };
+            Ok((Some(env_image), env_hash))
         }
         ozzy_core::toml_spec::EnvironmentTier::BaseLockfile { lockfile, .. } => {
             // Fetch lockfile content from git to compute env_hash

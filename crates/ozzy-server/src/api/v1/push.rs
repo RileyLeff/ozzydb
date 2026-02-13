@@ -271,10 +271,18 @@ async fn push(
     }
 
     // ── Cache source tarball ─────────────────────────────────────
+    // Source caching is required if any transforms use source files (not command-based).
+    let has_source_transforms = ozzy_toml.transforms.values().any(|t| t.source.is_some());
     let source_cached =
         cache_source_tarball(&state, &req.git_provider, &req.git_repo, &git_commit_sha).await;
     if let Err(ref e) = source_cached {
-        tracing::warn!("Failed to cache source tarball: {}", e);
+        if has_source_transforms {
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "Failed to cache source tarball (required for source-based transforms): {}",
+                e
+            )));
+        }
+        tracing::warn!("Failed to cache source tarball (no source transforms, continuing): {}", e);
     }
 
     // ── Compute ozzy.toml hash and store commit atomically ───────

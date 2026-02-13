@@ -40,10 +40,10 @@ pub fn build_type_str(tier: &EnvironmentTier) -> &'static str {
 /// Generate a Dockerfile for a BaseLockfile environment.
 ///
 /// Detects lockfile type from the filename and uses the appropriate installer:
-/// - `uv.lock` → `uv pip install`
 /// - `requirements.txt` → `pip install`
-/// - `poetry.lock` → `poetry install`
-/// - Other → `pip install -r` (best-effort fallback)
+/// - Other pip-compatible → `pip install -r` (best-effort fallback)
+/// - `uv.lock` → rejected (needs export to requirements.txt)
+/// - `poetry.lock` → rejected (needs pyproject.toml + export to requirements.txt)
 pub fn generate_dockerfile(base_image: &str, lockfile_name: &str) -> Result<String, &'static str> {
     // Validate base_image: reject newlines and other Dockerfile injection vectors
     if base_image.contains('\n') || base_image.contains('\r') {
@@ -55,7 +55,9 @@ pub fn generate_dockerfile(base_image: &str, lockfile_name: &str) -> Result<Stri
         // Use `uv export > requirements.txt` and reference that instead.
         return Err("uv.lock is not directly installable. Export it to requirements.txt with `uv export --no-hashes > requirements.txt` and set lockfile = \"requirements.txt\" in ozzy.toml");
     } else if lockfile_name == "poetry.lock" || lockfile_name.ends_with("/poetry.lock") {
-        "RUN pip install poetry && cd /tmp && poetry install --no-interaction --no-ansi"
+        // poetry.lock requires pyproject.toml for installation, which the BaseLockfile
+        // tier doesn't support (single file only). Export to requirements.txt instead.
+        return Err("poetry.lock is not directly installable without pyproject.toml. Export it to requirements.txt with `poetry export -f requirements.txt -o requirements.txt` and set lockfile = \"requirements.txt\" in ozzy.toml");
     } else {
         // requirements.txt or any pip-compatible lockfile
         "RUN pip install --no-cache-dir -r /tmp/lockfile"
@@ -95,9 +97,10 @@ mod tests {
     }
 
     #[test]
-    fn test_dockerfile_poetry_lock() {
-        let df = generate_dockerfile("python:3.12", "poetry.lock").unwrap();
-        assert!(df.contains("poetry install"));
+    fn test_dockerfile_rejects_poetry_lock() {
+        let result = generate_dockerfile("python:3.12", "poetry.lock");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("poetry.lock is not directly installable"));
     }
 
     #[test]
