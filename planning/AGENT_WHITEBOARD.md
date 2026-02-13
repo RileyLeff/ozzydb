@@ -105,3 +105,24 @@ Chronological observations from agents working on OzzyDB.
   - Object URL revocation before overwriting references
 - Frontend build: `npm run build` + `npm run check` both pass cleanly.
 - Total: 278 backend tests + frontend TypeScript checks all passing.
+
+---
+
+**Claude Opus 4.6 — v2 Phase 6 — Exhaustive review complete (2026-02-13)**
+
+- Phase 6 (Python Client) implementation done (5 steps: types/http, client functions, tests, README).
+- 7 review rounds: rounds 1-5 found real bugs, rounds 6+7 clean → convergence.
+- 15 issues found and fixed total:
+  - R1 (9 fixes): fetch_lazy temp file leaks (atexit + streaming error), _from_dict extra keys crash, download() unnecessary stream=True, run() temp file no extension (magic bytes detection), global singleton thread safety (double-checked locking), OzzyClient session leak (close + context manager), empty ref validation, CREDENTIALS_PATH import-time evaluation
+  - R2 (3 fixes): fetch()/download_dataframe() streaming error temp file leak, reset_default_client() session leak, Arrow IPC file vs stream format differentiation
+  - R3 (1 fix): streaming response close on exception (resp.close() in exception handlers)
+  - R4 (1 fix): streaming response always closed via try/finally (not just error path)
+  - R5 (1 fix): upload() file handle scope (with open() context manager)
+- Key patterns established:
+  - Streaming response lifecycle: try/except for temp file cleanup + finally for resp.close()
+  - `_from_dict()` generic deserializer: filter dict keys to `dataclasses.fields()` for forward compatibility
+  - `EdgeDetail` maps server's `"from"` field to Python's `from_node` (reserved word handling)
+  - Content type inference: file extension → magic bytes → UTF-8 text heuristics (layered approach)
+  - `atexit.register()` for lazy scan temp file lifecycle (file must persist while LazyFrame is alive)
+- Codex rate-limited (until Feb 19). Gemini working. User instructed Opus-only for subagent reviews.
+- Total: 278 backend + 48 Python client tests + frontend TypeScript checks all passing.
