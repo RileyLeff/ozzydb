@@ -235,6 +235,14 @@ async fn push(
     // ── Verify referenced source files exist ─────────────────────
     for (name, transform) in &ozzy_toml.transforms {
         if let Some(source) = &transform.source {
+            // Validate source ref format (file_path:function_name) and character safety
+            crate::runners::validate_source_ref(source).map_err(|e| {
+                ApiError::BadRequest(format!(
+                    "Transform '{}' has invalid source '{}': {}",
+                    name, source, e
+                ))
+            })?;
+
             // Strip function selector (e.g. "transforms/qc.py:quality_control" → "transforms/qc.py")
             let file_path = source
                 .rsplit_once(':')

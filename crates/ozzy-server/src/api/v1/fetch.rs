@@ -117,6 +117,10 @@ async fn fetch_endpoint(
     // ── 6. Build execution order (topological sort) ─────────────
     let exec_order = build_execution_order(endpoint_def)?;
 
+    // ── 6.5. Retrieve and extract source code ────────────────────
+    // Source tarballs are cached during push. We extract once and reuse for all nodes.
+    let source_dir = retrieve_source_code(&state, &commit).await;
+
     // ── 7. Resolve edge sources and execute DAG ─────────────────
     // Track the output hash of each node as we execute
     let mut node_outputs: HashMap<String, NodeOutput> = HashMap::new();
@@ -388,7 +392,7 @@ async fn fetch_endpoint(
             cpu_limit: Some(state.config.compute.cpu_limit.clone()),
             network: transform_def.network,
             runtime: state.config.compute.docker_runtime.clone(),
-            source_dir: None,
+            source_dir: source_dir.as_ref().map(|d| d.path().to_path_buf()),
         };
 
         let result = crate::compute::docker::run(&compute_request, &state.config.compute.tmpdir)
@@ -818,6 +822,81 @@ async fn resolve_edge_source(
         })?;
         Ok(output.output_hash.clone())
     }
+}
+
+/// Retrieve and extract the source tarball for a commit.
+///
+/// Returns a temp directory containing the extracted source files, or `None`
+/// if the source tarball is not available (e.g., not yet cached during push).
+async fn retrieve_source_code(
+    state: &AppState,
+    commit: &crate::db::Commit,
+) -> Option<tempfile::TempDir> {
+    let source_storage =
+        match crate::storage::ContentStorage::from_config_with_prefix(&state.config, "source") {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to create source storage: {}", e);
+                return None;
+            }
+        };
+
+    let tarball_bytes = match source_storage.get(&commit.git_commit_sha, "tar.gz").await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!(
+                "Source tarball not found for commit {} (sha {}): {}",
+                commit.id,
+                commit.git_commit_sha,
+                e
+            );
+            return None;
+        }
+    };
+
+    let tmp = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("Failed to create temp dir for source extraction: {}", e);
+            return None;
+        }
+    };
+
+    // Write tarball to temp file, extract with strip-components=1 (GitHub prefix)
+    let tarball_path = tmp.path().join("source.tar.gz");
+    if let Err(e) = tokio::fs::write(&tarball_path, &tarball_bytes).await {
+        tracing::warn!("Failed to write source tarball: {}", e);
+        return None;
+    }
+
+    let output = match tokio::process::Command::new("tar")
+        .arg("xzf")
+        .arg(&tarball_path)
+        .arg("-C")
+        .arg(tmp.path())
+        .arg("--strip-components=1")
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("Failed to run tar for source extraction: {}", e);
+            return None;
+        }
+    };
+
+    if !output.status.success() {
+        tracing::warn!(
+            "tar extraction failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+
+    // Clean up the tarball file, keep the extracted contents
+    tokio::fs::remove_file(&tarball_path).await.ok();
+
+    Some(tmp)
 }
 
 /// Resolve the environment image for a transform.

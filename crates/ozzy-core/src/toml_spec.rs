@@ -700,6 +700,7 @@ impl OzzyToml {
             self.validate_no_cycles(ep_name, ep, errors);
 
             // Rule 9: Param binds
+            let mut bind_targets: HashMap<String, Vec<String>> = HashMap::new();
             for (param_name, param) in &ep.params {
                 let parts: Vec<&str> = param.binds.splitn(2, '.').collect();
                 if parts.len() != 2 {
@@ -742,6 +743,28 @@ impl OzzyToml {
                             });
                         }
                     }
+                }
+                // Track bind targets for duplicate detection
+                bind_targets
+                    .entry(param.binds.clone())
+                    .or_default()
+                    .push(param_name.clone());
+            }
+
+            // Rule 9b: No duplicate bind targets
+            for (target, param_names) in &bind_targets {
+                if param_names.len() > 1 {
+                    let mut sorted = param_names.clone();
+                    sorted.sort();
+                    errors.push(ValidationError {
+                        location: format!("endpoints.{}.params", ep_name),
+                        message: format!(
+                            "Multiple parameters bind to \"{}\": [{}]. Each node parameter must have at most one bind.",
+                            target,
+                            sorted.join(", ")
+                        ),
+                        suggestion: None,
+                    });
                 }
             }
         }
@@ -1340,6 +1363,49 @@ to = "n.data"
         assert!(
             errors.iter().any(|e| e.message.contains("nonexistent")),
             "Expected bind node error"
+        );
+    }
+
+    #[test]
+    fn validate_duplicate_param_bind_targets() {
+        let toml = r#"
+[project]
+name = "test"
+owner = "user"
+
+[environments.default]
+base = "ozzydb/python:3.12"
+lockfile = "uv.lock"
+
+[transforms.t]
+source = "t.py:fn"
+environment = "default"
+inputs.data = "parquet"
+params.threshold = { type = "float", default = 10.0 }
+
+[endpoints.ep]
+
+[endpoints.ep.params.alpha]
+type = "float"
+binds = "n.threshold"
+
+[endpoints.ep.params.beta]
+type = "float"
+binds = "n.threshold"
+
+[endpoints.ep.nodes]
+n = { transform = "t" }
+
+[[endpoints.ep.edges]]
+from = "data:raw"
+to = "n.data"
+"#;
+        let doc = OzzyToml::parse(toml).unwrap();
+        let errors = doc.validate();
+        assert!(
+            errors.iter().any(|e| e.message.contains("Multiple parameters bind to")),
+            "Expected duplicate bind error, got: {:?}",
+            errors
         );
     }
 
