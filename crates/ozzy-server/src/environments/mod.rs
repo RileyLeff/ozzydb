@@ -50,9 +50,11 @@ pub fn generate_dockerfile(base_image: &str, lockfile_name: &str) -> Result<Stri
         return Err("base_image must not contain newlines");
     }
 
-    // Note: uv.lock is a TOML-based lockfile that cannot be installed directly.
-    // Users should provide requirements.txt (or `uv export > requirements.txt`).
-    let install_cmd = if lockfile_name == "poetry.lock" || lockfile_name.ends_with("/poetry.lock") {
+    let install_cmd = if lockfile_name == "uv.lock" || lockfile_name.ends_with("/uv.lock") {
+        // uv.lock is a TOML-based lockfile that is not pip-installable.
+        // Use `uv export > requirements.txt` and reference that instead.
+        return Err("uv.lock is not directly installable. Export it to requirements.txt with `uv export --no-hashes > requirements.txt` and set lockfile = \"requirements.txt\" in ozzy.toml");
+    } else if lockfile_name == "poetry.lock" || lockfile_name.ends_with("/poetry.lock") {
         "RUN pip install poetry && cd /tmp && poetry install --no-interaction --no-ansi"
     } else {
         // requirements.txt or any pip-compatible lockfile

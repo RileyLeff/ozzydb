@@ -356,7 +356,7 @@ async fn fetch_endpoint(
             env_vars.insert(key, value);
         }
 
-        // Inject secrets
+        // Inject secrets (skip reserved env var names to prevent overwriting runtime vars)
         if !transform_def.secrets.is_empty() {
             let enc_key = state.config.secrets_encryption_key.as_ref().ok_or_else(|| {
                 ApiError::service_unavailable(format!(
@@ -365,6 +365,12 @@ async fn fetch_endpoint(
                 ))
             })?;
             for secret_name in &transform_def.secrets {
+                if secret_name.starts_with("OZZY_") {
+                    return Err(ApiError::BadRequest(format!(
+                        "Secret '{}' uses reserved prefix 'OZZY_'. Secrets must not override runtime environment variables.",
+                        secret_name
+                    )));
+                }
                 if let Some(secret) = state.db.get_secret(project.id, secret_name).await? {
                     let decrypted =
                         decrypt_secret(&secret.encrypted_value, enc_key).map_err(|e| {

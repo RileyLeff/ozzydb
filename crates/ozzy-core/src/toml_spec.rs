@@ -699,7 +699,22 @@ impl OzzyToml {
             // Rule 8: No cycles (Kahn's algorithm on the node graph)
             self.validate_no_cycles(ep_name, ep, errors);
 
-            // Rule 9: Param binds
+            // Rule 9: Param names must not conflict with reserved query params
+            const RESERVED_PARAM_NAMES: &[&str] = &["ref", "format"];
+            for param_name in ep.params.keys() {
+                if RESERVED_PARAM_NAMES.contains(&param_name.as_str()) {
+                    errors.push(ValidationError {
+                        location: format!("endpoints.{}.params.{}", ep_name, param_name),
+                        message: format!(
+                            "Parameter name \"{}\" is reserved (conflicts with API query parameter). Choose a different name.",
+                            param_name
+                        ),
+                        suggestion: None,
+                    });
+                }
+            }
+
+            // Rule 10: Param binds
             let mut bind_targets: HashMap<String, Vec<String>> = HashMap::new();
             for (param_name, param) in &ep.params {
                 let parts: Vec<&str> = param.binds.splitn(2, '.').collect();

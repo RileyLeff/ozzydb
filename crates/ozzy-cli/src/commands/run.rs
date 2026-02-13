@@ -432,17 +432,73 @@ fn resolve_endpoint_params(
 
     let mut resolved = HashMap::new();
     for (name, def) in &endpoint.params {
-        if let Some(value) = user_params.get(name) {
+        let value = if let Some(value) = user_params.get(name) {
             // Coerce string value to declared type (matches server's coerce_param_value)
-            let coerced = coerce_param_value(value, &def.type_);
-            resolved.insert(name.clone(), coerced);
+            coerce_param_value(value, &def.type_)
         } else if let Some(default) = &def.default {
-            resolved.insert(name.clone(), default.clone());
+            default.clone()
         } else {
             bail!("Required param '{}' not provided and has no default", name);
-        }
+        };
+
+        // Validate type, range, and enum constraints (matches server-side validation)
+        validate_param_value(name, &value, def)?;
+        resolved.insert(name.clone(), value);
     }
     Ok(resolved)
+}
+
+/// Validate a parameter value against its definition (min/max/enum).
+fn validate_param_value(
+    name: &str,
+    value: &serde_json::Value,
+    param_def: &ozzy_core::toml_spec::EndpointParamDef,
+) -> Result<()> {
+    // Type validation
+    match param_def.type_.as_str() {
+        "float" | "number" => {
+            if !value.is_f64() && !value.is_i64() && !value.is_u64() {
+                bail!("Parameter '{}': expected numeric value, got {:?}", name, value);
+            }
+        }
+        "int" | "integer" => {
+            if !value.is_i64() && !value.is_u64() {
+                bail!("Parameter '{}': expected integer value, got {:?}", name, value);
+            }
+        }
+        "bool" | "boolean" => {
+            if !value.is_boolean() {
+                bail!("Parameter '{}': expected boolean value, got {:?}", name, value);
+            }
+        }
+        _ => {} // "string" or unknown
+    }
+
+    // Range validation
+    if let Some(num) = value.as_f64().or_else(|| value.as_i64().map(|i| i as f64)) {
+        if let Some(min) = param_def.min {
+            if num < min {
+                bail!("Parameter '{}' value {} is below minimum {}", name, num, min);
+            }
+        }
+        if let Some(max) = param_def.max {
+            if num > max {
+                bail!("Parameter '{}' value {} exceeds maximum {}", name, num, max);
+            }
+        }
+    }
+
+    // Enum validation
+    if let Some(ref enum_values) = param_def.enum_values {
+        if !enum_values.contains(value) {
+            bail!(
+                "Parameter '{}' value {:?} not in allowed values: {:?}",
+                name, value, enum_values
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Resolve params for a specific node: merge static node params with endpoint param binds.
@@ -805,8 +861,13 @@ async fn resolve_local_environment(
             let lockfile_path = cwd.join(&lockfile);
             let lockfile_content = std::fs::read_to_string(&lockfile_path)?;
 
-            // Note: uv.lock is TOML-based and cannot be pip-installed directly.
-            // Users should provide requirements.txt (via `uv export`).
+            if lockfile == "uv.lock" || lockfile.ends_with("/uv.lock") {
+                bail!(
+                    "uv.lock is not directly installable. Export it to requirements.txt with \
+                     `uv export --no-hashes > requirements.txt` and set lockfile = \"requirements.txt\" \
+                     in ozzy.toml"
+                );
+            }
             let install_cmd = if lockfile == "poetry.lock" || lockfile.ends_with("/poetry.lock") {
                 "pip install poetry && cd /tmp && poetry install --no-interaction --no-ansi"
             } else {
