@@ -24,15 +24,16 @@ pub fn parse_source_ref(source: &str) -> Option<(&str, &str)> {
 }
 
 /// Detect the runner type from the source file extension.
-pub fn detect_runner_type(source: &str) -> RunnerType {
+///
+/// Returns `None` for unrecognized extensions so callers can surface a clear error.
+pub fn detect_runner_type(source: &str) -> Option<RunnerType> {
     let (file_path, _) = parse_source_ref(source).unwrap_or((source, ""));
     if file_path.ends_with(".py") {
-        RunnerType::Python
+        Some(RunnerType::Python)
     } else if file_path.ends_with(".R") || file_path.ends_with(".r") {
-        RunnerType::R
+        Some(RunnerType::R)
     } else {
-        // Fallback: treat unknown as Python (most common in data science)
-        RunnerType::Python
+        None
     }
 }
 
@@ -64,13 +65,19 @@ mod tests {
     fn test_detect_runner_type() {
         assert_eq!(
             detect_runner_type("transforms/qc.py:func"),
-            RunnerType::Python
+            Some(RunnerType::Python)
         );
-        assert_eq!(detect_runner_type("src/analysis.R:func"), RunnerType::R);
-        assert_eq!(detect_runner_type("src/analysis.r:func"), RunnerType::R);
+        assert_eq!(
+            detect_runner_type("src/analysis.R:func"),
+            Some(RunnerType::R)
+        );
+        assert_eq!(
+            detect_runner_type("src/analysis.r:func"),
+            Some(RunnerType::R)
+        );
         assert_eq!(
             detect_runner_type("unknown.jl:func"),
-            RunnerType::Python // fallback
+            None // unsupported extension
         );
     }
 }

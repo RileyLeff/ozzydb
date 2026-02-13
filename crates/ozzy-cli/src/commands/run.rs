@@ -855,10 +855,48 @@ fn generate_runner(transform: &TransformDef) -> Result<(String, String)> {
                 "py".to_string(),
             ))
         } else if file_path.ends_with(".R") || file_path.ends_with(".r") {
-            // R runner — minimal template
+            // R runner — matches server's runners/r.rs template
             let script = format!(
-                "#!/usr/bin/env Rscript\nlibrary(jsonlite)\nparams <- fromJSON(Sys.getenv('OZZY_PARAMS', '{{}}'))\nmanifest <- fromJSON(Sys.getenv('OZZY_INPUT_MANIFEST', '{{}}'))\nsource('/workspace/source/{}')\nresult <- {}(manifest, params)\narrow::write_parquet(result, '/workspace/output/result.parquet')\n",
-                file_path, function_name
+                r#"#!/usr/bin/env Rscript
+# OzzyDB R runner. Auto-generated — do not edit.
+library(jsonlite)
+library(arrow)
+
+params <- fromJSON(Sys.getenv("OZZY_PARAMS", "{{{{}}}}"))
+input_manifest <- fromJSON(Sys.getenv("OZZY_INPUT_MANIFEST", "{{{{}}}}"))
+inputs <- list()
+
+for (name in names(input_manifest)) {{
+  spec <- input_manifest[[name]]
+  if (grepl("parquet", spec$content_type)) {{
+    inputs[[name]] <- read_parquet(spec$path)
+  }} else if (spec$content_type == "text/csv") {{
+    inputs[[name]] <- read.csv(spec$path)
+  }} else if (startsWith(spec$content_type, "text/")) {{
+    inputs[[name]] <- readLines(spec$path, warn = FALSE)
+  }} else {{
+    inputs[[name]] <- readBin(spec$path, "raw", file.info(spec$path)$size)
+  }}
+}}
+
+source("/workspace/source/{source_file}")
+result <- {function_name}(inputs, params)
+
+output_dir <- "/workspace/output"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+if (inherits(result, "data.frame") || inherits(result, "ArrowTabular")) {{
+  write_parquet(result, file.path(output_dir, "result.parquet"))
+}} else if (is.character(result)) {{
+  writeLines(result, file.path(output_dir, "result.txt"))
+}} else if (is.raw(result)) {{
+  writeBin(result, file.path(output_dir, "result.bin"))
+}} else {{
+  saveRDS(result, file.path(output_dir, "result.rds"))
+}}
+"#,
+                source_file = file_path,
+                function_name = function_name,
             );
             Ok((script, "R".to_string()))
         } else {
@@ -1072,16 +1110,22 @@ fn write_final_output(output_dir: &Path, output_path: Option<&str>) -> Result<()
 // Filesystem utilities
 // ============================================================================
 
-/// Recursively copy a directory (sync).
+/// Recursively copy a directory (sync), skipping symlinks.
 fn copy_dir_sync(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        let ft = entry.file_type()?;
+        // Skip symlinks to prevent data exfiltration from sandbox
+        if ft.is_symlink() {
+            eprintln!("Warning: skipping symlink {}", entry.path().display());
+            continue;
+        }
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        if ft.is_dir() {
             copy_dir_sync(&src_path, &dst_path)?;
-        } else {
+        } else if ft.is_file() {
             std::fs::copy(&src_path, &dst_path)?;
         }
     }

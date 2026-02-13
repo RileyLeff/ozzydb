@@ -30,8 +30,8 @@ pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult
         .await
         .context("Failed to create workspace directory")?;
 
-    // Clean up workspace on drop (best-effort)
-    let _cleanup = WorkspaceCleanup(workspace.clone());
+    // Workspace cleanup is deferred until after the caller reads output.
+    // See cleanup_workspace() — called via ComputeResult::cleanup().
 
     // Create workspace subdirectories
     let inputs_dir = workspace.join("inputs");
@@ -134,39 +134,41 @@ pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult
 
     Ok(ComputeResult {
         output_dir,
+        workspace_dir: workspace,
         exit_code: output.status.code().unwrap_or(-1),
         logs,
         duration_ms,
     })
 }
 
-/// Recursively copy a directory.
+/// Recursively copy a directory, skipping symlinks.
 async fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     tokio::fs::create_dir_all(dst).await?;
     let mut entries = tokio::fs::read_dir(src).await?;
     while let Some(entry) = entries.next_entry().await? {
+        let ft = entry.file_type().await?;
+        // Skip symlinks to prevent sandbox data exfiltration
+        if ft.is_symlink() {
+            tracing::warn!("Skipping symlink in copy_dir: {}", entry.path().display());
+            continue;
+        }
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if entry.file_type().await?.is_dir() {
+        if ft.is_dir() {
             Box::pin(copy_dir(&src_path, &dst_path)).await?;
-        } else {
+        } else if ft.is_file() {
             tokio::fs::copy(&src_path, &dst_path).await?;
         }
     }
     Ok(())
 }
 
-/// RAII cleanup for workspace directories.
-struct WorkspaceCleanup(PathBuf);
-
-impl Drop for WorkspaceCleanup {
-    fn drop(&mut self) {
-        let path = self.0.clone();
-        // Best-effort async cleanup
-        tokio::spawn(async move {
-            let _ = tokio::fs::remove_dir_all(&path).await;
-        });
-    }
+/// Best-effort async cleanup for workspace directories.
+///
+/// Called explicitly after the caller has finished reading from the workspace.
+/// Using tokio::spawn instead of Drop to avoid racing with output consumption.
+pub async fn cleanup_workspace(path: PathBuf) {
+    let _ = tokio::fs::remove_dir_all(&path).await;
 }
 
 /// Build the input manifest JSON for a set of inputs.

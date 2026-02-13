@@ -277,7 +277,12 @@ async fn fetch_endpoint(
                         node_def.transform,
                     ))
                 })?;
-            let runner_type = crate::runners::detect_runner_type(source);
+            let runner_type = crate::runners::detect_runner_type(source).ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "Unsupported source file type in '{}'. Only .py and .R files are supported.",
+                    source
+                ))
+            })?;
             match runner_type {
                 crate::runners::RunnerType::Python => {
                     crate::runners::python::generate(file_path, func_name)
@@ -301,7 +306,8 @@ async fn fetch_endpoint(
 
         let runner_ext = if transform_def.source.is_some() {
             let rt =
-                crate::runners::detect_runner_type(transform_def.source.as_deref().unwrap_or(""));
+                crate::runners::detect_runner_type(transform_def.source.as_deref().unwrap_or(""))
+                    .unwrap_or(crate::runners::RunnerType::Python); // already validated above
             match rt {
                 crate::runners::RunnerType::Python => "py",
                 crate::runners::RunnerType::R => "R",
@@ -313,6 +319,7 @@ async fn fetch_endpoint(
 
         let runner_type = if transform_def.source.is_some() {
             crate::runners::detect_runner_type(transform_def.source.as_deref().unwrap_or(""))
+                .unwrap_or(crate::runners::RunnerType::Python) // already validated above
         } else {
             crate::runners::RunnerType::Command
         };
@@ -377,11 +384,14 @@ async fn fetch_endpoint(
             .map_err(|e| ApiError::Internal(anyhow::anyhow!("Compute execution failed: {}", e)))?;
 
         if !result.success() {
+            let logs = result.logs.clone();
+            let exit_code = result.exit_code;
+            result.cleanup().await;
             return Err(ApiError::Internal(anyhow::anyhow!(
                 "Transform '{}' failed (exit {}): {}",
                 node_def.transform,
-                result.exit_code,
-                result.logs
+                exit_code,
+                logs
             )));
         }
 
@@ -397,6 +407,11 @@ async fn fetch_endpoint(
         let output_bytes = tokio::fs::read(primary_output)
             .await
             .map_err(|e| ApiError::Internal(anyhow::anyhow!("Failed to read output: {}", e)))?;
+
+        // Extract values before cleanup (which consumes result)
+        let compute_duration_ms = result.duration_ms;
+        // Clean up workspace after reading output
+        result.cleanup().await;
         let output_hash = ozzy_core::hash::blake3_hash(&output_bytes);
         let output_byte_size = output_bytes.len() as i64;
         let output_content_type = infer_output_content_type(primary_output);
@@ -437,7 +452,7 @@ async fn fetch_endpoint(
         tracing::info!(
             "Computed node '{}' ({}ms): {}",
             node_name,
-            result.duration_ms,
+            compute_duration_ms,
             mat_hash.get(..12).unwrap_or(&mat_hash)
         );
 

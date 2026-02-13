@@ -97,7 +97,7 @@ pub async fn build_environment(
 
             let start = Instant::now();
             let build_log = docker_build(&dockerfile_content, lockfile_bytes, &tag, config).await?;
-            let duration_ms = start.elapsed().as_millis() as i32;
+            let duration_ms: i32 = start.elapsed().as_millis().try_into().unwrap_or(i32::MAX);
 
             db.mark_environment_built(&env_hash, None, duration_ms)
                 .await?;
@@ -156,7 +156,7 @@ pub async fn build_environment(
 
             let start = Instant::now();
             let build_log = docker_build(dockerfile_content, &[], &tag, config).await?;
-            let duration_ms = start.elapsed().as_millis() as i32;
+            let duration_ms: i32 = start.elapsed().as_millis().try_into().unwrap_or(i32::MAX);
 
             db.mark_environment_built(&env_hash, None, duration_ms)
                 .await?;

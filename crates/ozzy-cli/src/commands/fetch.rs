@@ -24,17 +24,20 @@ pub async fn run(endpoint: &str, output: Option<&str>, params: &[String]) -> Res
     }
     let (owner, project, ep_name) = (parts[0], parts[1], parts[2]);
 
-    // Load credentials
+    // Load credentials (optional — public projects don't require auth)
     let creds = load_credentials()?;
-    let Some(creds) = creds else {
-        bail!("Not logged in. Run `ozzy auth login` first.");
-    };
+
+    // Determine registry URL (from credentials or default)
+    let registry_url = creds
+        .as_ref()
+        .map(|c| c.registry_url.as_str())
+        .unwrap_or("https://api.ozzydb.com");
 
     // Build request
     let client = reqwest::Client::new();
     let url = format!(
         "{}/v1/fetch/{}/{}/{}",
-        creds.registry_url, owner, project, ep_name,
+        registry_url, owner, project, ep_name,
     );
 
     let mut query: Vec<(&str, String)> = Vec::new();
@@ -51,10 +54,10 @@ pub async fn run(endpoint: &str, output: Option<&str>, params: &[String]) -> Res
         }
     }
 
-    let request = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", creds.token))
-        .query(&query);
+    let mut request = client.get(&url).query(&query);
+    if let Some(ref creds) = creds {
+        request = request.header("Authorization", format!("Bearer {}", creds.token));
+    }
 
     let response = request
         .send()
