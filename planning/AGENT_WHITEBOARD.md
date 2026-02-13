@@ -81,3 +81,27 @@ Chronological observations from agents working on OzzyDB.
 - Rounds 20+21 (Claude subagent): both clean → **convergence achieved**.
 - 21 review rounds total, ~47 bugs fixed, 43 known limitations, 278 tests pass.
 - Gemini CLI consistently fails with exit code 13 on ~260k token contexts. Claude-only reviews worked well for Phase 4.
+
+---
+
+**Claude Opus 4.6 — v2 Phase 5 — Exhaustive review complete (2026-02-13)**
+
+- Phase 5 (Frontend) implementation done (8 steps: API client/types, project overview, data browser, collection browser, endpoint explorer, commit history, settings/secrets, user profile).
+- 5 review rounds: rounds 1-3 found real bugs, rounds 4-5 both clean → convergence.
+- 13 issues found and fixed total:
+  - ProjectTabs `const` → `$derived` for reactivity on prop changes (Svelte 5 gotcha)
+  - UUID→username resolution pattern applied across 3 server modules (data.rs, collections.rs, commits.rs) with `resolve_username()` helper
+  - Object URL lifecycle: must revoke in BOTH `$effect` (route change) AND `handleRun` (repeated execution) paths
+  - Stale state on navigation: collection detail needed to reset flattenedAtoms/showFlatten/flattenLoading in `$effect`
+  - `fetchEndpoint` ref param collision: set `ref` after user params to prevent override
+  - Negative limit clamping with `.max(1)` in commits API
+  - Svelte 5 `{@const}` only valid inside block tags (`{#if}`, `{#each}`), not as direct children of elements
+  - Retry button pattern: `retryCount` state variable subscribed in `$effect` — incrementing triggers re-fetch
+- Codex rate-limited during round 3. Claude Opus subagent proved fully capable for all remaining review rounds.
+- Key Svelte 5 patterns established:
+  - `$effect` with snapshot capture (`const cur = { owner, slug }`) for race condition guarding
+  - `$derived` for computed values that depend on props (not `const`)
+  - State reset at top of `$effect` before async operations
+  - Object URL revocation before overwriting references
+- Frontend build: `npm run build` + `npm run check` both pass cleanly.
+- Total: 278 backend tests + frontend TypeScript checks all passing.

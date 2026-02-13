@@ -1,8 +1,8 @@
 # v2 Workflow State
 
-**Current Phase:** 5 — Frontend (IMPLEMENTATION COMPLETE)
-**Current Step:** Exhaustive review in progress
-**Status:** All 8 steps implemented. Build succeeds. Ready for exhaustive review.
+**Current Phase:** 5 — Frontend (COMPLETE)
+**Current Step:** Done — exhaustive review converged
+**Status:** All 8 steps implemented. Exhaustive review converged (5 rounds, 2 consecutive clean).
 
 ## Progress
 
@@ -34,6 +34,7 @@
 | 5 | 5.6 | Commit history (list + detail) | Done |
 | 5 | 5.7 | Settings + secrets management | Done |
 | 5 | 5.8 | User profile update | Done |
+| 5 | review | Exhaustive review (5 rounds, converged) | Done |
 | 6 | 6.1-6.3 | Python client | Pending |
 | 7 | 7.1-7.3 | Deployment + integration | Pending |
 
@@ -120,3 +121,9 @@ None.
   - Step 5.6 (c02e194): Commit history (list + detail with state display)
   - Step 5.7 (905178c): Settings with secrets management (CRUD)
   - Step 5.8 (cd297f6): User profile shows projects for all users
+- Phase 5 exhaustive review CONVERGED:
+  - 5 review rounds total (1 Codex, 4 Claude subagent)
+  - ~13 issues found and fixed across rounds 1-3
+  - Key fixes: ProjectTabs reactivity, UUID→username resolution (data/collections/commits), Object URL lifecycle, stale state on navigation, ref param collision, negative limit clamping
+  - Rounds 4+5 both clean → convergence
+  - Review artifacts: #48-#52 in planning/reviews/v2/
