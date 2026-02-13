@@ -354,19 +354,23 @@ async fn fetch_endpoint(
 
         // Inject secrets
         if !transform_def.secrets.is_empty() {
-            if let Some(ref enc_key) = state.config.secrets_encryption_key {
-                for secret_name in &transform_def.secrets {
-                    if let Some(secret) = state.db.get_secret(project.id, secret_name).await? {
-                        let decrypted =
-                            decrypt_secret(&secret.encrypted_value, enc_key).map_err(|e| {
-                                ApiError::Internal(anyhow::anyhow!(
-                                    "Failed to decrypt secret '{}': {}",
-                                    secret_name,
-                                    e
-                                ))
-                            })?;
-                        env_vars.insert(secret_name.clone(), decrypted);
-                    }
+            let enc_key = state.config.secrets_encryption_key.as_ref().ok_or_else(|| {
+                ApiError::service_unavailable(format!(
+                    "Transform '{}' requires secrets but the server has no secrets encryption key configured",
+                    node_def.transform
+                ))
+            })?;
+            for secret_name in &transform_def.secrets {
+                if let Some(secret) = state.db.get_secret(project.id, secret_name).await? {
+                    let decrypted =
+                        decrypt_secret(&secret.encrypted_value, enc_key).map_err(|e| {
+                            ApiError::Internal(anyhow::anyhow!(
+                                "Failed to decrypt secret '{}': {}",
+                                secret_name,
+                                e
+                            ))
+                        })?;
+                    env_vars.insert(secret_name.clone(), decrypted);
                 }
             }
         }
@@ -403,26 +407,29 @@ async fn fetch_endpoint(
             )));
         }
 
-        // Find the output file and compute its hash
-        let output_files = list_output_files(&result.output_dir).await?;
-        let primary_output = output_files.first().ok_or_else(|| {
-            ApiError::Internal(anyhow::anyhow!(
-                "Transform '{}' produced no output files",
-                node_def.transform
-            ))
-        })?;
-
-        let output_bytes = tokio::fs::read(primary_output)
-            .await
-            .map_err(|e| ApiError::Internal(anyhow::anyhow!("Failed to read output: {}", e)))?;
-
-        // Extract values before cleanup (which consumes result)
+        // Read output from workspace, ensuring cleanup on any error path.
         let compute_duration_ms = result.duration_ms;
-        // Clean up workspace after reading output
+        let read_result: Result<(Vec<u8>, String), ApiError> = async {
+            let output_files = list_output_files(&result.output_dir).await?;
+            let primary_output = output_files.first().ok_or_else(|| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "Transform '{}' produced no output files",
+                    node_def.transform
+                ))
+            })?;
+            let content_type = infer_output_content_type(primary_output);
+            let bytes = tokio::fs::read(primary_output)
+                .await
+                .map_err(|e| {
+                    ApiError::Internal(anyhow::anyhow!("Failed to read output: {}", e))
+                })?;
+            Ok((bytes, content_type))
+        }
+        .await;
         result.cleanup().await;
+        let (output_bytes, output_content_type) = read_result?;
         let output_hash = ozzy_core::hash::blake3_hash(&output_bytes);
         let output_byte_size = output_bytes.len() as i64;
-        let output_content_type = infer_output_content_type(primary_output);
         let output_ext = content_type_to_extension(&output_content_type);
 
         // Store output in content storage (content-addressed by output_hash)

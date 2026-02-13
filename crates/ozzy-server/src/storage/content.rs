@@ -272,7 +272,10 @@ impl ContentStorage {
                         let _ = tokio::fs::remove_file(&tmp_path).await;
                         tracing::debug!("concurrent store race for {}: {}", content_hash, e);
                     }
-                    Err(e) => return Err(e.into()),
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                        return Err(e.into());
+                    }
                 }
             }
         }
@@ -310,7 +313,10 @@ impl ContentStorage {
                         let _ = tokio::fs::remove_file(&tmp_path).await;
                         tracing::debug!("concurrent store race for {}: {}", content_hash, e);
                     }
-                    Err(e) => return Err(e.into()),
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                        return Err(e.into());
+                    }
                 }
             }
         }
