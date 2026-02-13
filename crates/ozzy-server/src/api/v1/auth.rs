@@ -262,9 +262,15 @@ async fn create_token(
         None
     };
 
-    let expires_at = req
-        .expires_in_days
-        .map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
+    let expires_at = match req.expires_in_days {
+        Some(days) if days > 3650 => {
+            return Err(ApiError::bad_request(
+                "Token expiration must be at most 3650 days (10 years)",
+            ));
+        }
+        Some(days) => Some(chrono::Utc::now() + chrono::Duration::days(days as i64)),
+        None => None,
+    };
 
     let token = state
         .db

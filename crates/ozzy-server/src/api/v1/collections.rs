@@ -444,12 +444,16 @@ async fn flatten(
 
     enforce_read_access(&state, &project, &owner, &project_slug, &auth).await?;
 
-    // Verify collection exists
-    state
+    // Verify collection exists and check yanked status
+    let root_coll = state
         .db
         .get_collection(project.id, &name)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Collection '{}'", name)))?;
+
+    if root_coll.yanked {
+        return Err(ApiError::gone(format!("Collection '{}' has been yanked", name)));
+    }
 
     let mut visited = HashSet::new();
     let atoms = flatten_collection(&state, project.id, &name, &[], &mut visited).await?;

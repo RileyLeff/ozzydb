@@ -31,8 +31,11 @@ fn scaffold_python(cwd: &Path, name: &str) -> Result<()> {
         bail!("File already exists: transforms/{}.py", name);
     }
 
+    // Convert dashes to underscores for valid Python identifiers
+    let func_name = name.replace('-', "_");
+
     let content = format!(
-        r#"def {name}(inputs, params):
+        r#"def {func_name}(inputs, params):
     """TODO: Implement transform logic.
 
     Args:
@@ -44,7 +47,7 @@ fn scaffold_python(cwd: &Path, name: &str) -> Result<()> {
     """
     raise NotImplementedError("Implement this transform")
 "#,
-        name = name
+        func_name = func_name
     );
 
     std::fs::write(&file_path, content).context("Failed to write transform file")?;
@@ -54,7 +57,7 @@ fn scaffold_python(cwd: &Path, name: &str) -> Result<()> {
     println!("Add this to your ozzy.toml:");
     println!();
     println!("[transforms.{}]", name);
-    println!("source = \"transforms/{}.py:{}\"", name, name);
+    println!("source = \"transforms/{}.py:{}\"", name, func_name);
     println!("environment = \"default\"");
     println!("inputs.data = \"parquet\"");
     println!("output = \"parquet\"");
@@ -72,17 +75,20 @@ fn scaffold_r(cwd: &Path, name: &str) -> Result<()> {
         bail!("File already exists: transforms/{}.R", name);
     }
 
+    // Convert dashes to underscores (R also uses <- assignment, dashes are operators)
+    let func_name = name.replace('-', "_");
+
     let content = format!(
         r#"#' TODO: Implement transform logic.
 #'
 #' @param inputs Named list of input data (keys match ozzy.toml input declarations)
 #' @param params Named list of parameters (keys match ozzy.toml param declarations)
 #' @return Output data (data.frame, raw bytes, list for collections, etc.)
-{name} <- function(inputs, params) {{
+{func_name} <- function(inputs, params) {{
   stop("Implement this transform")
 }}
 "#,
-        name = name
+        func_name = func_name
     );
 
     std::fs::write(&file_path, content).context("Failed to write transform file")?;
@@ -92,7 +98,7 @@ fn scaffold_r(cwd: &Path, name: &str) -> Result<()> {
     println!("Add this to your ozzy.toml:");
     println!();
     println!("[transforms.{}]", name);
-    println!("source = \"transforms/{}.R:{}\"", name, name);
+    println!("source = \"transforms/{}.R:{}\"", name, func_name);
     println!("environment = \"default\"");
     println!("inputs.data = \"parquet\"");
     println!("output = \"parquet\"");
@@ -129,6 +135,33 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("spatial_join <- function(inputs, params)"));
         assert!(content.contains("stop("));
+    }
+
+    #[test]
+    fn test_scaffold_python_dashes_become_underscores() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold(dir.path(), "my-transform", "python").unwrap();
+
+        let path = dir.path().join("transforms/my-transform.py");
+        assert!(path.exists());
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // Function name should use underscores, not dashes
+        assert!(content.contains("def my_transform(inputs, params):"));
+        assert!(!content.contains("def my-transform"));
+    }
+
+    #[test]
+    fn test_scaffold_r_dashes_become_underscores() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold(dir.path(), "my-transform", "r").unwrap();
+
+        let path = dir.path().join("transforms/my-transform.R");
+        assert!(path.exists());
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("my_transform <- function(inputs, params)"));
+        assert!(!content.contains("my-transform <- function"));
     }
 
     #[test]
