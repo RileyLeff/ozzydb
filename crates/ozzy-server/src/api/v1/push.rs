@@ -171,12 +171,19 @@ async fn push(
                 .map_err(ApiError::Internal)?;
         }
 
+        // Check whether source was actually cached on the original push
+        let source_cached = state
+            .db
+            .get_source_cache(&req.git_provider, &req.git_repo, &git_commit_sha)
+            .await?
+            .is_some();
+
         // Idempotent: return success with existing commit info
         return Ok(Json(PushResponse {
             commit_id: existing.id.to_string(),
             git_commit_sha: existing.git_commit_sha,
             environments: vec![],
-            source_cached: true,
+            source_cached,
         }));
     }
 
