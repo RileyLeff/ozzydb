@@ -50,12 +50,12 @@ pub fn generate_dockerfile(base_image: &str, lockfile_name: &str) -> Result<Stri
         return Err("base_image must not contain newlines");
     }
 
-    let install_cmd = if lockfile_name == "uv.lock" || lockfile_name.ends_with("/uv.lock") {
-        "RUN pip install uv && uv pip install --system --no-cache -r /tmp/lockfile"
-    } else if lockfile_name == "poetry.lock" || lockfile_name.ends_with("/poetry.lock") {
+    // Note: uv.lock is a TOML-based lockfile that cannot be installed directly.
+    // Users should provide requirements.txt (or `uv export > requirements.txt`).
+    let install_cmd = if lockfile_name == "poetry.lock" || lockfile_name.ends_with("/poetry.lock") {
         "RUN pip install poetry && cd /tmp && poetry install --no-interaction --no-ansi"
     } else {
-        // requirements.txt or any other lockfile
+        // requirements.txt or any pip-compatible lockfile
         "RUN pip install --no-cache-dir -r /tmp/lockfile"
     };
 
@@ -85,30 +85,17 @@ mod tests {
     // -- generate_dockerfile --
 
     #[test]
-    fn test_dockerfile_uv_lock() {
-        let df = generate_dockerfile("ozzydb/python:3.12", "uv.lock").unwrap();
-        assert!(df.starts_with("FROM ozzydb/python:3.12\n"));
-        assert!(df.contains("uv pip install"));
-        assert!(df.contains("COPY lockfile /tmp/lockfile"));
-    }
-
-    #[test]
     fn test_dockerfile_requirements_txt() {
         let df = generate_dockerfile("python:3.12-slim", "requirements.txt").unwrap();
         assert!(df.starts_with("FROM python:3.12-slim\n"));
         assert!(df.contains("pip install --no-cache-dir -r /tmp/lockfile"));
+        assert!(df.contains("COPY lockfile /tmp/lockfile"));
     }
 
     #[test]
     fn test_dockerfile_poetry_lock() {
         let df = generate_dockerfile("python:3.12", "poetry.lock").unwrap();
         assert!(df.contains("poetry install"));
-    }
-
-    #[test]
-    fn test_dockerfile_nested_uv_lock() {
-        let df = generate_dockerfile("python:3.12", "project/uv.lock").unwrap();
-        assert!(df.contains("uv pip install"));
     }
 
     #[test]

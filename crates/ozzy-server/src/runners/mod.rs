@@ -23,6 +23,25 @@ pub fn parse_source_ref(source: &str) -> Option<(&str, &str)> {
     source.rsplit_once(':')
 }
 
+/// Validate a source reference for safety.
+///
+/// Rejects newlines (which could inject code into generated runner scripts)
+/// and ensures the function name is a valid identifier.
+pub fn validate_source_ref(source: &str) -> Result<(&str, &str), &'static str> {
+    if source.contains('\n') || source.contains('\r') {
+        return Err("source must not contain newlines");
+    }
+    let (file_path, func_name) =
+        parse_source_ref(source).ok_or("source must contain ':' separator")?;
+    if file_path.is_empty() {
+        return Err("source file path must not be empty");
+    }
+    if func_name.is_empty() || !func_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err("function name must be a valid identifier (alphanumeric + underscore)");
+    }
+    Ok((file_path, func_name))
+}
+
 /// Detect the runner type from the source file extension.
 ///
 /// Returns `None` for unrecognized extensions so callers can surface a clear error.
@@ -79,5 +98,35 @@ mod tests {
             detect_runner_type("unknown.jl:func"),
             None // unsupported extension
         );
+    }
+
+    #[test]
+    fn test_validate_source_ref_valid() {
+        assert_eq!(
+            validate_source_ref("transforms/qc.py:quality_control"),
+            Ok(("transforms/qc.py", "quality_control"))
+        );
+        assert_eq!(
+            validate_source_ref("src/analysis.R:run_analysis"),
+            Ok(("src/analysis.R", "run_analysis"))
+        );
+    }
+
+    #[test]
+    fn test_validate_source_ref_rejects_newlines() {
+        assert!(validate_source_ref("main.py:func\nimport os").is_err());
+        assert!(validate_source_ref("main.py:func\rimport os").is_err());
+    }
+
+    #[test]
+    fn test_validate_source_ref_rejects_invalid_func_name() {
+        assert!(validate_source_ref("main.py:func name").is_err());
+        assert!(validate_source_ref("main.py:func;evil").is_err());
+        assert!(validate_source_ref("main.py:").is_err());
+    }
+
+    #[test]
+    fn test_validate_source_ref_rejects_missing_colon() {
+        assert!(validate_source_ref("main.py").is_err());
     }
 }

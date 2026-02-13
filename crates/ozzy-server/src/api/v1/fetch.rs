@@ -270,11 +270,10 @@ async fn fetch_endpoint(
         // Generate runner script
         let runner_script = if let Some(source) = &transform_def.source {
             let (file_path, func_name) =
-                crate::runners::parse_source_ref(source).ok_or_else(|| {
-                    ApiError::Internal(anyhow::anyhow!(
-                        "Invalid source reference '{}' in transform '{}'",
-                        source,
-                        node_def.transform,
+                crate::runners::validate_source_ref(source).map_err(|e| {
+                    ApiError::BadRequest(format!(
+                        "Invalid source reference '{}' in transform '{}': {}",
+                        source, node_def.transform, e
                     ))
                 })?;
             let runner_type = crate::runners::detect_runner_type(source).ok_or_else(|| {
