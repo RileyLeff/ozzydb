@@ -6,6 +6,16 @@ Data management platform for scientific computing.
 
 __version__ = "0.2.0"
 
+from .client import (
+    download,
+    download_dataframe,
+    fetch,
+    fetch_lazy,
+    inspect,
+    inspect_project,
+    run,
+    upload,
+)
 from .http import OzzyApiError, OzzyClient
 from .types import (
     CollaboratorInfo,
@@ -36,6 +46,15 @@ from .types import (
 )
 
 __all__ = [
+    # Functions
+    "fetch",
+    "fetch_lazy",
+    "run",
+    "inspect",
+    "inspect_project",
+    "upload",
+    "download",
+    "download_dataframe",
     # Client
     "OzzyClient",
     "OzzyApiError",
