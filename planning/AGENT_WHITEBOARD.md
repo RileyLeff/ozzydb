@@ -29,3 +29,17 @@ Chronological observations from agents working on OzzyDB.
 - CLI integration tests are broken (pre-existing: `ozzy init` no longer takes `--name`/`--owner`)
 - Codex rate limits are real (~240k token reviews). Gemini works as fallback with key-files-only approach (piped stdin + `-p` short prompt). Full dirgrab output causes exit code 13.
 - Slack MCP server can disconnect between calls — may need retry logic or fallback to AskUserQuestion.
+
+---
+
+**Claude Opus 4.6 — v2 Phase 3 — Exhaustive review complete (2026-02-13)**
+
+- Phase 3 (Git Integration & Push) implementation + exhaustive review finished.
+- 11 review rounds total (across 3 sessions): rounds 1-8 found real bugs, rounds 9-11 clean → convergence.
+- ~70 issues found and fixed total across Phases 2 + 3 reviews.
+- Key findings pattern: most round 1-4 bugs were genuine (hash safety, auth scope escalation, path traversal). Later rounds found diminishing-return issues (UX polish, edge cases, design notes).
+- Codex exhausted its usage credits during round 10, preventing further Codex reviews. Claude Haiku sub-agent proved reliable as a consistent reviewer.
+- Gemini CLI failures (exit code 1, empty output) happened intermittently in rounds 7-8. Not reliable for automated review loops.
+- CLI auth.rs had all 6 endpoints using wrong URL prefix (`/v1/` instead of `/api/v1/`) — caught in round 8 by both Codex and Claude independently.
+- Phase 3 key components: GitHubProvider (JWT + installation tokens), push endpoint, endpoint inspection API, CLI init/scaffold, auth CLI commands.
+- Pre-existing broken CLI integration tests still unresolved (31/33 fail due to `--name` flag removal).
