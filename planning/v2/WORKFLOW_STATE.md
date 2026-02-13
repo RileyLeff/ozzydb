@@ -1,8 +1,8 @@
 # v2 Workflow State
 
-**Current Phase:** 4 — Execution (COMPLETE)
-**Current Step:** Exhaustive review CONVERGED
-**Status:** All 6 steps implemented. 21 review rounds complete, ~47 bugs fixed. Rounds 20+21 both clean → convergence. Ready for Phase 5.
+**Current Phase:** 5 — Frontend (IMPLEMENTATION COMPLETE)
+**Current Step:** Exhaustive review in progress
+**Status:** All 8 steps implemented. Build succeeds. Ready for exhaustive review.
 
 ## Progress
 
@@ -26,7 +26,14 @@
 | 4 | 4.4 | Server fetch endpoint (DAG execution) | Done |
 | 4 | 4.5 | CLI run + fetch | Done |
 | 4 | 4.6 | Cache management CLI | Done |
-| 5 | 5.1-5.8 | Frontend pages | Pending |
+| 5 | 5.1 | API client + types + commits endpoint | Done |
+| 5 | 5.2 | Project overview page + ProjectTabs | Done |
+| 5 | 5.3 | Data browser (list + detail) | Done |
+| 5 | 5.4 | Collection browser (list + detail) | Done |
+| 5 | 5.5 | Endpoint explorer (list + detail) | Done |
+| 5 | 5.6 | Commit history (list + detail) | Done |
+| 5 | 5.7 | Settings + secrets management | Done |
+| 5 | 5.8 | User profile update | Done |
 | 6 | 6.1-6.3 | Python client | Pending |
 | 7 | 7.1-7.3 | Deployment + integration | Pending |
 
@@ -104,3 +111,12 @@ None.
   - 90 core + 144 server + 44 CLI unit = 278 tests passing
   - Rounds 20+21 both clean → convergence
   - Review artifacts: #27-#47 in planning/reviews/v2/
+- Phase 5 implementation complete:
+  - Step 5.1 (2e654ac): API client + types + commits server endpoint
+  - Step 5.2 (0218887): Project overview + ProjectTabs component + utils
+  - Step 5.3 (1bfb720): Data browser (list + detail with download/yank)
+  - Step 5.4 (e9cc85f): Collection browser (list + detail with flatten/version history)
+  - Step 5.5 (c272de3): Endpoint explorer (list + detail with param form/DAG/run)
+  - Step 5.6 (c02e194): Commit history (list + detail with state display)
+  - Step 5.7 (905178c): Settings with secrets management (CRUD)
+  - Step 5.8 (cd297f6): User profile shows projects for all users
