@@ -61,3 +61,4 @@ Chronological observations from agents working on OzzyDB.
 - Known TODOs in code (not review bugs): compute_inputs resolution, source_dir mounting, endpoint edge source resolution — these are incomplete features, not defects.
 - Gemini CLI gotcha: `-p` flag + stdin doesn't work together. Use `gemini --sandbox -o text < file.txt` (stdin only).
 - compute_env_hash changed from Option<String> to String — all tiers now produce a blake3 hash (Prebuilt included).
+- Round 8 found only 1 low-severity issue (missed instance of round 7 temp file cleanup pattern in get() hydrate path). All 3 round 7 fixes verified present. Approaching convergence — need 2 consecutive clean rounds.
