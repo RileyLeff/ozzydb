@@ -56,13 +56,17 @@ async fn fetch_endpoint(
             .resolve_ref(project.id, ref_name)
             .await?
             .ok_or_else(|| ApiError::not_found(format!("Ref '{}' not found", ref_name)))?;
-        state.db.get_commit_by_id(r.commit_id).await?.ok_or_else(|| {
-            ApiError::Internal(anyhow::anyhow!(
-                "Ref '{}' points to missing commit {}",
-                ref_name,
-                r.commit_id
-            ))
-        })?
+        state
+            .db
+            .get_commit_by_id(r.commit_id)
+            .await?
+            .ok_or_else(|| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "Ref '{}' points to missing commit {}",
+                    ref_name,
+                    r.commit_id
+                ))
+            })?
     } else {
         let commits = state.db.list_commits(project.id, 1).await?;
         commits.into_iter().next().ok_or_else(|| {
@@ -70,25 +74,21 @@ async fn fetch_endpoint(
         })?
     };
 
-    let commit_state = state
-        .db
-        .get_commit_state(commit.id)
-        .await?
-        .ok_or_else(|| {
-            ApiError::Internal(anyhow::anyhow!(
-                "Commit state missing for commit {}",
-                commit.id
-            ))
-        })?;
+    let commit_state = state.db.get_commit_state(commit.id).await?.ok_or_else(|| {
+        ApiError::Internal(anyhow::anyhow!(
+            "Commit state missing for commit {}",
+            commit.id
+        ))
+    })?;
 
     // ── 2. Parse endpoint from commit state ─────────────────────
     let endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef> =
         serde_json::from_value(commit_state.endpoints.clone())
             .map_err(|e| ApiError::Internal(e.into()))?;
 
-    let endpoint_def = endpoints.get(&endpoint_name).ok_or_else(|| {
-        ApiError::not_found(format!("Endpoint '{}' not found", endpoint_name))
-    })?;
+    let endpoint_def = endpoints
+        .get(&endpoint_name)
+        .ok_or_else(|| ApiError::not_found(format!("Endpoint '{}' not found", endpoint_name)))?;
 
     // ── 3. Check yank status ────────────────────────────────────
     if state
@@ -112,8 +112,7 @@ async fn fetch_endpoint(
             .map_err(|e| ApiError::Internal(e.into()))?;
 
     // ── 5. Validate consumer params ─────────────────────────────
-    let resolved_params =
-        validate_and_resolve_params(endpoint_def, &query.params)?;
+    let resolved_params = validate_and_resolve_params(endpoint_def, &query.params)?;
 
     // ── 6. Build execution order (topological sort) ─────────────
     let exec_order = build_execution_order(endpoint_def)?;
@@ -127,7 +126,10 @@ async fn fetch_endpoint(
 
     for node_name in &exec_order {
         let node_def = endpoint_def.nodes.get(node_name).ok_or_else(|| {
-            ApiError::Internal(anyhow::anyhow!("Node '{}' missing from endpoint", node_name))
+            ApiError::Internal(anyhow::anyhow!(
+                "Node '{}' missing from endpoint",
+                node_name
+            ))
         })?;
 
         let transform_def = transforms.get(&node_def.transform).ok_or_else(|| {
@@ -160,21 +162,19 @@ async fn fetch_endpoint(
         let secrets_hash = resolve_secrets_hash(&state, project.id, transform_def).await?;
 
         // Resolve environment image
-        let env_def = environments.get(&transform_def.environment).ok_or_else(|| {
-            ApiError::Internal(anyhow::anyhow!(
-                "Environment '{}' not found for transform '{}'",
-                transform_def.environment,
-                node_def.transform,
-            ))
-        })?;
+        let env_def = environments
+            .get(&transform_def.environment)
+            .ok_or_else(|| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "Environment '{}' not found for transform '{}'",
+                    transform_def.environment,
+                    node_def.transform,
+                ))
+            })?;
 
-        let (env_image, env_hash) = resolve_environment_image(
-            &state,
-            env_def,
-            &commit.git_repo,
-            &commit.git_commit_sha,
-        )
-        .await?;
+        let (env_image, env_hash) =
+            resolve_environment_image(&state, env_def, &commit.git_repo, &commit.git_commit_sha)
+                .await?;
 
         // Compute materialized hash
         let input_refs: Vec<(&str, &str)> = input_hashes
@@ -269,8 +269,8 @@ async fn fetch_endpoint(
 
         // Generate runner script
         let runner_script = if let Some(source) = &transform_def.source {
-            let (file_path, func_name) = crate::runners::parse_source_ref(source)
-                .ok_or_else(|| {
+            let (file_path, func_name) =
+                crate::runners::parse_source_ref(source).ok_or_else(|| {
                     ApiError::Internal(anyhow::anyhow!(
                         "Invalid source reference '{}' in transform '{}'",
                         source,
@@ -282,9 +282,7 @@ async fn fetch_endpoint(
                 crate::runners::RunnerType::Python => {
                     crate::runners::python::generate(file_path, func_name)
                 }
-                crate::runners::RunnerType::R => {
-                    crate::runners::r::generate(file_path, func_name)
-                }
+                crate::runners::RunnerType::R => crate::runners::r::generate(file_path, func_name),
                 crate::runners::RunnerType::Command => {
                     return Err(ApiError::Internal(anyhow::anyhow!(
                         "Source-based transform incorrectly detected as Command type"
@@ -302,9 +300,8 @@ async fn fetch_endpoint(
         };
 
         let runner_ext = if transform_def.source.is_some() {
-            let rt = crate::runners::detect_runner_type(
-                transform_def.source.as_deref().unwrap_or(""),
-            );
+            let rt =
+                crate::runners::detect_runner_type(transform_def.source.as_deref().unwrap_or(""));
             match rt {
                 crate::runners::RunnerType::Python => "py",
                 crate::runners::RunnerType::R => "R",
@@ -315,9 +312,7 @@ async fn fetch_endpoint(
         };
 
         let runner_type = if transform_def.source.is_some() {
-            crate::runners::detect_runner_type(
-                transform_def.source.as_deref().unwrap_or(""),
-            )
+            crate::runners::detect_runner_type(transform_def.source.as_deref().unwrap_or(""))
         } else {
             crate::runners::RunnerType::Command
         };
@@ -346,13 +341,9 @@ async fn fetch_endpoint(
         if !transform_def.secrets.is_empty() {
             if let Some(ref enc_key) = state.config.secrets_encryption_key {
                 for secret_name in &transform_def.secrets {
-                    if let Some(secret) = state
-                        .db
-                        .get_secret(project.id, secret_name)
-                        .await?
-                    {
-                        let decrypted = decrypt_secret(&secret.encrypted_value, enc_key)
-                            .map_err(|e| {
+                    if let Some(secret) = state.db.get_secret(project.id, secret_name).await? {
+                        let decrypted =
+                            decrypt_secret(&secret.encrypted_value, enc_key).map_err(|e| {
                                 ApiError::Internal(anyhow::anyhow!(
                                     "Failed to decrypt secret '{}': {}",
                                     secret_name,
@@ -383,9 +374,7 @@ async fn fetch_endpoint(
 
         let result = crate::compute::docker::run(&compute_request, &state.config.compute.tmpdir)
             .await
-            .map_err(|e| {
-                ApiError::Internal(anyhow::anyhow!("Compute execution failed: {}", e))
-            })?;
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("Compute execution failed: {}", e)))?;
 
         if !result.success() {
             return Err(ApiError::Internal(anyhow::anyhow!(
@@ -405,9 +394,9 @@ async fn fetch_endpoint(
             ))
         })?;
 
-        let output_bytes = tokio::fs::read(primary_output).await.map_err(|e| {
-            ApiError::Internal(anyhow::anyhow!("Failed to read output: {}", e))
-        })?;
+        let output_bytes = tokio::fs::read(primary_output)
+            .await
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("Failed to read output: {}", e)))?;
         let output_hash = ozzy_core::hash::blake3_hash(&output_bytes);
         let output_byte_size = output_bytes.len() as i64;
         let output_content_type = infer_output_content_type(primary_output);
@@ -470,16 +459,13 @@ async fn fetch_endpoint(
     })?;
 
     let final_output = node_outputs.get(final_node).ok_or_else(|| {
-        ApiError::Internal(anyhow::anyhow!(
-            "Final node '{}' has no output",
-            final_node
-        ))
+        ApiError::Internal(anyhow::anyhow!("Final node '{}' has no output", final_node))
     })?;
 
     // Fetch the output bytes from storage
     let final_ext = content_type_to_extension(&final_output.content_type);
-    let storage = crate::storage::ContentStorage::from_config(&state.config)
-        .map_err(ApiError::Internal)?;
+    let storage =
+        crate::storage::ContentStorage::from_config(&state.config).map_err(ApiError::Internal)?;
     let output_bytes = storage
         .get(&final_output.output_hash, &final_ext)
         .await
@@ -490,9 +476,10 @@ async fn fetch_endpoint(
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        final_output.content_type.parse().unwrap_or(
-            header::HeaderValue::from_static("application/octet-stream"),
-        ),
+        final_output
+            .content_type
+            .parse()
+            .unwrap_or(header::HeaderValue::from_static("application/octet-stream")),
     );
     headers.insert(
         "X-OzzyDB-Hash",
@@ -616,8 +603,7 @@ fn build_execution_order(
 
         // Only count edges from other nodes (not from data:/collection: sources)
         if nodes.contains(edge.from.as_str()) {
-            adj.get_mut(edge.from.as_str())
-                .map(|v| v.push(to_node));
+            adj.get_mut(edge.from.as_str()).map(|v| v.push(to_node));
             *in_degree.entry(to_node).or_insert(0) += 1;
         }
     }
@@ -682,9 +668,7 @@ async fn resolve_edge_source(
             .db
             .get_data_atom(project_id, data_name)
             .await?
-            .ok_or_else(|| {
-                ApiError::not_found(format!("Data atom '{}' not found", data_name))
-            })?;
+            .ok_or_else(|| ApiError::not_found(format!("Data atom '{}' not found", data_name)))?;
         if atom.yanked {
             return Err(ApiError::Gone(format!(
                 "Data atom '{}' has been yanked",
@@ -698,9 +682,7 @@ async fn resolve_edge_source(
             .db
             .get_collection(project_id, coll_name)
             .await?
-            .ok_or_else(|| {
-                ApiError::not_found(format!("Collection '{}' not found", coll_name))
-            })?;
+            .ok_or_else(|| ApiError::not_found(format!("Collection '{}' not found", coll_name)))?;
         if collection.yanked {
             return Err(ApiError::Gone(format!(
                 "Collection '{}' has been yanked",
@@ -743,7 +725,9 @@ async fn resolve_environment_image(
     git_commit_sha: &str,
 ) -> Result<(Option<crate::db::EnvironmentImage>, String), ApiError> {
     let tier = env_def.tier().ok_or_else(|| {
-        ApiError::Internal(anyhow::anyhow!("Environment has invalid tier configuration"))
+        ApiError::Internal(anyhow::anyhow!(
+            "Environment has invalid tier configuration"
+        ))
     })?;
 
     match &tier {
@@ -770,9 +754,7 @@ async fn resolve_environment_image(
                 ..Default::default()
             };
             let env_hash = crate::environments::hash::compute_env_hash(&tier, &content)
-                .ok_or_else(|| {
-                    ApiError::Internal(anyhow::anyhow!("Failed to compute env hash"))
-                })?;
+                .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("Failed to compute env hash")))?;
             let env_image = state.db.get_environment_image(&env_hash).await?;
             Ok((env_image, env_hash))
         }
@@ -790,15 +772,11 @@ async fn resolve_environment_image(
                     ))
                 })?;
             let content = crate::environments::hash::EnvironmentContent {
-                dockerfile_content: Some(
-                    String::from_utf8_lossy(&dockerfile_bytes).to_string(),
-                ),
+                dockerfile_content: Some(String::from_utf8_lossy(&dockerfile_bytes).to_string()),
                 ..Default::default()
             };
             let env_hash = crate::environments::hash::compute_env_hash(&tier, &content)
-                .ok_or_else(|| {
-                    ApiError::Internal(anyhow::anyhow!("Failed to compute env hash"))
-                })?;
+                .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("Failed to compute env hash")))?;
             let env_image = state.db.get_environment_image(&env_hash).await?;
             Ok((env_image, env_hash))
         }

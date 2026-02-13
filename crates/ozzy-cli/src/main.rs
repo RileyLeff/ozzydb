@@ -405,6 +405,30 @@ async fn main() -> Result<()> {
                 }
             },
         },
+        Commands::Run {
+            endpoint,
+            output,
+            force,
+            params,
+            local_data,
+        } => {
+            commands::run::run(
+                &cwd,
+                &endpoint,
+                output.as_deref(),
+                force,
+                &params,
+                &local_data,
+            )
+            .await?;
+        }
+        Commands::Fetch {
+            endpoint,
+            output,
+            params,
+        } => {
+            commands::fetch::run(&endpoint, output.as_deref(), &params).await?;
+        }
         _ => {
             eprintln!("ozzy v2 - command not yet implemented");
             eprintln!("See planning/v2_architecture.md for the design.");

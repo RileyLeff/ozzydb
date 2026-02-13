@@ -323,7 +323,7 @@ pub enum EdgeSource {
     Node(String),
 }
 
-fn parse_edge_source(from: &str) -> EdgeSource {
+pub fn parse_edge_source(from: &str) -> EdgeSource {
     if let Some(rest) = from.strip_prefix("data:") {
         EdgeSource::Data(rest.to_string())
     } else if let Some(rest) = from.strip_prefix("collection:") {
@@ -336,7 +336,7 @@ fn parse_edge_source(from: &str) -> EdgeSource {
 }
 
 /// Parse an edge `to` target. Returns `(node_name, input_name)`.
-fn parse_edge_target(to: &str) -> Option<(String, String)> {
+pub fn parse_edge_target(to: &str) -> Option<(String, String)> {
     let dot_pos = to.find('.')?;
     let node = &to[..dot_pos];
     let input = &to[dot_pos + 1..];
