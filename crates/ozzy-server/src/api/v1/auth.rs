@@ -213,6 +213,23 @@ async fn create_token(
     State(state): State<AppState>,
     Json(req): Json<CreateTokenRequest>,
 ) -> Result<Json<CreateTokenResponse>, ApiError> {
+    // Validate token name: non-empty, reasonable length, safe characters
+    // (must be usable as a URL path segment for DELETE /token/{name})
+    if req.name.is_empty() || req.name.len() > 128 {
+        return Err(ApiError::bad_request(
+            "Token name must be 1-128 characters",
+        ));
+    }
+    if !req
+        .name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(ApiError::bad_request(
+            "Token name must contain only alphanumeric characters, underscores, or dashes",
+        ));
+    }
+
     // Validate scope format
     if req.scope != "account" && !req.scope.starts_with("project:") {
         return Err(ApiError::bad_request(
