@@ -37,9 +37,12 @@ pub struct ContentStorage {
 
 impl ContentStorage {
     fn validate_content_hash(content_hash: &str) -> Result<()> {
-        if content_hash.len() != 64 || !content_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Accept both BLAKE3 (64 chars) and Git SHA-1 (40 chars) hashes.
+        // The source storage uses git commit SHAs as keys.
+        let len = content_hash.len();
+        if (len != 40 && len != 64) || !content_hash.chars().all(|c| c.is_ascii_hexdigit()) {
             anyhow::bail!(
-                "Invalid content hash '{}': expected 64 hexadecimal characters",
+                "Invalid content hash '{}': expected 40 or 64 hexadecimal characters",
                 content_hash
             );
         }
@@ -543,9 +546,26 @@ mod tests {
 
     #[test]
     fn test_validate_content_hash_rejects_invalid_values() {
-        let valid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        assert!(ContentStorage::validate_content_hash(valid).is_ok());
+        // 64-char BLAKE3 hash
+        let valid_blake3 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(ContentStorage::validate_content_hash(valid_blake3).is_ok());
+
+        // 40-char Git SHA-1 hash
+        let valid_sha1 = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        assert!(ContentStorage::validate_content_hash(valid_sha1).is_ok());
+
+        // Invalid: too short
         assert!(ContentStorage::validate_content_hash("abc").is_err());
+
+        // Invalid: wrong length (50 chars, neither 40 nor 64)
+        assert!(
+            ContentStorage::validate_content_hash(
+                "0123456789abcdef0123456789abcdef0123456789abcdef01"
+            )
+            .is_err()
+        );
+
+        // Invalid: non-hex characters
         assert!(
             ContentStorage::validate_content_hash(
                 "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"

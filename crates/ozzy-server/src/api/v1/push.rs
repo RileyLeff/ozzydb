@@ -106,7 +106,13 @@ async fn push(
 
     // Validate ref name if provided
     if let Some(ref ref_name) = req.ref_name {
-        if ref_name.is_empty() || ref_name.contains("..") || ref_name.starts_with('/') {
+        if ref_name.is_empty()
+            || ref_name.contains("..")
+            || ref_name.starts_with('/')
+            || !ref_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/')
+        {
             return Err(ApiError::BadRequest("Invalid ref name".to_string()));
         }
     }
@@ -238,7 +244,7 @@ async fn push(
         tracing::warn!("Failed to cache source tarball: {}", e);
     }
 
-    // ── Compute ozzy.toml hash and store commit ──────────────────
+    // ── Compute ozzy.toml hash and store commit atomically ───────
     let toml_hash = ozzy_core::hash::blake3_hash(toml_str.as_bytes());
 
     let environments_json =
@@ -252,7 +258,7 @@ async fn push(
 
     let commit = state
         .db
-        .insert_commit(
+        .register_commit_atomically(
             project.id,
             &req.git_provider,
             &req.git_repo,
@@ -260,31 +266,15 @@ async fn push(
             &toml_hash,
             auth.user.id,
             req.message.as_deref(),
-        )
-        .await
-        .map_err(ApiError::Internal)?;
-
-    state
-        .db
-        .insert_commit_state(
-            commit.id,
             &toml_str,
             &environments_json,
             &transforms_json,
             &endpoints_json,
             &project_meta_json,
+            req.ref_name.as_deref(),
         )
         .await
         .map_err(ApiError::Internal)?;
-
-    // ── Upsert ref if specified ──────────────────────────────────
-    if let Some(ref ref_name) = req.ref_name {
-        state
-            .db
-            .upsert_ref(project.id, ref_name, "branch", commit.id)
-            .await
-            .map_err(ApiError::Internal)?;
-    }
 
     // ── Build environment status list ────────────────────────────
     // In Phase 3, environment builds are deferred to Phase 4.

@@ -476,6 +476,83 @@ impl Database {
         Ok(state)
     }
 
+    /// Register a commit atomically: insert commit + commit_state + optional ref update.
+    /// If any step fails, the entire operation is rolled back.
+    pub async fn register_commit_atomically(
+        &self,
+        project_id: Uuid,
+        git_provider: &str,
+        git_repo: &str,
+        git_commit_sha: &str,
+        ozzy_toml_hash: &str,
+        pushed_by: Uuid,
+        message: Option<&str>,
+        ozzy_toml_raw: &str,
+        environments: &serde_json::Value,
+        transforms: &serde_json::Value,
+        endpoints: &serde_json::Value,
+        project_meta: &serde_json::Value,
+        ref_name: Option<&str>,
+    ) -> Result<Commit> {
+        let mut tx = self.pool.begin().await?;
+
+        let commit = sqlx::query_as::<_, Commit>(
+            r#"
+            INSERT INTO commits (id, project_id, git_provider, git_repo, git_commit_sha, ozzy_toml_hash, pushed_by, message)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(project_id)
+        .bind(git_provider)
+        .bind(git_repo)
+        .bind(git_commit_sha)
+        .bind(ozzy_toml_hash)
+        .bind(pushed_by)
+        .bind(message)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO commit_state (commit_id, ozzy_toml_raw, environments, transforms, endpoints, project_meta)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(commit.id)
+        .bind(ozzy_toml_raw)
+        .bind(environments)
+        .bind(transforms)
+        .bind(endpoints)
+        .bind(project_meta)
+        .execute(&mut *tx)
+        .await?;
+
+        if let Some(ref_name) = ref_name {
+            sqlx::query(
+                r#"
+                INSERT INTO refs (id, project_id, ref_name, ref_type, commit_id)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (project_id, ref_name) DO UPDATE SET
+                    commit_id = EXCLUDED.commit_id,
+                    ref_type = EXCLUDED.ref_type,
+                    updated_at = now()
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(project_id)
+            .bind(ref_name)
+            .bind("branch")
+            .bind(commit.id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(commit)
+    }
+
     pub async fn get_commit_state(&self, commit_id: Uuid) -> Result<Option<CommitState>> {
         let state =
             sqlx::query_as::<_, CommitState>("SELECT * FROM commit_state WHERE commit_id = $1")
