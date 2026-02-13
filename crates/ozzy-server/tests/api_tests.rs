@@ -42,6 +42,15 @@ async fn build_test_app() -> Option<Router> {
         allowed_logins: vec![],
         secrets_encryption_key: None,
         github_app: None,
+        compute: ozzy_server::config::ComputeConfig {
+            enabled: false,
+            docker_runtime: None,
+            memory_limit: "2g".to_string(),
+            cpu_limit: "1".to_string(),
+            timeout_secs: 300,
+            tmpdir: "/tmp/ozzy-test".to_string(),
+            tmpfs_size: "512m".to_string(),
+        },
     };
 
     let storage = ContentStorage::from_config(&config).ok()?;

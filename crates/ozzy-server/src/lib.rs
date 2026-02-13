@@ -8,6 +8,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod environments;
 pub mod git;
 pub mod storage;
 

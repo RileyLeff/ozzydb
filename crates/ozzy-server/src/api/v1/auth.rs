@@ -216,9 +216,7 @@ async fn create_token(
     // Validate token name: non-empty, reasonable length, safe characters
     // (must be usable as a URL path segment for DELETE /token/{name})
     if req.name.is_empty() || req.name.len() > 128 {
-        return Err(ApiError::bad_request(
-            "Token name must be 1-128 characters",
-        ));
+        return Err(ApiError::bad_request("Token name must be 1-128 characters"));
     }
     if !req
         .name

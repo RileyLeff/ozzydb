@@ -104,6 +104,15 @@ impl TestServer {
             // Test encryption key: 32 bytes of 0x42
             secrets_encryption_key: Some(vec![0x42; 32]),
             github_app: None,
+            compute: ozzy_server::config::ComputeConfig {
+                enabled: false,
+                docker_runtime: None,
+                memory_limit: "2g".to_string(),
+                cpu_limit: "1".to_string(),
+                timeout_secs: 300,
+                tmpdir: "/tmp/ozzy-test".to_string(),
+                tmpfs_size: "512m".to_string(),
+            },
         };
 
         let storage =

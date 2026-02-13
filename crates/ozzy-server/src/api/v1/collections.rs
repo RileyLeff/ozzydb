@@ -452,7 +452,10 @@ async fn flatten(
         .ok_or_else(|| ApiError::not_found(format!("Collection '{}'", name)))?;
 
     if root_coll.yanked {
-        return Err(ApiError::gone(format!("Collection '{}' has been yanked", name)));
+        return Err(ApiError::gone(format!(
+            "Collection '{}' has been yanked",
+            name
+        )));
     }
 
     let mut visited = HashSet::new();

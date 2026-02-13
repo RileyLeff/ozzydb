@@ -301,17 +301,41 @@ async fn push(
         .await
         .map_err(ApiError::Internal)?;
 
-    // ── Build environment status list ────────────────────────────
-    // In Phase 3, environment builds are deferred to Phase 4.
-    // Report all environments as "pending".
-    let env_statuses: Vec<EnvironmentStatus> = ozzy_toml
-        .environments
-        .keys()
-        .map(|name| EnvironmentStatus {
-            name: name.clone(),
-            status: "pending".to_string(),
-        })
-        .collect();
+    // ── Spawn environment builds ───────────────────────────────
+    // Environment builds run asynchronously — don't block the push response.
+    // Report initial status as "building" (or "disabled" if compute is off).
+    let mut env_statuses = Vec::new();
+
+    if state.config.compute.enabled {
+        for (env_name, env_def) in &ozzy_toml.environments {
+            let status = match env_def.tier() {
+                Some(ozzy_core::toml_spec::EnvironmentTier::Prebuilt { .. }) => "ready".to_string(),
+                Some(_) => "building".to_string(),
+                None => "invalid".to_string(),
+            };
+            env_statuses.push(EnvironmentStatus {
+                name: env_name.clone(),
+                status,
+            });
+        }
+
+        // Spawn async build tasks for each environment
+        let build_state = state.clone();
+        let build_envs = ozzy_toml.environments.clone();
+        let build_git_repo = req.git_repo.clone();
+        let build_git_sha = git_commit_sha.clone();
+        tokio::spawn(async move {
+            build_environments_async(&build_state, &build_envs, &build_git_repo, &build_git_sha)
+                .await;
+        });
+    } else {
+        for env_name in ozzy_toml.environments.keys() {
+            env_statuses.push(EnvironmentStatus {
+                name: env_name.clone(),
+                status: "disabled".to_string(),
+            });
+        }
+    }
 
     tracing::info!(
         "Push registered: {}/{} at {} (commit_id={})",
@@ -372,6 +396,89 @@ async fn cache_source_tarball(
         .await?;
 
     Ok(())
+}
+
+/// Asynchronously build all environments declared in an `ozzy.toml`.
+///
+/// Fetches lockfile/Dockerfile content from git as needed, then delegates
+/// to the Docker builder. Errors are logged but don't propagate — the push
+/// has already succeeded.
+async fn build_environments_async(
+    state: &AppState,
+    environments: &std::collections::HashMap<String, ozzy_core::toml_spec::EnvironmentDef>,
+    git_repo: &str,
+    git_commit_sha: &str,
+) {
+    use crate::environments::docker::build_environment;
+    use crate::environments::hash::EnvironmentContent;
+
+    for (env_name, env_def) in environments {
+        let tier = match env_def.tier() {
+            Some(t) => t,
+            None => {
+                tracing::warn!("Environment '{}' has invalid tier configuration", env_name);
+                continue;
+            }
+        };
+
+        // Fetch content from git as needed
+        let content = match &tier {
+            ozzy_core::toml_spec::EnvironmentTier::BaseLockfile { lockfile, .. } => {
+                match state.git.get_file(git_repo, git_commit_sha, lockfile).await {
+                    Ok(bytes) => EnvironmentContent {
+                        lockfile_content: Some(String::from_utf8_lossy(&bytes).to_string()),
+                        ..Default::default()
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to fetch lockfile '{}' for env '{}': {}",
+                            lockfile,
+                            env_name,
+                            e
+                        );
+                        continue;
+                    }
+                }
+            }
+            ozzy_core::toml_spec::EnvironmentTier::Dockerfile { dockerfile } => {
+                match state
+                    .git
+                    .get_file(git_repo, git_commit_sha, dockerfile)
+                    .await
+                {
+                    Ok(bytes) => EnvironmentContent {
+                        dockerfile_content: Some(String::from_utf8_lossy(&bytes).to_string()),
+                        ..Default::default()
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to fetch Dockerfile '{}' for env '{}': {}",
+                            dockerfile,
+                            env_name,
+                            e
+                        );
+                        continue;
+                    }
+                }
+            }
+            ozzy_core::toml_spec::EnvironmentTier::Prebuilt { .. } => EnvironmentContent::default(),
+        };
+
+        match build_environment(&state.db, &state.config.compute, env_name, &tier, &content).await {
+            Ok(result) => {
+                tracing::info!(
+                    "Environment '{}' ready: {} (type={}, {}ms)",
+                    env_name,
+                    result.image_ref,
+                    result.build_type,
+                    result.build_duration_ms.unwrap_or(0)
+                );
+            }
+            Err(e) => {
+                tracing::error!("Failed to build environment '{}': {}", env_name, e);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
