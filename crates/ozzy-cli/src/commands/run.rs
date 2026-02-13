@@ -400,6 +400,14 @@ fn resolve_endpoint_params(
     endpoint: &EndpointDef,
     user_params: &HashMap<String, serde_json::Value>,
 ) -> Result<HashMap<String, serde_json::Value>> {
+    // Check for unrecognized params
+    for key in user_params.keys() {
+        if !endpoint.params.contains_key(key) {
+            let available: Vec<&str> = endpoint.params.keys().map(|s| s.as_str()).collect();
+            bail!("Unknown parameter '{}'. Available: {:?}", key, available);
+        }
+    }
+
     let mut resolved = HashMap::new();
     for (name, def) in &endpoint.params {
         if let Some(value) = user_params.get(name) {
@@ -551,8 +559,8 @@ fn compute_env_hash(cwd: &Path, env_def: &EnvironmentDef) -> Result<String> {
             let lockfile_content = std::fs::read_to_string(&lockfile_path)
                 .with_context(|| format!("Cannot read lockfile '{}'", lockfile_path.display()))?;
             Ok(hash::blake3_hash_components(&[
-                &base,
-                &hash::blake3_hash(lockfile_content.as_bytes()),
+                base.as_str(),
+                lockfile_content.as_str(),
             ]))
         }
         Some(EnvironmentTier::Dockerfile { dockerfile }) => {

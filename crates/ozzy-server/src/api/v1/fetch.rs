@@ -124,6 +124,10 @@ async fn fetch_endpoint(
     // Build edge map for quick lookup
     let edge_map = build_edge_map(endpoint_def);
 
+    // Platform fingerprint (server platform) — computed once for all nodes
+    let platform = ozzy_core::platform::PlatformFingerprint::detect();
+    let platform_hash = platform.hash();
+
     for node_name in &exec_order {
         let node_def = endpoint_def.nodes.get(node_name).ok_or_else(|| {
             ApiError::Internal(anyhow::anyhow!(
@@ -206,10 +210,6 @@ async fn fetch_endpoint(
             &env_hash,
             &params_schema_hash,
         );
-
-        // Platform hash (server platform)
-        let platform = ozzy_core::platform::PlatformFingerprint::detect();
-        let platform_hash = platform.hash();
 
         let mat_hash = ozzy_core::hash::materialized_hash(
             &input_refs,
@@ -537,6 +537,17 @@ fn validate_and_resolve_params(
     endpoint: &ozzy_core::toml_spec::EndpointDef,
     consumer_params: &HashMap<String, serde_json::Value>,
 ) -> Result<serde_json::Value, ApiError> {
+    // Check for unrecognized params
+    for key in consumer_params.keys() {
+        if !endpoint.params.contains_key(key) {
+            let available: Vec<&str> = endpoint.params.keys().map(|s| s.as_str()).collect();
+            return Err(ApiError::BadRequest(format!(
+                "Unknown parameter '{}'. Available: {:?}",
+                key, available
+            )));
+        }
+    }
+
     let mut resolved = serde_json::Map::new();
 
     for (name, param_def) in &endpoint.params {
@@ -747,9 +758,9 @@ async fn resolve_environment_image(
 
     match &tier {
         ozzy_core::toml_spec::EnvironmentTier::Prebuilt { image } => {
-            // For prebuilt, the image ref is the env_hash
-            let env_image = state.db.get_environment_image(image).await?;
-            Ok((env_image, image.clone()))
+            let env_hash = ozzy_core::hash::blake3_hash(image.as_bytes());
+            let env_image = state.db.get_environment_image(&env_hash).await?;
+            Ok((env_image, env_hash))
         }
         ozzy_core::toml_spec::EnvironmentTier::BaseLockfile { lockfile, .. } => {
             // Fetch lockfile content from git to compute env_hash
@@ -768,8 +779,7 @@ async fn resolve_environment_image(
                 lockfile_content: Some(String::from_utf8_lossy(&lockfile_bytes).to_string()),
                 ..Default::default()
             };
-            let env_hash = crate::environments::hash::compute_env_hash(&tier, &content)
-                .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("Failed to compute env hash")))?;
+            let env_hash = crate::environments::hash::compute_env_hash(&tier, &content);
             let env_image = state.db.get_environment_image(&env_hash).await?;
             Ok((env_image, env_hash))
         }
@@ -790,8 +800,7 @@ async fn resolve_environment_image(
                 dockerfile_content: Some(String::from_utf8_lossy(&dockerfile_bytes).to_string()),
                 ..Default::default()
             };
-            let env_hash = crate::environments::hash::compute_env_hash(&tier, &content)
-                .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("Failed to compute env hash")))?;
+            let env_hash = crate::environments::hash::compute_env_hash(&tier, &content);
             let env_image = state.db.get_environment_image(&env_hash).await?;
             Ok((env_image, env_hash))
         }
@@ -858,6 +867,9 @@ async fn resolve_secrets_hash(
 fn decrypt_secret(encrypted: &[u8], key: &[u8]) -> Result<String, anyhow::Error> {
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 
+    if key.len() != 32 {
+        anyhow::bail!("Encryption key must be exactly 32 bytes, got {}", key.len());
+    }
     if encrypted.len() < 12 {
         anyhow::bail!("Encrypted data too short (missing nonce)");
     }

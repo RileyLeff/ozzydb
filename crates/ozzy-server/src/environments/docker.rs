@@ -35,7 +35,7 @@ pub async fn build_environment(
         EnvironmentTier::Prebuilt { image } => {
             // No build needed — use the image reference directly.
             // We still record it in the DB for tracking.
-            let env_hash = image.clone(); // Use image ref as the "hash" for prebuilt
+            let env_hash = ozzy_core::hash::blake3_hash(image.as_bytes());
             if let Some(existing) = db.get_environment_image(&env_hash).await? {
                 return Ok(BuiltEnvironment {
                     env_hash,
@@ -62,8 +62,7 @@ pub async fn build_environment(
         }
 
         EnvironmentTier::BaseLockfile { base, lockfile } => {
-            let env_hash = compute_env_hash(tier, content)
-                .context("Failed to compute env hash for BaseLockfile")?;
+            let env_hash = compute_env_hash(tier, content);
 
             // Check if already built
             if let Some(existing) = db.get_environment_image(&env_hash).await? {
@@ -85,7 +84,8 @@ pub async fn build_environment(
             }
 
             let tag = image_tag(&env_hash);
-            let dockerfile_content = generate_dockerfile(base, lockfile);
+            let dockerfile_content = generate_dockerfile(base, lockfile)
+                .map_err(|e| anyhow::anyhow!("Invalid environment definition: {}", e))?;
             let lockfile_bytes = content.lockfile_content.as_deref().unwrap_or("").as_bytes();
 
             // Record pending build
@@ -120,8 +120,7 @@ pub async fn build_environment(
         }
 
         EnvironmentTier::Dockerfile { dockerfile: _ } => {
-            let env_hash = compute_env_hash(tier, content)
-                .context("Failed to compute env hash for Dockerfile")?;
+            let env_hash = compute_env_hash(tier, content);
 
             // Check if already built
             if let Some(existing) = db.get_environment_image(&env_hash).await? {

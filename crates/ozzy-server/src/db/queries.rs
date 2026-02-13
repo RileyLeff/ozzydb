@@ -1569,6 +1569,7 @@ impl Database {
             r#"
             INSERT INTO environment_images (id, env_hash, image_ref, build_type, base_image)
             VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (env_hash) DO UPDATE SET env_hash = EXCLUDED.env_hash
             RETURNING *
             "#,
         )

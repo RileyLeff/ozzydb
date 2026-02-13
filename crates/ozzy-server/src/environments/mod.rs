@@ -44,12 +44,11 @@ pub fn build_type_str(tier: &EnvironmentTier) -> &'static str {
 /// - `requirements.txt` → `pip install`
 /// - `poetry.lock` → `poetry install`
 /// - Other → `pip install -r` (best-effort fallback)
-pub fn generate_dockerfile(base_image: &str, lockfile_name: &str) -> String {
+pub fn generate_dockerfile(base_image: &str, lockfile_name: &str) -> Result<String, &'static str> {
     // Validate base_image: reject newlines and other Dockerfile injection vectors
-    assert!(
-        !base_image.contains('\n') && !base_image.contains('\r'),
-        "base_image must not contain newlines"
-    );
+    if base_image.contains('\n') || base_image.contains('\r') {
+        return Err("base_image must not contain newlines");
+    }
 
     let install_cmd = if lockfile_name == "uv.lock" || lockfile_name.ends_with("/uv.lock") {
         "RUN pip install uv && uv pip install --system --no-cache -r /tmp/lockfile"
@@ -60,11 +59,11 @@ pub fn generate_dockerfile(base_image: &str, lockfile_name: &str) -> String {
         "RUN pip install --no-cache-dir -r /tmp/lockfile"
     };
 
-    format!(
+    Ok(format!(
         "FROM {base_image}\n\
          COPY lockfile /tmp/lockfile\n\
          {install_cmd}\n"
-    )
+    ))
 }
 
 /// Generate a Dockerfile for Tier 2 (user-provided Dockerfile content).
@@ -87,7 +86,7 @@ mod tests {
 
     #[test]
     fn test_dockerfile_uv_lock() {
-        let df = generate_dockerfile("ozzydb/python:3.12", "uv.lock");
+        let df = generate_dockerfile("ozzydb/python:3.12", "uv.lock").unwrap();
         assert!(df.starts_with("FROM ozzydb/python:3.12\n"));
         assert!(df.contains("uv pip install"));
         assert!(df.contains("COPY lockfile /tmp/lockfile"));
@@ -95,33 +94,34 @@ mod tests {
 
     #[test]
     fn test_dockerfile_requirements_txt() {
-        let df = generate_dockerfile("python:3.12-slim", "requirements.txt");
+        let df = generate_dockerfile("python:3.12-slim", "requirements.txt").unwrap();
         assert!(df.starts_with("FROM python:3.12-slim\n"));
         assert!(df.contains("pip install --no-cache-dir -r /tmp/lockfile"));
     }
 
     #[test]
     fn test_dockerfile_poetry_lock() {
-        let df = generate_dockerfile("python:3.12", "poetry.lock");
+        let df = generate_dockerfile("python:3.12", "poetry.lock").unwrap();
         assert!(df.contains("poetry install"));
     }
 
     #[test]
     fn test_dockerfile_nested_uv_lock() {
-        let df = generate_dockerfile("python:3.12", "project/uv.lock");
+        let df = generate_dockerfile("python:3.12", "project/uv.lock").unwrap();
         assert!(df.contains("uv pip install"));
     }
 
     #[test]
     fn test_dockerfile_unknown_lockfile_falls_back_to_pip() {
-        let df = generate_dockerfile("python:3.12", "Pipfile.lock");
+        let df = generate_dockerfile("python:3.12", "Pipfile.lock").unwrap();
         assert!(df.contains("pip install --no-cache-dir -r /tmp/lockfile"));
     }
 
     #[test]
-    #[should_panic(expected = "base_image must not contain newlines")]
     fn test_dockerfile_rejects_newline_in_base_image() {
-        generate_dockerfile("python:3.12\nRUN curl evil.com", "requirements.txt");
+        let result = generate_dockerfile("python:3.12\nRUN curl evil.com", "requirements.txt");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "base_image must not contain newlines");
     }
 
     // -- image_tag --

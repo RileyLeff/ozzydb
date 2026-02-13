@@ -10,19 +10,21 @@ use ozzy_core::toml_spec::EnvironmentTier;
 
 /// Compute the environment hash for a given tier.
 ///
-/// For Prebuilt environments, returns `None` — the image reference is used directly.
-/// For BaseLockfile and Dockerfile, returns the content-addressed hash.
-pub fn compute_env_hash(tier: &EnvironmentTier, content: &EnvironmentContent) -> Option<String> {
+/// All tiers produce a blake3 hash:
+/// - BaseLockfile: `blake3(base_image + lockfile_content)`
+/// - Dockerfile: `blake3(dockerfile_content)`
+/// - Prebuilt: `blake3(image_reference)`
+pub fn compute_env_hash(tier: &EnvironmentTier, content: &EnvironmentContent) -> String {
     match tier {
         EnvironmentTier::BaseLockfile { base, .. } => {
             let lockfile_content = content.lockfile_content.as_deref().unwrap_or("");
-            Some(blake3_hash_components(&[base, lockfile_content]))
+            blake3_hash_components(&[base, lockfile_content])
         }
         EnvironmentTier::Dockerfile { .. } => {
             let dockerfile_content = content.dockerfile_content.as_deref().unwrap_or("");
-            Some(ozzy_core::hash::blake3_hash(dockerfile_content.as_bytes()))
+            ozzy_core::hash::blake3_hash(dockerfile_content.as_bytes())
         }
-        EnvironmentTier::Prebuilt { .. } => None,
+        EnvironmentTier::Prebuilt { image } => ozzy_core::hash::blake3_hash(image.as_bytes()),
     }
 }
 
@@ -55,8 +57,8 @@ mod tests {
             ..Default::default()
         };
 
-        let h1 = compute_env_hash(&tier, &content).unwrap();
-        let h2 = compute_env_hash(&tier, &content).unwrap();
+        let h1 = compute_env_hash(&tier, &content);
+        let h2 = compute_env_hash(&tier, &content);
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64);
     }
@@ -77,8 +79,8 @@ mod tests {
             lockfile: "uv.lock".to_string(),
         };
 
-        let h1 = compute_env_hash(&tier1, &content).unwrap();
-        let h2 = compute_env_hash(&tier2, &content).unwrap();
+        let h1 = compute_env_hash(&tier1, &content);
+        let h2 = compute_env_hash(&tier2, &content);
         assert_ne!(h1, h2);
     }
 
@@ -98,8 +100,8 @@ mod tests {
             ..Default::default()
         };
 
-        let h1 = compute_env_hash(&tier, &content1).unwrap();
-        let h2 = compute_env_hash(&tier, &content2).unwrap();
+        let h1 = compute_env_hash(&tier, &content1);
+        let h2 = compute_env_hash(&tier, &content2);
         assert_ne!(h1, h2);
     }
 
@@ -113,8 +115,8 @@ mod tests {
             ..Default::default()
         };
 
-        let h1 = compute_env_hash(&tier, &content).unwrap();
-        let h2 = compute_env_hash(&tier, &content).unwrap();
+        let h1 = compute_env_hash(&tier, &content);
+        let h2 = compute_env_hash(&tier, &content);
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64);
     }
@@ -134,19 +136,21 @@ mod tests {
             ..Default::default()
         };
 
-        let h1 = compute_env_hash(&tier, &c1).unwrap();
-        let h2 = compute_env_hash(&tier, &c2).unwrap();
+        let h1 = compute_env_hash(&tier, &c1);
+        let h2 = compute_env_hash(&tier, &c2);
         assert_ne!(h1, h2);
     }
 
     #[test]
-    fn test_prebuilt_returns_none() {
+    fn test_prebuilt_returns_hash() {
         let tier = EnvironmentTier::Prebuilt {
             image: "ghcr.io/user/image:v1".to_string(),
         };
         let content = EnvironmentContent::default();
 
-        assert!(compute_env_hash(&tier, &content).is_none());
+        let h = compute_env_hash(&tier, &content);
+        assert_eq!(h.len(), 64);
+        assert_eq!(h, ozzy_core::hash::blake3_hash(b"ghcr.io/user/image:v1"));
     }
 
     #[test]
@@ -162,7 +166,7 @@ mod tests {
             ..Default::default()
         };
 
-        let h = compute_env_hash(&tier, &content).unwrap();
+        let h = compute_env_hash(&tier, &content);
         let expected = blake3_hash_components(&["ozzydb/python:3.12", "polars==1.0\n"]);
         assert_eq!(h, expected);
     }
@@ -178,7 +182,7 @@ mod tests {
             ..Default::default()
         };
 
-        let h = compute_env_hash(&tier, &content).unwrap();
+        let h = compute_env_hash(&tier, &content);
         let expected = ozzy_core::hash::blake3_hash(b"FROM python:3.12\n");
         assert_eq!(h, expected);
     }
