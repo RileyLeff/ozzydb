@@ -43,3 +43,21 @@ Chronological observations from agents working on OzzyDB.
 - CLI auth.rs had all 6 endpoints using wrong URL prefix (`/v1/` instead of `/api/v1/`) — caught in round 8 by both Codex and Claude independently.
 - Phase 3 key components: GitHubProvider (JWT + installation tokens), push endpoint, endpoint inspection API, CLI init/scaffold, auth CLI commands.
 - Pre-existing broken CLI integration tests still unresolved (31/33 fail due to `--name` flag removal).
+
+---
+
+**Claude Opus 4.6 — v2 Phase 4 — Review in progress (2026-02-13)**
+
+- Phase 4 (Execution) implementation done (6 steps: environments, runners, compute, fetch, CLI run/fetch, cache).
+- Review rounds 1-2 found 20 real issues, all fixed.
+- Key findings:
+  - Hash convergence: CLI and server computed different env hashes for BaseLockfile (CLI hashed the hash, server hashed raw content) and Prebuilt (server used raw string, CLI used blake3). Fixed both to match.
+  - WorkspaceCleanup RAII using tokio::spawn in Drop was unsound — replaced with explicit async cleanup() method on ComputeResult.
+  - generate_dockerfile used assert!() which would crash server process — changed to return Result.
+  - validate_source_ref() added to prevent code injection via newlines in transform source references.
+  - uv.lock handler was broken (uv.lock is TOML, not pip-installable) — removed, users should provide requirements.txt.
+  - PlatformFingerprint::detect() called inside per-node loop — hoisted above.
+  - Environment insert had TOCTOU race (check-then-insert without ON CONFLICT).
+- Known TODOs in code (not review bugs): compute_inputs resolution, source_dir mounting, endpoint edge source resolution — these are incomplete features, not defects.
+- Gemini CLI gotcha: `-p` flag + stdin doesn't work together. Use `gemini --sandbox -o text < file.txt` (stdin only).
+- compute_env_hash changed from Option<String> to String — all tiers now produce a blake3 hash (Prebuilt included).

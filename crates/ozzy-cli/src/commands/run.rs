@@ -778,13 +778,12 @@ async fn resolve_local_environment(
             let lockfile_path = cwd.join(&lockfile);
             let lockfile_content = std::fs::read_to_string(&lockfile_path)?;
 
-            // Detect lockfile type and generate install command
-            let install_cmd = if lockfile.contains("uv.lock") || lockfile.contains("pyproject.toml")
-            {
-                "pip install --no-cache-dir -r /tmp/lockfile"
-            } else if lockfile.contains("requirements") {
-                "pip install --no-cache-dir -r /tmp/lockfile"
+            // Note: uv.lock is TOML-based and cannot be pip-installed directly.
+            // Users should provide requirements.txt (via `uv export`).
+            let install_cmd = if lockfile.contains("poetry.lock") {
+                "pip install poetry && cd /tmp && poetry install --no-interaction --no-ansi"
             } else {
+                // requirements.txt or any pip-compatible lockfile
                 "pip install --no-cache-dir -r /tmp/lockfile"
             };
 

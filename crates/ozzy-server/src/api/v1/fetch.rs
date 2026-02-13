@@ -197,11 +197,20 @@ async fn fetch_endpoint(
             .map(|(_, f)| f)
             .unwrap_or("command");
 
-        let params_schema_hash = ozzy_core::hash::blake3_hash(
-            serde_json::to_string(&transform_def.params)
-                .unwrap_or_default()
-                .as_bytes(),
-        );
+        let params_schema_hash = {
+            if transform_def.params.is_empty() {
+                ozzy_core::hash::blake3_hash(b"")
+            } else {
+                let mut sorted_params: Vec<_> = transform_def.params.iter().collect();
+                sorted_params.sort_by_key(|(name, _)| name.as_str());
+                let schema_str: String = sorted_params
+                    .iter()
+                    .map(|(name, def)| format!("{}:{}", name, def.type_))
+                    .collect::<Vec<_>>()
+                    .join("\0");
+                ozzy_core::hash::blake3_hash(schema_str.as_bytes())
+            }
+        };
 
         let transform_hash = ozzy_core::hash::transform_hash(
             &source_hash,
@@ -633,25 +642,30 @@ fn build_execution_order(
         }
     }
 
-    let mut queue: VecDeque<&str> = VecDeque::new();
-    for (node, &degree) in &in_degree {
-        if degree == 0 {
-            queue.push_back(node);
-        }
-    }
+    // Collect initial zero-degree nodes and sort for deterministic order
+    let mut initial: Vec<&str> = in_degree
+        .iter()
+        .filter(|&(_, &deg)| deg == 0)
+        .map(|(&node, _)| node)
+        .collect();
+    initial.sort();
+    let mut queue: VecDeque<&str> = VecDeque::from(initial);
 
     let mut order: Vec<String> = Vec::new();
     while let Some(node) = queue.pop_front() {
         order.push(node.to_string());
         if let Some(neighbors) = adj.get(node) {
+            let mut newly_ready: Vec<&str> = Vec::new();
             for &next in neighbors {
                 if let Some(deg) = in_degree.get_mut(next) {
                     *deg -= 1;
                     if *deg == 0 {
-                        queue.push_back(next);
+                        newly_ready.push(next);
                     }
                 }
             }
+            newly_ready.sort();
+            queue.extend(newly_ready);
         }
     }
 
