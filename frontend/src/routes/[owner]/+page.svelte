@@ -48,7 +48,7 @@
 		loading = true;
 		error = null;
 
-		listProjects()
+		listProjects(owner)
 			.then((data) => {
 				if (currentOwner !== owner) return;
 				projects = data;
@@ -119,7 +119,7 @@
 				</div>
 			{:else}
 				<div class="projects-grid">
-					{#each projects as project (project.id)}
+					{#each projects as project (project.slug)}
 						<a class="project-card" href="/{project.owner}/{project.slug}">
 							<div class="project-card-header">
 								<h3 class="project-name">{project.slug}</h3>
