@@ -47,7 +47,8 @@ pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult
     }
 
     // Build docker run command
-    let container_name = format!("ozzydb-{}", &workspace_id[..8]);
+    let short_id = workspace_id.get(..8).unwrap_or(&workspace_id);
+    let container_name = format!("ozzydb-{}", short_id);
     let mut cmd = Command::new("docker");
     cmd.arg("run").arg("--rm").args(["--name", &container_name]);
 
@@ -114,7 +115,7 @@ pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult
             // Timeout: kill the child process. wait_with_output() was cancelled
             // by the timeout, but it takes ownership of child. We need to
             // forcefully stop the container instead.
-            let container_name = format!("ozzydb-{}", workspace_id);
+            // Reuse container_name from line 51 (same short_id prefix).
             let _ = tokio::process::Command::new("docker")
                 .args(["kill", &container_name])
                 .output()

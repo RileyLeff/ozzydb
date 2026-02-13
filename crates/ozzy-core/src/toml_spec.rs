@@ -1436,7 +1436,9 @@ to = "n.data"
         let doc = OzzyToml::parse(toml).unwrap();
         let errors = doc.validate();
         assert!(
-            errors.iter().any(|e| e.message.contains("Multiple parameters bind to")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("Multiple parameters bind to")),
             "Expected duplicate bind error, got: {:?}",
             errors
         );

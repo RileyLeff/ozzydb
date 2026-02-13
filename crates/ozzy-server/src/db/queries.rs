@@ -1618,12 +1618,11 @@ impl Database {
     /// Delete a pending (unbuilt) environment image row so it can be retried.
     /// Only deletes if `built_at IS NULL` to avoid removing a successfully built image.
     pub async fn delete_pending_environment_image(&self, env_hash: &str) -> Result<bool> {
-        let result = sqlx::query(
-            "DELETE FROM environment_images WHERE env_hash = $1 AND built_at IS NULL",
-        )
-        .bind(env_hash)
-        .execute(&self.pool)
-        .await?;
+        let result =
+            sqlx::query("DELETE FROM environment_images WHERE env_hash = $1 AND built_at IS NULL")
+                .bind(env_hash)
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 

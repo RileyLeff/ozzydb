@@ -180,7 +180,7 @@ async fn fetch_endpoint(
                 ))
             })?;
 
-        let (env_image, env_hash) =
+        let (env_image, env_hash, lockfile_hash) =
             resolve_environment_image(&state, env_def, &commit.git_repo, &commit.git_commit_sha)
                 .await?;
 
@@ -219,7 +219,7 @@ async fn fetch_endpoint(
         let transform_hash = ozzy_core::hash::transform_hash(
             &source_hash,
             function_name,
-            "", // lockfile hash — will come from env build in full implementation
+            &lockfile_hash,
             &env_hash,
             &params_schema_hash,
         );
@@ -383,7 +383,10 @@ async fn fetch_endpoint(
                         secret_name
                     )));
                 }
-                if RESERVED_SECRET_NAMES.iter().any(|&r| r.eq_ignore_ascii_case(secret_name)) {
+                if RESERVED_SECRET_NAMES
+                    .iter()
+                    .any(|&r| r.eq_ignore_ascii_case(secret_name))
+                {
                     return Err(ApiError::BadRequest(format!(
                         "Secret '{}' would override a reserved runtime environment variable. \
                          Choose a different name.",
@@ -449,9 +452,7 @@ async fn fetch_endpoint(
             let content_type = infer_output_content_type(primary_output);
             let bytes = tokio::fs::read(primary_output)
                 .await
-                .map_err(|e| {
-                    ApiError::Internal(anyhow::anyhow!("Failed to read output: {}", e))
-                })?;
+                .map_err(|e| ApiError::Internal(anyhow::anyhow!("Failed to read output: {}", e)))?;
             Ok((bytes, content_type))
         }
         .await;
@@ -777,9 +778,7 @@ fn build_execution_order(
 ///
 /// A terminal node has no outgoing edges to other nodes. If there are zero
 /// or multiple terminal nodes, return an error.
-fn find_terminal_node(
-    endpoint: &ozzy_core::toml_spec::EndpointDef,
-) -> Result<&str, ApiError> {
+fn find_terminal_node(endpoint: &ozzy_core::toml_spec::EndpointDef) -> Result<&str, ApiError> {
     let node_names: HashSet<&str> = endpoint.nodes.keys().map(|s| s.as_str()).collect();
     let mut has_outgoing: HashSet<&str> = HashSet::new();
 
@@ -973,12 +972,14 @@ async fn retrieve_source_code(
 /// For Prebuilt: looks up by image ref directly.
 /// For BaseLockfile/Dockerfile: fetches content from git, computes env_hash,
 /// looks up the built image in the DB.
+/// Returns (env_image, env_hash, lockfile_hash).
+/// lockfile_hash is blake3(lockfile_content) for BaseLockfile, blake3(b"") otherwise.
 async fn resolve_environment_image(
     state: &AppState,
     env_def: &ozzy_core::toml_spec::EnvironmentDef,
     git_repo: &str,
     git_commit_sha: &str,
-) -> Result<(Option<crate::db::EnvironmentImage>, String), ApiError> {
+) -> Result<(Option<crate::db::EnvironmentImage>, String, String), ApiError> {
     let tier = env_def.tier().ok_or_else(|| {
         ApiError::Internal(anyhow::anyhow!(
             "Environment has invalid tier configuration"
@@ -1001,7 +1002,8 @@ async fn resolve_environment_image(
                 built_at: Some(chrono::Utc::now()),
                 created_at: chrono::Utc::now(),
             };
-            Ok((Some(env_image), env_hash))
+            let lockfile_hash = ozzy_core::hash::blake3_hash(b"");
+            Ok((Some(env_image), env_hash, lockfile_hash))
         }
         ozzy_core::toml_spec::EnvironmentTier::BaseLockfile { lockfile, .. } => {
             // Fetch lockfile content from git to compute env_hash
@@ -1016,13 +1018,14 @@ async fn resolve_environment_image(
                         e
                     ))
                 })?;
+            let lockfile_hash = ozzy_core::hash::blake3_hash(&lockfile_bytes);
             let content = crate::environments::hash::EnvironmentContent {
                 lockfile_content: Some(String::from_utf8_lossy(&lockfile_bytes).to_string()),
                 ..Default::default()
             };
             let env_hash = crate::environments::hash::compute_env_hash(&tier, &content);
             let env_image = state.db.get_environment_image(&env_hash).await?;
-            Ok((env_image, env_hash))
+            Ok((env_image, env_hash, lockfile_hash))
         }
         ozzy_core::toml_spec::EnvironmentTier::Dockerfile { dockerfile } => {
             // Fetch Dockerfile content from git to compute env_hash
@@ -1043,7 +1046,8 @@ async fn resolve_environment_image(
             };
             let env_hash = crate::environments::hash::compute_env_hash(&tier, &content);
             let env_image = state.db.get_environment_image(&env_hash).await?;
-            Ok((env_image, env_hash))
+            let lockfile_hash = ozzy_core::hash::blake3_hash(b"");
+            Ok((env_image, env_hash, lockfile_hash))
         }
     }
 }
@@ -1658,6 +1662,9 @@ mod tests {
         };
         // Should reject the default that violates max constraint
         let err = validate_and_resolve_params(&endpoint, &HashMap::new());
-        assert!(err.is_err(), "Default value exceeding max should be rejected");
+        assert!(
+            err.is_err(),
+            "Default value exceeding max should be rejected"
+        );
     }
 }

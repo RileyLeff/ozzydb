@@ -292,7 +292,10 @@ async fn push(
                 e
             )));
         }
-        tracing::warn!("Failed to cache source tarball (no source transforms, continuing): {}", e);
+        tracing::warn!(
+            "Failed to cache source tarball (no source transforms, continuing): {}",
+            e
+        );
     }
 
     // ── Compute ozzy.toml hash and store commit atomically ───────
@@ -491,8 +494,7 @@ async fn build_environments_async(
         };
 
         // Pre-compute env hash so we can clean up on failure
-        let env_hash =
-            crate::environments::hash::compute_env_hash(&tier, &content);
+        let env_hash = crate::environments::hash::compute_env_hash(&tier, &content);
 
         match build_environment(&state.db, &state.config.compute, env_name, &tier, &content).await {
             Ok(result) => {

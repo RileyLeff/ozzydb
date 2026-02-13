@@ -458,17 +458,29 @@ fn validate_param_value(
     match param_def.type_.as_str() {
         "float" | "number" => {
             if !value.is_f64() && !value.is_i64() && !value.is_u64() {
-                bail!("Parameter '{}': expected numeric value, got {:?}", name, value);
+                bail!(
+                    "Parameter '{}': expected numeric value, got {:?}",
+                    name,
+                    value
+                );
             }
         }
         "int" | "integer" => {
             if !value.is_i64() && !value.is_u64() {
-                bail!("Parameter '{}': expected integer value, got {:?}", name, value);
+                bail!(
+                    "Parameter '{}': expected integer value, got {:?}",
+                    name,
+                    value
+                );
             }
         }
         "bool" | "boolean" => {
             if !value.is_boolean() {
-                bail!("Parameter '{}': expected boolean value, got {:?}", name, value);
+                bail!(
+                    "Parameter '{}': expected boolean value, got {:?}",
+                    name,
+                    value
+                );
             }
         }
         _ => {} // "string" or unknown
@@ -478,7 +490,12 @@ fn validate_param_value(
     if let Some(num) = value.as_f64().or_else(|| value.as_i64().map(|i| i as f64)) {
         if let Some(min) = param_def.min {
             if num < min {
-                bail!("Parameter '{}' value {} is below minimum {}", name, num, min);
+                bail!(
+                    "Parameter '{}' value {} is below minimum {}",
+                    name,
+                    num,
+                    min
+                );
             }
         }
         if let Some(max) = param_def.max {
@@ -493,7 +510,9 @@ fn validate_param_value(
         if !enum_values.contains(value) {
             bail!(
                 "Parameter '{}' value {:?} not in allowed values: {:?}",
-                name, value, enum_values
+                name,
+                value,
+                enum_values
             );
         }
     }
@@ -1432,17 +1451,38 @@ to = "cal.data"
         // Boolean coercion (matches server: true/1/yes, false/0/no)
         assert_eq!(coerce_param_value("true", "bool"), serde_json::json!(true));
         assert_eq!(coerce_param_value("1", "bool"), serde_json::json!(true));
-        assert_eq!(coerce_param_value("yes", "boolean"), serde_json::json!(true));
-        assert_eq!(coerce_param_value("false", "bool"), serde_json::json!(false));
+        assert_eq!(
+            coerce_param_value("yes", "boolean"),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            coerce_param_value("false", "bool"),
+            serde_json::json!(false)
+        );
         assert_eq!(coerce_param_value("0", "bool"), serde_json::json!(false));
-        assert_eq!(coerce_param_value("no", "boolean"), serde_json::json!(false));
+        assert_eq!(
+            coerce_param_value("no", "boolean"),
+            serde_json::json!(false)
+        );
         // String stays as string
-        assert_eq!(coerce_param_value("hello", "string"), serde_json::json!("hello"));
+        assert_eq!(
+            coerce_param_value("hello", "string"),
+            serde_json::json!("hello")
+        );
         // Numeric-looking value stays string when declared as string
-        assert_eq!(coerce_param_value("123", "string"), serde_json::json!("123"));
-        assert_eq!(coerce_param_value("true", "string"), serde_json::json!("true"));
+        assert_eq!(
+            coerce_param_value("123", "string"),
+            serde_json::json!("123")
+        );
+        assert_eq!(
+            coerce_param_value("true", "string"),
+            serde_json::json!("true")
+        );
         // Failed coercion falls back to string
-        assert_eq!(coerce_param_value("not-a-number", "float"), serde_json::json!("not-a-number"));
+        assert_eq!(
+            coerce_param_value("not-a-number", "float"),
+            serde_json::json!("not-a-number")
+        );
     }
 
     #[test]

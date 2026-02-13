@@ -43,7 +43,9 @@ pub fn validate_source_ref(source: &str) -> Result<(&str, &str), &'static str> {
         .chars()
         .all(|c| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
     {
-        return Err("source file path contains invalid characters (allowed: alphanumeric, /, ., _, -)");
+        return Err(
+            "source file path contains invalid characters (allowed: alphanumeric, /, ., _, -)",
+        );
     }
     if func_name.is_empty() || !func_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err("function name must be a valid identifier (alphanumeric + underscore)");
