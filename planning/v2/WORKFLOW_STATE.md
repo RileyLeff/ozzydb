@@ -1,8 +1,8 @@
 # v2 Workflow State
 
 **Current Phase:** 4 — Execution
-**Current Step:** 4.1 — Environment building
-**Status:** Phase 3 complete (exhaustive review converged). Starting Phase 4.
+**Current Step:** Complete — starting exhaustive review
+**Status:** All 6 steps implemented and committed. Running exhaustive review.
 
 ## Progress
 
@@ -20,12 +20,12 @@
 | 3 | 3.3 | Endpoint inspection + project API | Done |
 | 3 | 3.4 | CLI init + transform scaffold | Done |
 | 3 | 3.5 | Auth CLI commands | Done |
-| 4 | 4.1 | Environment building | Pending |
-| 4 | 4.2 | Runner generation | Pending |
-| 4 | 4.3 | Compute backend + Fly Machines | Pending |
-| 4 | 4.4 | Server fetch endpoint (DAG execution) | Pending |
-| 4 | 4.5 | CLI run + fetch | Pending |
-| 4 | 4.6 | Cache management CLI | Pending |
+| 4 | 4.1 | Environment building | Done |
+| 4 | 4.2 | Runner generation | Done |
+| 4 | 4.3 | Compute backend (Docker) | Done |
+| 4 | 4.4 | Server fetch endpoint (DAG execution) | Done |
+| 4 | 4.5 | CLI run + fetch | Done |
+| 4 | 4.6 | Cache management CLI | Done |
 | 5 | 5.1-5.8 | Frontend pages | Pending |
 | 6 | 6.1-6.3 | Python client | Pending |
 | 7 | 7.1-7.3 | Deployment + integration | Pending |
@@ -65,4 +65,35 @@ None.
   - ~70 issues found and fixed across all rounds
   - 3 consecutive Claude clean rounds (9, 10, 11) + 1 Codex clean (round 9)
   - Review artifacts: #01-#26 in planning/reviews/v2/
-- Starting Phase 4 (Execution)
+- Phase 4 implementation complete:
+  - Step 4.1 (e79e12b): Environment building
+    - EnvironmentBuilder trait, DockerEnvironmentBuilder
+    - Tier 1 (base+lockfile), Tier 2 (Dockerfile), Tier 3 (prebuilt)
+    - Environment hash computation, Dockerfile generation
+    - DB integration (environment_images table)
+    - Background build spawning from push endpoint
+  - Step 4.2 (94cd10f): Runner generation
+    - Python runner (loads inputs, calls function, writes parquet/csv output)
+    - R runner (same pattern with arrow/jsonlite)
+    - Command runner (template substitution, no shell injection)
+    - Init script generation (input download, runner execution, output packaging)
+  - Step 4.3 (746beb9): Docker compute backend
+    - ComputeBackend trait, DockerBackend implementation
+    - Workspace setup, bind mounts, --network=none
+    - Determinism env vars, gVisor runtime support
+    - Timeout enforcement, output collection
+  - Step 4.4 (bdd04f9): Server fetch endpoint
+    - GET /v1/fetch/{owner}/{project}/{endpoint}
+    - Full DAG execution: resolve → toposort → cache check → compute → store
+    - Param validation, yank checking, output schema verification
+    - Materialized cache integration
+  - Step 4.5 (fcabc8f): CLI run + fetch
+    - `ozzy run` — local DAG execution with Docker
+    - `ozzy fetch` — HTTP client for remote execution
+    - Local cache at ~/.ozzy/cache/materialized/{hash}/
+    - --local-data for binding local files to data references
+  - Step 4.6 (1f795cb): Cache management CLI
+    - `ozzy cache ls/size/clear`
+    - Recursive directory size computation
+    - Human-readable size formatting
+- Starting Phase 4 exhaustive review

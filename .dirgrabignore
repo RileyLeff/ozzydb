@@ -17,9 +17,13 @@ package-lock.json
 
 # Documentation & planning (not code)
 planning/reviews/**
+planning/outdated/**
 
 # Python client (separate project)
 clients/
+
+# Frontend (reviewed separately)
+frontend/
 
 # Dirgrab output
 dirgrab.txt
