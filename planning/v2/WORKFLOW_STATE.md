@@ -1,8 +1,8 @@
 # v2 Workflow State
 
 **Current Phase:** 7 — Deployment & Integration (IN PROGRESS)
-**Current Step:** 7.2 E2E tests complete, exhaustive review round 1 running
-**Status:** Step 7.1 (Docker config) committed. Step 7.2 (13 E2E tests) committed and passing. Review loop in progress.
+**Current Step:** 7.3 Deploy to production
+**Status:** Steps 7.1 (Docker config) + 7.2 (13 E2E tests) done. Exhaustive review converged (4 rounds: R1 4 fixes, R2 1 fix, R3+R4 clean). Ready for deployment.
 
 ## Progress
 
@@ -42,7 +42,7 @@
 | 6 | review | Exhaustive review (7 rounds, converged) | Done |
 | 7 | 7.1 | Docker Compose config updates | Done |
 | 7 | 7.2 | E2E tests (13 tests, all green) | Done |
-| 7 | review | Exhaustive review (in progress) | In Progress |
+| 7 | review | Exhaustive review (4 rounds, converged) | Done |
 | 7 | 7.3 | Deploy to production | Pending |
 
 ## Blockers

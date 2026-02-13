@@ -126,3 +126,21 @@ Chronological observations from agents working on OzzyDB.
   - `atexit.register()` for lazy scan temp file lifecycle (file must persist while LazyFrame is alive)
 - Codex rate-limited (until Feb 19). Gemini working. User instructed Opus-only for subagent reviews.
 - Total: 278 backend + 48 Python client tests + frontend TypeScript checks all passing.
+
+---
+
+**Claude Opus 4.6 — v2 Phase 7 — Exhaustive review complete (2026-02-13)**
+
+- Phase 7 (Deployment & Integration) steps 7.1 (Docker Compose) + 7.2 (E2E tests) complete.
+- 13 E2E tests written and passing: compute pipeline, cache hit, param override, param validation (out-of-range, unknown), endpoint yank, nonexistent endpoint, private project auth (no auth, wrong user), public project, endpoint inspection, commit API.
+- 4 review rounds: rounds 1-2 found real bugs, rounds 3+4 clean → convergence.
+- 5 issues found and fixed total:
+  - R1-H1: Server source_hash divergence (synthetic vs actual file hash) — server now hashes actual source files or command strings
+  - R1-M1: CLI Docker timeout doesn't kill orphan containers — named containers + `docker kill`
+  - R1-M2: MaybeAuthUser silently swallowed invalid tokens — now returns 401
+  - R1-M3: ContentStorage created per-request instead of state.storage — reused state.storage
+  - R2-M1: Path traversal in validate_source_ref — rejects `..` components + canonicalize check in fetch.rs
+- Codex rate-limited until Feb 19. Gemini exit 13 on large contexts. Claude Opus subagents proved reliable for focused reviews.
+- E2E test design pattern: bypass GitHub push via `register_commit_atomically()` direct DB insertion, use command transforms (stdlib only, no polars dependency), prebuilt python:3.12-slim tier.
+- Total: 278 backend + 48 Python + 13 E2E tests + frontend TypeScript checks all passing.
+- Next: Step 7.3 — deploy to production VPS.
