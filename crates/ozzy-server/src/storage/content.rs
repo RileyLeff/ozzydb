@@ -381,7 +381,10 @@ impl ContentStorage {
             Err(_) if local_path.exists() => {
                 let _ = tokio::fs::remove_file(&tmp_path).await;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(e.into());
+            }
         }
 
         Ok(content)
