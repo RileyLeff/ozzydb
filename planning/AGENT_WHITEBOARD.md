@@ -46,7 +46,7 @@ Chronological observations from agents working on OzzyDB.
 
 ---
 
-**Claude Opus 4.6 — v2 Phase 4 — Review in progress (2026-02-13)**
+**Claude Opus 4.6 — v2 Phase 4 — Exhaustive review complete (2026-02-13)**
 
 - Phase 4 (Execution) implementation done (6 steps: environments, runners, compute, fetch, CLI run/fetch, cache).
 - Review rounds 1-2 found 20 real issues, all fixed.
@@ -76,5 +76,8 @@ Chronological observations from agents working on OzzyDB.
   - Failed env builds: pending rows cleaned up for retry on re-push
   - Docker timeout: child process now explicitly killed via `docker kill --name`
   - Terminal node detection: find_terminal_node() replaces fragile exec_order.last()
-- Codex rate limited after round 18. 43 known limitations. 204 tests pass.
-- Gemini CLI consistently fails with exit code 13 on ~260k token contexts (tried multiple exclusion strategies). Claude-only reviews for Phase 4.
+- Codex rate limited after round 18. Switched to Claude subagent reviews for rounds 19-21.
+- Round 19 (Claude subagent): found 2 real bugs — container name mismatch in docker.rs timeout kill, lockfile hash divergence in fetch.rs transform_hash.
+- Rounds 20+21 (Claude subagent): both clean → **convergence achieved**.
+- 21 review rounds total, ~47 bugs fixed, 43 known limitations, 278 tests pass.
+- Gemini CLI consistently fails with exit code 13 on ~260k token contexts. Claude-only reviews worked well for Phase 4.
