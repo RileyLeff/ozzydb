@@ -36,7 +36,7 @@ pub async fn run(endpoint: &str, output: Option<&str>, params: &[String]) -> Res
     // Build request
     let client = reqwest::Client::new();
     let url = format!(
-        "{}/v1/fetch/{}/{}/{}",
+        "{}/api/v1/fetch/{}/{}/{}",
         registry_url, owner, project, ep_name,
     );
 

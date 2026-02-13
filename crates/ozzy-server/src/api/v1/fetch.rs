@@ -154,8 +154,8 @@ async fn fetch_endpoint(
             input_hashes.push((input_name, hash));
         }
 
-        // Resolve node params (from endpoint params + node static params)
-        let node_params = resolve_node_params(node_def, &resolved_params);
+        // Resolve node params (static params + endpoint param binds)
+        let node_params = resolve_node_params(node_name, node_def, endpoint_def, &resolved_params);
         let params_hash = ozzy_core::hash::blake3_hash(
             serde_json::to_string(&node_params)
                 .unwrap_or_default()
@@ -820,10 +820,12 @@ async fn resolve_environment_image(
     }
 }
 
-/// Resolve params for a specific node (merge endpoint params via binds + node static params).
+/// Resolve params for a specific node: merge static node params with endpoint param binds.
 fn resolve_node_params(
+    node_name: &str,
     node_def: &ozzy_core::toml_spec::NodeDef,
-    resolved_endpoint_params: &serde_json::Value,
+    endpoint: &ozzy_core::toml_spec::EndpointDef,
+    endpoint_params: &serde_json::Value,
 ) -> serde_json::Value {
     let mut params = serde_json::Map::new();
 
@@ -832,11 +834,16 @@ fn resolve_node_params(
         params.insert(key.clone(), value.clone());
     }
 
-    // Merge endpoint params into node params (runner ignores extras)
-    if let Some(obj) = resolved_endpoint_params.as_object() {
-        for (key, value) in obj {
-            if !params.contains_key(key) {
-                params.insert(key.clone(), value.clone());
+    // Override with endpoint param binds (binds format: "node_name.param_name")
+    let ep_params_obj = endpoint_params.as_object();
+    for (ep_param_name, ep_param_def) in &endpoint.params {
+        if let Some((bind_node, bind_param)) = ep_param_def.binds.split_once('.') {
+            if bind_node == node_name {
+                if let Some(obj) = &ep_params_obj {
+                    if let Some(value) = obj.get(ep_param_name) {
+                        params.insert(bind_param.to_string(), value.clone());
+                    }
+                }
             }
         }
     }
@@ -1184,7 +1191,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_node_params() {
+    fn test_resolve_node_params_with_binds() {
         let node = NodeDef {
             transform: "t".to_string(),
             params: {
@@ -1195,13 +1202,56 @@ mod tests {
             machine: None,
         };
 
+        let endpoint = EndpointDef {
+            description: None,
+            nodes: {
+                let mut n = HashMap::new();
+                n.insert("mynode".to_string(), node.clone());
+                n
+            },
+            params: {
+                let mut p = HashMap::new();
+                p.insert(
+                    "user_threshold".to_string(),
+                    EndpointParamDef {
+                        type_: "float".to_string(),
+                        default: Some(serde_json::json!(10.0)),
+                        binds: "mynode.threshold".to_string(),
+                        min: None,
+                        max: None,
+                        enum_values: None,
+                        description: None,
+                    },
+                );
+                p.insert(
+                    "other_param".to_string(),
+                    EndpointParamDef {
+                        type_: "string".to_string(),
+                        default: Some(serde_json::json!("x")),
+                        binds: "othernode.value".to_string(),
+                        min: None,
+                        max: None,
+                        enum_values: None,
+                        description: None,
+                    },
+                );
+                p
+            },
+            edges: vec![],
+        };
+
         let endpoint_params = serde_json::json!({
-            "threshold": 12.5,
-            "format": "csv",
+            "user_threshold": 12.5,
+            "other_param": "csv",
         });
 
-        let resolved = resolve_node_params(&node, &endpoint_params);
+        let resolved = resolve_node_params("mynode", &node, &endpoint, &endpoint_params);
+        // Static param preserved
         assert_eq!(resolved.get("static_key").unwrap(), "static_val");
+        // Bound param mapped: user_threshold -> threshold (via binds "mynode.threshold")
         assert_eq!(resolved.get("threshold").unwrap(), 12.5);
+        // other_param bound to "othernode.value" should NOT appear on "mynode"
+        assert!(resolved.get("other_param").is_none());
+        assert!(resolved.get("value").is_none());
     }
 }

@@ -869,8 +869,8 @@ fn generate_runner(transform: &TransformDef) -> Result<(String, String)> {
 library(jsonlite)
 library(arrow)
 
-params <- fromJSON(Sys.getenv("OZZY_PARAMS", "{{{{}}}}"))
-input_manifest <- fromJSON(Sys.getenv("OZZY_INPUT_MANIFEST", "{{{{}}}}"))
+params <- fromJSON(Sys.getenv("OZZY_PARAMS", "{{}}"))
+input_manifest <- fromJSON(Sys.getenv("OZZY_INPUT_MANIFEST", "{{}}"))
 inputs <- list()
 
 for (name in names(input_manifest)) {{
