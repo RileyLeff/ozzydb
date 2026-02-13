@@ -348,19 +348,17 @@ def upload(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     # Build multipart form
-    files = {"file": (file_path.name, open(file_path, "rb"))}
-    form_data: dict[str, str] = {"project": f"{owner}/{slug}"}
-    if name:
-        form_data["name"] = name
-    if content_type:
-        form_data["content_type"] = content_type
-    if collection:
-        form_data["collection"] = collection
+    with open(file_path, "rb") as fh:
+        files = {"file": (file_path.name, fh)}
+        form_data: dict[str, str] = {"project": f"{owner}/{slug}"}
+        if name:
+            form_data["name"] = name
+        if content_type:
+            form_data["content_type"] = content_type
+        if collection:
+            form_data["collection"] = collection
 
-    try:
         data = c.json_request("POST", "/data/upload", files=files, data=form_data)
-    finally:
-        files["file"][1].close()
 
     return _from_dict(UploadResult, data)
 
