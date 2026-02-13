@@ -106,6 +106,7 @@ def fetch(
         tmp.close()
     except Exception:
         tmp.close()
+        resp.close()
         Path(tmp_path).unlink(missing_ok=True)
         raise
 
@@ -169,6 +170,7 @@ def fetch_lazy(
         tmp.close()
     except Exception:
         tmp.close()
+        resp.close()
         Path(tmp_path).unlink(missing_ok=True)
         raise
 
@@ -424,6 +426,7 @@ def download_dataframe(
         tmp.close()
     except Exception:
         tmp.close()
+        resp.close()
         Path(tmp_path).unlink(missing_ok=True)
         raise
 
