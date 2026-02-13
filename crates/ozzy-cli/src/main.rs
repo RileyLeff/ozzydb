@@ -429,6 +429,17 @@ async fn main() -> Result<()> {
         } => {
             commands::fetch::run(&endpoint, output.as_deref(), &params).await?;
         }
+        Commands::Cache { command } => match command {
+            CacheCommands::Ls => {
+                commands::cache::ls()?;
+            }
+            CacheCommands::Size => {
+                commands::cache::size()?;
+            }
+            CacheCommands::Clear => {
+                commands::cache::clear()?;
+            }
+        },
         _ => {
             eprintln!("ozzy v2 - command not yet implemented");
             eprintln!("See planning/v2_architecture.md for the design.");
