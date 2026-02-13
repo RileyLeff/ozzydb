@@ -190,16 +190,45 @@ async fn fetch_endpoint(
             .map(|(name, hash)| (*name, hash.as_str()))
             .collect();
 
-        // For transform hash, derive source_hash from the transform source + commit
-        let source_hash = ozzy_core::hash::blake3_hash(
-            format!("{}:{}", node_def.transform, commit.git_commit_sha).as_bytes(),
-        );
-        let function_name = transform_def
-            .source
-            .as_ref()
-            .and_then(|s| crate::runners::parse_source_ref(s))
-            .map(|(_, f)| f)
-            .unwrap_or("command");
+        // Compute source_hash matching CLI behavior:
+        // - source transforms: hash the actual file contents
+        // - command transforms: hash the command string
+        let (source_hash, function_name) = if let Some(source) = &transform_def.source {
+            let (file_path, func) = crate::runners::parse_source_ref(source)
+                .ok_or_else(|| {
+                    ApiError::Internal(anyhow::anyhow!(
+                        "Invalid source ref '{}' for transform '{}'",
+                        source,
+                        node_def.transform
+                    ))
+                })?;
+            let hash = if let Some(ref sd) = source_dir {
+                let full_path = sd.path().join(file_path);
+                tokio::fs::read(&full_path)
+                    .await
+                    .map(|bytes| ozzy_core::hash::blake3_hash(&bytes))
+                    .unwrap_or_else(|_| {
+                        // Fallback: hash source ref + commit SHA if file not extractable
+                        ozzy_core::hash::blake3_hash(
+                            format!("{}:{}", node_def.transform, commit.git_commit_sha)
+                                .as_bytes(),
+                        )
+                    })
+            } else {
+                // No source tarball available — fallback to synthetic hash
+                ozzy_core::hash::blake3_hash(
+                    format!("{}:{}", node_def.transform, commit.git_commit_sha).as_bytes(),
+                )
+            };
+            (hash, func)
+        } else if let Some(command) = &transform_def.command {
+            (ozzy_core::hash::blake3_hash(command.as_bytes()), "command")
+        } else {
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "Transform '{}' has neither source nor command",
+                node_def.transform
+            )));
+        };
 
         let params_schema_hash = {
             if transform_def.params.is_empty() {
@@ -463,13 +492,11 @@ async fn fetch_endpoint(
         let output_ext = content_type_to_extension(&output_content_type);
 
         // Store output in content storage (content-addressed by output_hash)
-        let storage = crate::storage::ContentStorage::from_config(&state.config)
-            .map_err(ApiError::Internal)?;
-        storage
+        state.storage
             .store(&output_bytes, &output_ext)
             .await
             .map_err(ApiError::Internal)?;
-        let output_r2_key = storage
+        let output_r2_key = state.storage
             .storage_key(&output_hash, &output_ext)
             .map_err(ApiError::Internal)?;
 
@@ -522,9 +549,7 @@ async fn fetch_endpoint(
 
     // Fetch the output bytes from storage
     let final_ext = content_type_to_extension(&final_output.content_type);
-    let storage =
-        crate::storage::ContentStorage::from_config(&state.config).map_err(ApiError::Internal)?;
-    let output_bytes = storage
+    let output_bytes = state.storage
         .get(&final_output.output_hash, &final_ext)
         .await
         .map_err(ApiError::Internal)?;

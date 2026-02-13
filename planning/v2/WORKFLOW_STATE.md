@@ -1,8 +1,8 @@
 # v2 Workflow State
 
-**Current Phase:** 6 — Python Client (COMPLETE)
-**Current Step:** Exhaustive review CONVERGED
-**Status:** All steps implemented. 48 unit tests passing. 7 review rounds, 15 bugs fixed, rounds 6+7 clean → convergence.
+**Current Phase:** 7 — Deployment & Integration (IN PROGRESS)
+**Current Step:** 7.2 E2E tests complete, exhaustive review round 1 running
+**Status:** Step 7.1 (Docker config) committed. Step 7.2 (13 E2E tests) committed and passing. Review loop in progress.
 
 ## Progress
 
@@ -40,7 +40,10 @@
 | 6 | 6.4 | Unit tests (48 passing) | Done |
 | 6 | 6.5 | Package exports + README | Done |
 | 6 | review | Exhaustive review (7 rounds, converged) | Done |
-| 7 | 7.1-7.3 | Deployment + integration | Pending |
+| 7 | 7.1 | Docker Compose config updates | Done |
+| 7 | 7.2 | E2E tests (13 tests, all green) | Done |
+| 7 | review | Exhaustive review (in progress) | In Progress |
+| 7 | 7.3 | Deploy to production | Pending |
 
 ## Blockers
 

@@ -114,20 +114,25 @@ impl FromRequestParts<AppState> for MaybeAuthUser {
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         async move {
             match extract_token(parts) {
-                Ok(token) => match validate_token(&state.db, &token).await {
-                    Ok((user, scope)) => Ok(MaybeAuthUser {
+                Ok(token) => {
+                    // Token was provided — validate it and error if invalid
+                    let (user, scope) = validate_token(&state.db, &token).await?;
+                    Ok(MaybeAuthUser {
                         user: Some(user),
                         scope: Some(scope),
-                    }),
-                    Err(_) => Ok(MaybeAuthUser {
+                    })
+                }
+                Err(AuthError::MissingToken) => {
+                    // No Authorization header — legitimate anonymous access
+                    Ok(MaybeAuthUser {
                         user: None,
                         scope: None,
-                    }),
-                },
-                Err(_) => Ok(MaybeAuthUser {
-                    user: None,
-                    scope: None,
-                }),
+                    })
+                }
+                Err(e) => {
+                    // Authorization header present but malformed
+                    Err(e)
+                }
             }
         }
     }

@@ -275,8 +275,17 @@ pub async fn run(
         // We'll use bind mount instead of copying — more efficient for local dev
 
         // Build Docker command
+        let container_name = format!(
+            "ozzy-run-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
         let mut cmd = Command::new("docker");
         cmd.arg("run").arg("--rm");
+        cmd.args(["--name", &container_name]);
 
         // Network isolation
         if !transform.network {
@@ -308,11 +317,29 @@ pub async fn run(
         cmd.arg(&image);
         cmd.args(["/bin/sh", "/workspace/init.sh"]);
 
-        // Execute with timeout (5 minutes default)
-        let output_result = tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output())
-            .await
-            .map_err(|_| anyhow::anyhow!("Transform '{}' timed out after 300s", node_name))?
+        // Execute with timeout, killing the container on timeout
+        let child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .context("Failed to execute docker run. Is Docker installed and running?")?;
+
+        let output_result = match tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            child.wait_with_output(),
+        )
+        .await
+        {
+            Ok(result) => result.context("Docker process failed")?,
+            Err(_) => {
+                // Timeout — kill the container
+                let _ = Command::new("docker")
+                    .args(["kill", &container_name])
+                    .output()
+                    .await;
+                bail!("Transform '{}' timed out after 300s", node_name);
+            }
+        };
 
         let duration = start.elapsed();
         let stdout = String::from_utf8_lossy(&output_result.stdout);
