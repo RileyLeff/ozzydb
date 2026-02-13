@@ -135,4 +135,6 @@ def reset_default_client() -> None:
     """Reset the default client (useful for testing)."""
     global _default_client
     with _default_client_lock:
+        if _default_client is not None:
+            _default_client.close()
         _default_client = None

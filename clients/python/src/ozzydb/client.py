@@ -98,10 +98,16 @@ def fetch(
     )
 
     # Stream to a temp file to avoid loading everything into memory
-    with tempfile.NamedTemporaryFile(delete=False, suffix=_ext_for_type(content_type)) as tmp:
-        tmp_path = tmp.name
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=_ext_for_type(content_type))
+    tmp_path = tmp.name
+    try:
         for chunk in resp.iter_content(chunk_size=8192):
             tmp.write(chunk)
+        tmp.close()
+    except Exception:
+        tmp.close()
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
 
     try:
         result = _read_output(tmp_path, content_type, as_pandas=as_pandas)
@@ -410,10 +416,16 @@ def download_dataframe(
 
     content_type = resp.headers.get("content-type", "application/octet-stream")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=_ext_for_type(content_type)) as tmp:
-        tmp_path = tmp.name
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=_ext_for_type(content_type))
+    tmp_path = tmp.name
+    try:
         for chunk in resp.iter_content(chunk_size=8192):
             tmp.write(chunk)
+        tmp.close()
+    except Exception:
+        tmp.close()
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
 
     try:
         return _read_output(tmp_path, content_type, as_pandas=as_pandas)
@@ -509,6 +521,16 @@ def _read_output(path: str, content_type: str, *, as_pandas: bool = False) -> An
             import pandas as pd
             return pd.read_csv(path, sep="\t")
         return pl.read_csv(path, separator="\t")
+
+    if "arrow.stream" in ct:
+        if as_pandas:
+            import pandas as pd
+            import pyarrow.ipc as ipc
+            with open(path, "rb") as f:
+                reader = ipc.open_stream(f)
+                table = reader.read_all()
+            return table.to_pandas()
+        return pl.read_ipc_stream(path)
 
     if "arrow" in ct:
         if as_pandas:
