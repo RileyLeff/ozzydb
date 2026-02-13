@@ -9,6 +9,9 @@
 | 2026-02-07 | self | Used `replace_all: false` on pattern that matched multiple locations | Check uniqueness first; use `replace_all: true` or add more context to make pattern unique |
 | 2026-02-07 | self | After extracting access.rs module, forgot to keep `ScopeAction` and `has_project_scope` in the original imports | When extracting shared code, check which symbols are still used directly vs through the new module |
 | 2026-02-07 | user | Said "that's not convergence, that's me running out of usage" when both R11 reviews failed | Don't assume failure = convergence. Check if the issue is rate limits, context limits, or actual absence of bugs |
+| 2026-02-13 | self | Codex `-o output.txt` flag doesn't produce file when run via Bash pipe | Use stdout redirect (`> output.txt`) instead of `-o` flag for Codex output |
+| 2026-02-13 | self | `tokio::time::timeout` on `cmd.output()` doesn't kill child process | Use `cmd.spawn()` + named container + `docker kill` for Docker timeout handling |
+| 2026-02-13 | self | `wait_with_output()` takes ownership, can't call `child.kill()` after timeout | Assign Docker container `--name` and use `docker kill {name}` on timeout instead |
 
 ## User Preferences
 - Wants autonomous iteration: "i want you to run the process, not me!"
@@ -52,7 +55,7 @@ cd /opt/ozzydb/crates/ozzy-server/docker && docker compose -f docker-compose.pro
 
 ## Domain Notes
 - Cargo workspace: ozzy-core, ozzy-cli, ozzy-server
-- 108 Rust tests + 18 Python tests (as of R10)
+- 204 Rust tests (90 core + 110 server + 4 CLI unit) as of Phase 4 R18
 - Python client at `clients/python/`, uses `uv` for package management
 - `dirgrab` captures codebase context, respects `.dirgrabignore`
 - Server uses Axum 0.8 with RPITIT (no async_trait)
