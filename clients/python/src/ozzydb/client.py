@@ -267,7 +267,7 @@ def run(
                 "ozzy CLI not found. Install it or add it to PATH."
             )
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".output") as tmp:
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
         output_path = tmp.name
 
     cmd = [ozzy_bin, "run", endpoint, "--output", output_path]
@@ -431,10 +431,10 @@ def _ext_for_type(content_type: str) -> str:
 
 
 def _infer_content_type(path: str) -> str:
-    """Infer content type from a file extension."""
+    """Infer content type from file extension or magic bytes."""
     p = Path(path)
     ext = p.suffix.lower()
-    mapping = {
+    ext_mapping = {
         ".parquet": "application/vnd.apache.parquet",
         ".csv": "text/csv",
         ".tsv": "text/tab-separated-values",
@@ -445,7 +445,25 @@ def _infer_content_type(path: str) -> str:
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
     }
-    return mapping.get(ext, "application/octet-stream")
+    if ext in ext_mapping:
+        return ext_mapping[ext]
+
+    # Check magic bytes for common formats
+    try:
+        with open(p, "rb") as f:
+            header = f.read(8)
+        if header[:4] == b"PAR1":
+            return "application/vnd.apache.parquet"
+        if header[:8] == b"ARROW1\x00\x00":
+            return "application/vnd.apache.arrow.file"
+        if header[:4] == b"\x89PNG":
+            return "image/png"
+        if header[:2] == b"\xff\xd8":
+            return "image/jpeg"
+    except (OSError, IOError):
+        pass
+
+    return "application/octet-stream"
 
 
 def _read_output(path: str, content_type: str, *, as_pandas: bool = False) -> Any:

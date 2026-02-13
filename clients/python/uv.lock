@@ -333,6 +333,7 @@ pandas = [
 dev = [
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pytest" },
 ]
 
 [package.metadata]
@@ -347,7 +348,10 @@ requires-dist = [
 provides-extras = ["pandas", "dev"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pandas", specifier = ">=2.3.3" }]
+dev = [
+    { name = "pandas", specifier = ">=2.3.3" },
+    { name = "pytest", specifier = ">=9.0.2" },
+]
 
 [[package]]
 name = "packaging"

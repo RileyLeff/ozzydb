@@ -1,237 +1,512 @@
-"""
-Tests for OzzyDB Python client.
-"""
+"""Tests for OzzyDB Python client functions."""
 
-import os
-import subprocess
+import io
+import json
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch, PropertyMock
 
 import polars as pl
 import pytest
 
-import ozzydb as ozzy
+import ozzydb
+from ozzydb.client import (
+    _parse_remote_ref,
+    _parse_project_ref,
+    _read_output,
+    _infer_content_type,
+    fetch,
+    fetch_lazy,
+    inspect,
+    inspect_project,
+    run,
+    upload,
+    download,
+    download_dataframe,
+)
+from ozzydb.http import OzzyApiError, OzzyClient
 
 
-def create_test_project(tmp_path: Path) -> Path:
-    """Create a minimal test OzzyDB project."""
-    project_dir = tmp_path / "test-project"
-    project_dir.mkdir()
-
-    # Create ozzy.toml
-    (project_dir / "ozzy.toml").write_text("""
-[project]
-name = "test-project"
-owner = "test-user"
-
-[refs]
-head = "refs/heads/main"
-""")
-
-    # Create .ozzy directory structure
-    ozzy_dir = project_dir / ".ozzy"
-    ozzy_dir.mkdir()
-    (ozzy_dir / "commits").mkdir()
-    (ozzy_dir / "refs" / "heads").mkdir(parents=True)
-    (ozzy_dir / "staged_data").mkdir()
-    (ozzy_dir / "staged_transforms").mkdir()
-    (ozzy_dir / "staged_endpoints").mkdir()
-
-    # Create test data
-    data_dir = project_dir / "data"
-    data_dir.mkdir()
-
-    test_df = pl.DataFrame({
-        "id": [1, 2, 3, 4, 5],
-        "value": [10.0, 20.0, 30.0, 40.0, 50.0],
-        "category": ["A", "B", "A", "B", "A"],
-    })
-    test_df.write_parquet(data_dir / "raw.parquet")
-
-    # Create staged data source metadata
-    import json
-    (ozzy_dir / "staged_data" / "raw.json").write_text(json.dumps({
-        "name": "raw",
-        "hash": "abc123",
-        "schema_hash": "def456",
-        "path": "data/raw.parquet",
-        "row_count": 5,
-        "byte_size": 1024,
-    }))
-
-    return project_dir
+# ── Reference parsing ────────────────────────────────────────────
 
 
-def create_committed_endpoint(project_dir: Path, endpoint_name: str = "ep") -> str:
-    """Create a minimal committed endpoint and point HEAD to it."""
-    import json
+class TestRefParsing:
+    def test_parse_remote_ref(self):
+        owner, project, endpoint = _parse_remote_ref("alice/my-project/corrected")
+        assert owner == "alice"
+        assert project == "my-project"
+        assert endpoint == "corrected"
 
-    commit_hash = "a" * 64
-    commit = {
-        "hash": commit_hash,
-        "parent_hashes": [],
-        "author": "test-user",
-        "message": "seed",
-        "timestamp": "2026-02-07T00:00:00Z",
-        "data_sources": {},
-        "transforms": {},
-        "endpoints": {
-            endpoint_name: {
-                "name": endpoint_name,
-                "nodes": [],
-                "edges": [],
-                "description": None,
-            }
-        },
-    }
+    def test_parse_remote_ref_strips_slashes(self):
+        owner, project, endpoint = _parse_remote_ref("/alice/proj/ep/")
+        assert owner == "alice"
+        assert project == "proj"
+        assert endpoint == "ep"
 
-    commits_dir = project_dir / ".ozzy" / "commits"
-    commits_dir.mkdir(parents=True, exist_ok=True)
-    (commits_dir / f"{commit_hash}.json").write_text(json.dumps(commit))
-    (project_dir / ".ozzy" / "refs" / "heads" / "main").write_text(f"{commit_hash}\n")
-    return commit_hash
+    def test_parse_remote_ref_invalid_two_parts(self):
+        with pytest.raises(ValueError, match="owner/project/endpoint"):
+            _parse_remote_ref("alice/proj")
+
+    def test_parse_remote_ref_invalid_one_part(self):
+        with pytest.raises(ValueError, match="owner/project/endpoint"):
+            _parse_remote_ref("alice")
+
+    def test_parse_project_ref(self):
+        owner, project = _parse_project_ref("alice/my-project")
+        assert owner == "alice"
+        assert project == "my-project"
+
+    def test_parse_project_ref_invalid(self):
+        with pytest.raises(ValueError, match="owner/project"):
+            _parse_project_ref("alice/proj/extra")
 
 
-class TestProject:
-    """Tests for Project class."""
+# ── Content type helpers ─────────────────────────────────────────
 
-    def test_load_project(self, tmp_path):
-        """Test loading a project."""
-        project_dir = create_test_project(tmp_path)
-        project = ozzy.Project(project_dir)
 
-        assert project.name == "test-project"
-        assert project.owner == "test-user"
-        assert project.head == "refs/heads/main"
+class TestContentTypeHelpers:
+    def test_infer_parquet(self):
+        assert _infer_content_type("/tmp/data.parquet") == "application/vnd.apache.parquet"
 
-    def test_project_not_found(self, tmp_path):
-        """Test error when project doesn't exist."""
-        with pytest.raises(FileNotFoundError, match="ozzy.toml not found"):
-            ozzy.Project(tmp_path / "nonexistent")
+    def test_infer_csv(self):
+        assert _infer_content_type("/tmp/data.csv") == "text/csv"
 
-    def test_data_sources(self, tmp_path):
-        """Test loading data sources."""
-        project_dir = create_test_project(tmp_path)
-        project = ozzy.Project(project_dir)
+    def test_infer_unknown(self):
+        assert _infer_content_type("/tmp/data.xyz") == "application/octet-stream"
 
-        sources = project.data_sources
-        assert "raw" in sources
-        assert sources["raw"].name == "raw"
-        assert sources["raw"].row_count == 5
+    def test_read_parquet(self, tmp_path):
+        df = pl.DataFrame({"a": [1, 2, 3], "b": [4.0, 5.0, 6.0]})
+        path = tmp_path / "test.parquet"
+        df.write_parquet(path)
 
-    def test_get_data_path(self, tmp_path):
-        """Test getting data source path."""
-        project_dir = create_test_project(tmp_path)
-        project = ozzy.Project(project_dir)
+        result = _read_output(str(path), "application/vnd.apache.parquet")
+        assert isinstance(result, pl.DataFrame)
+        assert result.shape == (3, 2)
 
-        path = project.get_data_path("raw")
-        assert path.exists()
-        assert path.name == "raw.parquet"
+    def test_read_csv(self, tmp_path):
+        df = pl.DataFrame({"x": [10, 20], "y": ["a", "b"]})
+        path = tmp_path / "test.csv"
+        df.write_csv(path)
 
-    def test_staged_endpoint_deletion_hidden(self, tmp_path):
-        """Committed endpoints staged for deletion should be hidden."""
-        project_dir = create_test_project(tmp_path)
-        create_committed_endpoint(project_dir, "deleted_ep")
+        result = _read_output(str(path), "text/csv")
+        assert isinstance(result, pl.DataFrame)
+        assert result.shape == (2, 2)
 
-        staged_dir = project_dir / ".ozzy" / "staged_endpoints"
-        (staged_dir / "deleted_ep.deleted").write_text("deleted\n")
+    def test_read_parquet_as_pandas(self, tmp_path):
+        import pandas as pd
 
-        project = ozzy.Project(project_dir)
-        assert "deleted_ep" not in project.endpoints
+        df = pl.DataFrame({"a": [1, 2, 3]})
+        path = tmp_path / "test.parquet"
+        df.write_parquet(path)
 
-        with pytest.raises(KeyError, match="staged for deletion"):
-            project.get_endpoint("deleted_ep")
+        result = _read_output(str(path), "application/vnd.apache.parquet", as_pandas=True)
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 3
+
+    def test_read_binary_fallback(self, tmp_path):
+        path = tmp_path / "test.bin"
+        path.write_bytes(b"\x00\x01\x02\x03")
+
+        result = _read_output(str(path), "application/octet-stream")
+        assert isinstance(result, bytes)
+        assert result == b"\x00\x01\x02\x03"
+
+
+# ── Mock response helper ────────────────────────────────────────
+
+
+def _make_response(
+    status_code: int = 200,
+    content: bytes = b"",
+    headers: dict | None = None,
+    json_data: dict | None = None,
+):
+    """Create a mock requests.Response."""
+    resp = MagicMock()
+    resp.ok = 200 <= status_code < 300
+    resp.status_code = status_code
+    resp.headers = headers or {}
+    resp.content = content
+    resp.reason = "OK" if resp.ok else "Error"
+
+    if json_data is not None:
+        resp.json.return_value = json_data
+        resp.headers.setdefault("content-length", str(len(json.dumps(json_data))))
+    else:
+        resp.headers.setdefault("content-length", str(len(content)))
+
+    # For streaming
+    resp.iter_content = MagicMock(return_value=[content])
+
+    return resp
+
+
+# ── Fetch tests ──────────────────────────────────────────────────
+
+
+class TestFetch:
+    def test_fetch_parquet(self, mock_client, tmp_path):
+        # Create test parquet data
+        df = pl.DataFrame({"id": [1, 2, 3], "value": [10.0, 20.0, 30.0]})
+        buf = io.BytesIO()
+        df.write_parquet(buf)
+        parquet_bytes = buf.getvalue()
+
+        mock_resp = _make_response(
+            content=parquet_bytes,
+            headers={
+                "content-type": "application/vnd.apache.parquet",
+                "x-ozzydb-hash": "abc123",
+                "x-ozzydb-cache": "miss",
+            },
+        )
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        result = fetch("alice/proj/ep", client=mock_client)
+        assert isinstance(result, pl.DataFrame)
+        assert result.shape == (3, 2)
+        assert result["id"].to_list() == [1, 2, 3]
+
+        # Verify request was made correctly
+        call_args = mock_client._session.request.call_args
+        assert "/fetch/alice/proj/ep" in call_args[1].get("url", call_args[0][1] if len(call_args[0]) > 1 else "")
+
+    def test_fetch_csv(self, mock_client):
+        csv_bytes = b"a,b\n1,2\n3,4\n"
+        mock_resp = _make_response(
+            content=csv_bytes,
+            headers={"content-type": "text/csv"},
+        )
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        result = fetch("alice/proj/ep", client=mock_client)
+        assert isinstance(result, pl.DataFrame)
+        assert result.shape == (2, 2)
+
+    def test_fetch_with_params(self, mock_client):
+        parquet_bytes = _make_parquet_bytes({"x": [1]})
+        mock_resp = _make_response(
+            content=parquet_bytes,
+            headers={"content-type": "application/vnd.apache.parquet"},
+        )
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        fetch("alice/proj/ep", client=mock_client, threshold=50.0, limit=10)
+
+        call_args = mock_client._session.request.call_args
+        params = call_args[1].get("params", {})
+        assert params["threshold"] == "50.0"
+        assert params["limit"] == "10"
+
+    def test_fetch_with_ref(self, mock_client):
+        parquet_bytes = _make_parquet_bytes({"x": [1]})
+        mock_resp = _make_response(
+            content=parquet_bytes,
+            headers={"content-type": "application/vnd.apache.parquet"},
+        )
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        fetch("alice/proj/ep", client=mock_client, ref_name="v1.0")
+
+        call_args = mock_client._session.request.call_args
+        params = call_args[1].get("params", {})
+        assert params["ref"] == "v1.0"
+
+    def test_fetch_as_pandas(self, mock_client):
+        import pandas as pd
+
+        parquet_bytes = _make_parquet_bytes({"x": [1, 2, 3]})
+        mock_resp = _make_response(
+            content=parquet_bytes,
+            headers={"content-type": "application/vnd.apache.parquet"},
+        )
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        result = fetch("alice/proj/ep", client=mock_client, as_pandas=True)
+        assert isinstance(result, pd.DataFrame)
+
+    def test_fetch_binary_fallback(self, mock_client):
+        mock_resp = _make_response(
+            content=b"\x00\x01\x02",
+            headers={"content-type": "image/png"},
+        )
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        result = fetch("alice/proj/ep", client=mock_client)
+        assert isinstance(result, bytes)
+
+    def test_fetch_auth_error(self, mock_client):
+        mock_resp = MagicMock()
+        mock_resp.ok = False
+        mock_resp.status_code = 401
+        mock_resp.reason = "Unauthorized"
+        mock_resp.json.return_value = {"error": "unauthorized", "message": "Invalid token"}
+
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        with pytest.raises(OzzyApiError, match="unauthorized"):
+            fetch("alice/proj/ep", client=mock_client)
+
+    def test_fetch_not_found(self, mock_client):
+        mock_resp = MagicMock()
+        mock_resp.ok = False
+        mock_resp.status_code = 404
+        mock_resp.reason = "Not Found"
+        mock_resp.json.return_value = {"error": "not_found", "message": "Endpoint not found"}
+
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        with pytest.raises(OzzyApiError) as exc_info:
+            fetch("alice/proj/ep", client=mock_client)
+        assert exc_info.value.status == 404
+
+
+class TestFetchLazy:
+    def test_fetch_lazy_parquet(self, mock_client):
+        parquet_bytes = _make_parquet_bytes({"x": [1, 2, 3], "y": [4.0, 5.0, 6.0]})
+        mock_resp = _make_response(
+            content=parquet_bytes,
+            headers={"content-type": "application/vnd.apache.parquet"},
+        )
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        result = fetch_lazy("alice/proj/ep", client=mock_client)
+        assert isinstance(result, pl.LazyFrame)
+
+        # Collect and verify
+        df = result.collect()
+        assert df.shape == (3, 2)
+
+
+# ── Inspect tests ────────────────────────────────────────────────
 
 
 class TestInspect:
-    """Tests for inspect functions."""
-
-    def test_inspect_project(self, tmp_path):
-        """Test inspecting a project."""
-        project_dir = create_test_project(tmp_path)
-        meta = ozzy.inspect_project(str(project_dir))
-
-        assert meta.name == "test-project"
-        assert meta.owner == "test-user"
-        assert "raw" in meta.data_sources
-
-
-class TestParseRef:
-    """Tests for reference parsing."""
-
-    def test_parse_relative_ref(self, tmp_path):
-        """Test parsing relative reference."""
-        from ozzydb.client import _parse_local_ref
-
-        project_dir = create_test_project(tmp_path)
-
-        # Change to parent directory
-        old_cwd = os.getcwd()
-        try:
-            os.chdir(tmp_path)
-            project_path, endpoint = _parse_local_ref("test-project/endpoint1")
-            assert project_path == project_dir
-            assert endpoint == "endpoint1"
-        finally:
-            os.chdir(old_cwd)
-
-    def test_parse_absolute_ref(self, tmp_path):
-        """Test parsing absolute reference."""
-        from ozzydb.client import _parse_local_ref
-
-        project_dir = create_test_project(tmp_path)
-
-        project_path, endpoint = _parse_local_ref(f"{project_dir}/myendpoint")
-        assert project_path == project_dir
-        assert endpoint == "myendpoint"
-
-
-class TestEndpointMeta:
-    """Tests for EndpointMeta."""
-
-    def test_dag_representation(self):
-        """Test DAG string representation."""
-        from ozzydb.types import EndpointMeta, PipelineNode, PipelineEdge
-
-        endpoint = EndpointMeta(
-            name="test",
-            nodes=[
-                PipelineNode("step1", "transform1", {}),
-                PipelineNode("step2", "transform2", {}),
+    def test_inspect_endpoint(self, mock_client):
+        endpoint_data = {
+            "name": "corrected",
+            "description": "QC corrections",
+            "commit_sha": "abc123",
+            "params": [
+                {
+                    "name": "threshold",
+                    "type": "float",
+                    "description": "QC threshold",
+                    "default": 50.0,
+                    "min": 0.0,
+                    "max": 100.0,
+                    "enum": None,
+                    "binds": "qc.threshold",
+                }
             ],
-            edges=[
-                PipelineEdge("step1", "main", "data_source", "raw"),
-                PipelineEdge("step2", "main", "node", "step1"),
+            "nodes": {
+                "qc": {"transform": "apply_qc", "params": {}, "machine": None}
+            },
+            "edges": [{"from": "data:raw", "to": "qc.main"}],
+        }
+        mock_resp = _make_response(json_data=endpoint_data)
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        result = inspect("alice/proj/corrected", client=mock_client)
+        assert result.name == "corrected"
+        assert len(result.params) == 1
+        assert result.params[0].min == 0.0
+        assert result.edges[0].from_node == "data:raw"
+
+    def test_inspect_project(self, mock_client):
+        project_data = {
+            "owner": "alice",
+            "slug": "my-proj",
+            "description": "A project",
+            "visibility": "public",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-02T00:00:00Z",
+            "commit_count": 10,
+            "refs": [
+                {"name": "main", "ref_type": "branch", "commit_sha": "abc123"}
             ],
-            data_sources={},
-            transforms={},
+            "collaborators": [],
+        }
+        mock_resp = _make_response(json_data=project_data)
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        result = inspect_project("alice/my-proj", client=mock_client)
+        assert result.owner == "alice"
+        assert result.commit_count == 10
+        assert len(result.refs) == 1
+
+
+# ── Upload tests ─────────────────────────────────────────────────
+
+
+class TestUpload:
+    def test_upload_file(self, mock_client, tmp_path):
+        # Create test file
+        test_file = tmp_path / "data.parquet"
+        df = pl.DataFrame({"x": [1, 2, 3]})
+        df.write_parquet(test_file)
+
+        upload_resp = {
+            "name": "data",
+            "hash": "abc123",
+            "content_type": "application/vnd.apache.parquet",
+            "byte_size": test_file.stat().st_size,
+            "deduplicated": False,
+            "collection_version": None,
+        }
+        mock_resp = _make_response(json_data=upload_resp)
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        result = upload("alice/proj", test_file, client=mock_client)
+        assert result.name == "data"
+        assert result.hash == "abc123"
+        assert not result.deduplicated
+
+    def test_upload_with_collection(self, mock_client, tmp_path):
+        test_file = tmp_path / "raw.csv"
+        test_file.write_text("a,b\n1,2\n")
+
+        upload_resp = {
+            "name": "raw",
+            "hash": "def456",
+            "content_type": "text/csv",
+            "byte_size": 8,
+            "deduplicated": False,
+            "collection_version": 1,
+        }
+        mock_resp = _make_response(json_data=upload_resp)
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        result = upload(
+            "alice/proj",
+            test_file,
+            name="raw",
+            collection="my-collection",
+            client=mock_client,
         )
+        assert result.collection_version == 1
 
-        dag = endpoint.dag
-        assert "Endpoint: test" in dag
-        assert "step1" in dag
-        assert "step2" in dag
-
-
-# Integration tests (require ozzy CLI to be built)
-def _ozzy_cli_available() -> bool:
-    """Check if ozzy CLI is available."""
-    if (Path.home() / ".cargo" / "bin" / "ozzy").exists():
-        return True
-    return subprocess.run(["which", "ozzy"], capture_output=True).returncode == 0
+    def test_upload_missing_file(self, mock_client, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            upload("alice/proj", tmp_path / "nonexistent.parquet", client=mock_client)
 
 
-@pytest.mark.skipif(
-    not _ozzy_cli_available(),
-    reason="ozzy CLI not installed"
-)
-class TestFetchIntegration:
-    """Integration tests requiring the ozzy CLI."""
+# ── Download tests ───────────────────────────────────────────────
 
-    def test_fetch_requires_endpoint(self, tmp_path):
-        """Test that fetch fails gracefully for missing endpoint."""
-        project_dir = create_test_project(tmp_path)
 
-        # This should fail because there's no endpoint named "nonexistent"
+class TestDownload:
+    def test_download_bytes(self, mock_client):
+        content = b"raw binary data"
+        mock_resp = _make_response(content=content)
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        result = download("alice/proj", "raw", client=mock_client)
+        assert result == content
+
+    def test_download_dataframe(self, mock_client):
+        df = pl.DataFrame({"x": [1, 2, 3]})
+        parquet_bytes = _make_parquet_bytes({"x": [1, 2, 3]})
+
+        mock_resp = _make_response(
+            content=parquet_bytes,
+            headers={"content-type": "application/vnd.apache.parquet"},
+        )
+        mock_client._session.request = MagicMock(return_value=mock_resp)
+
+        result = download_dataframe("alice/proj", "raw", client=mock_client)
+        assert isinstance(result, pl.DataFrame)
+        assert result.shape == (3, 1)
+
+
+# ── Run tests ────────────────────────────────────────────────────
+
+
+class TestRun:
+    @patch("ozzydb.client.subprocess.run")
+    @patch("ozzydb.client.shutil.which", return_value="/usr/bin/ozzy")
+    def test_run_subprocess(self, mock_which, mock_subprocess, tmp_path):
+        # Create a parquet file that the "CLI" would produce
+        output_df = pl.DataFrame({"result": [10, 20, 30]})
+        output_file = tmp_path / "output.parquet"
+        output_df.write_parquet(output_file)
+
+        def side_effect(*args, **kwargs):
+            # Copy the output to wherever the client asks
+            import shutil
+            cmd = args[0]
+            output_idx = cmd.index("--output") + 1
+            output_path = cmd[output_idx]
+            shutil.copy(output_file, output_path)
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        mock_subprocess.side_effect = side_effect
+
+        result = run("my-endpoint", cwd=tmp_path, threshold=50)
+        assert isinstance(result, pl.DataFrame)
+        assert result.shape == (3, 1)
+
+        # Verify CLI args
+        call_args = mock_subprocess.call_args[0][0]
+        assert "run" in call_args
+        assert "my-endpoint" in call_args
+        assert "--param" in call_args
+        assert "threshold=50" in call_args
+
+    @patch("ozzydb.client.shutil.which", return_value=None)
+    def test_run_missing_cli(self, mock_which, tmp_path):
+        with patch("ozzydb.client.Path.home") as mock_home:
+            mock_home.return_value = tmp_path  # No .cargo/bin/ozzy exists
+            with pytest.raises(RuntimeError, match="ozzy CLI not found"):
+                run("ep", cwd=tmp_path)
+
+    @patch("ozzydb.client.subprocess.run")
+    @patch("ozzydb.client.shutil.which", return_value="/usr/bin/ozzy")
+    def test_run_cli_failure(self, mock_which, mock_subprocess):
+        mock_subprocess.return_value = MagicMock(
+            returncode=1,
+            stderr="Error: endpoint 'missing' not found",
+        )
         with pytest.raises(RuntimeError, match="ozzy run failed"):
-            ozzy.fetch(f"{project_dir}/nonexistent")
+            run("missing")
+
+
+# ── Auth tests ───────────────────────────────────────────────────
+
+
+class TestAuth:
+    def test_load_credentials(self, credentials_dir):
+        with patch.object(OzzyClient, "CREDENTIALS_PATH", credentials_dir):
+            client = OzzyClient()
+        assert client.base_url == "https://custom.ozzydb.com"
+        assert client.authenticated
+
+    def test_no_credentials(self, tmp_path):
+        fake_creds = tmp_path / "nonexistent" / "credentials.json"
+        with patch.object(OzzyClient, "CREDENTIALS_PATH", fake_creds):
+            client = OzzyClient()
+        assert client.base_url == "https://api.ozzydb.com"
+        assert not client.authenticated
+
+    def test_explicit_token(self):
+        with patch.object(OzzyClient, "_load_credentials", return_value={}):
+            client = OzzyClient(
+                base_url="https://custom.example.com",
+                token="my-token",
+            )
+        assert client.base_url == "https://custom.example.com"
+        assert client.authenticated
+        assert client._session.headers["Authorization"] == "Bearer my-token"
+
+
+# ── Helper ───────────────────────────────────────────────────────
+
+
+def _make_parquet_bytes(data: dict) -> bytes:
+    """Create parquet bytes from a dict."""
+    df = pl.DataFrame(data)
+    buf = io.BytesIO()
+    df.write_parquet(buf)
+    return buf.getvalue()

@@ -28,10 +28,7 @@ dependencies = [
 
 [project.optional-dependencies]
 pandas = ["pandas>=2.0.0"]
-dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-]
+dev = ["pytest>=8.0.0"]
 
 [build-system]
 requires = ["hatchling"]
@@ -42,9 +39,9 @@ packages = ["src/ozzydb"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
 
 [dependency-groups]
 dev = [
     "pandas>=2.3.3",
+    "pytest>=9.0.2",
 ]
