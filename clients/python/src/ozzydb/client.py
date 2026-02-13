@@ -106,9 +106,10 @@ def fetch(
         tmp.close()
     except Exception:
         tmp.close()
-        resp.close()
         Path(tmp_path).unlink(missing_ok=True)
         raise
+    finally:
+        resp.close()
 
     try:
         result = _read_output(tmp_path, content_type, as_pandas=as_pandas)
@@ -170,9 +171,10 @@ def fetch_lazy(
         tmp.close()
     except Exception:
         tmp.close()
-        resp.close()
         Path(tmp_path).unlink(missing_ok=True)
         raise
+    finally:
+        resp.close()
 
     if "parquet" in content_type:
         # For lazy scanning, the file must persist while the LazyFrame is alive.
@@ -426,9 +428,10 @@ def download_dataframe(
         tmp.close()
     except Exception:
         tmp.close()
-        resp.close()
         Path(tmp_path).unlink(missing_ok=True)
         raise
+    finally:
+        resp.close()
 
     try:
         return _read_output(tmp_path, content_type, as_pandas=as_pandas)
