@@ -4,15 +4,30 @@
 test:
     cargo test --workspace
 
-# Run Docker integration tests (requires Docker)
+# Start test infrastructure (postgres + minio for integration/E2E tests)
+test-infra-up:
+    docker compose -f docker-compose.test.yml up -d
+    @echo "Waiting for services..."
+    @until docker compose -f docker-compose.test.yml exec -T postgres pg_isready -U ozzy_test -q 2>/dev/null; do sleep 1; done
+    @echo "Test infrastructure ready."
+
+# Stop test infrastructure
+test-infra-down:
+    docker compose -f docker-compose.test.yml down
+
+# Clean test infrastructure (removes volumes)
+test-infra-clean:
+    docker compose -f docker-compose.test.yml down -v
+
+# Run integration tests (requires test infra: just test-infra-up)
 test-docker:
     cargo test -p ozzy-server --test integration_tests -- --ignored
 
-# Run E2E tests including compute pipeline (requires Docker, slow first run)
+# Run E2E tests including compute pipeline (requires test infra + Docker)
 test-e2e:
     cargo test -p ozzy-server --test e2e_tests -- --ignored
 
-# Run all tests including Docker and E2E
+# Run all tests including integration and E2E
 test-all:
     cargo test --workspace
     cargo test -p ozzy-server --test integration_tests -- --ignored

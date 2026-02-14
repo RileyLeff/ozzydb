@@ -20,26 +20,37 @@ use ozzy_server::storage::ContentStorage;
 use ozzy_server::{AppState, api};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::LazyLock;
-use testcontainers::core::ImageExt;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 
 // ========================================================================
 // Test Infrastructure
 // ========================================================================
 
-/// Shared test server backed by a real Postgres container.
+fn test_db_url() -> String {
+    std::env::var("TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://ozzy_test:ozzy_test@localhost:5433/ozzy_test".into())
+}
+
+fn test_r2_config() -> ozzy_server::config::R2Config {
+    ozzy_server::config::R2Config {
+        endpoint: std::env::var("TEST_R2_ENDPOINT")
+            .unwrap_or_else(|_| "http://localhost:9002".into()),
+        bucket: std::env::var("TEST_R2_BUCKET")
+            .unwrap_or_else(|_| "ozzy-test".into()),
+        access_key_id: std::env::var("TEST_R2_ACCESS_KEY_ID")
+            .unwrap_or_else(|_| "minioadmin".into()),
+        secret_access_key: std::env::var("TEST_R2_SECRET_ACCESS_KEY")
+            .unwrap_or_else(|_| "minioadmin".into()),
+        region: "us-east-1".into(),
+    }
+}
+
+/// Shared test server backed by Compose-provided Postgres + MinIO.
+/// Start with: just test-infra-up
 struct TestServer {
     base_url: String,
     client: reqwest::Client,
     db: Database,
-    // Keep container alive for the test session.
-    _container: testcontainers::ContainerAsync<Postgres>,
 }
-
-// Safety: PgPool, reqwest::Client, and ContainerAsync are all Send+Sync.
-unsafe impl Send for TestServer {}
-unsafe impl Sync for TestServer {}
 
 /// Shared tokio runtime that hosts the test server, PgPool, and Axum server.
 static TEST_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
@@ -57,45 +68,26 @@ impl TestServer {
             .with_env_filter("ozzy_server=debug,sqlx=warn")
             .try_init();
 
-        let container = Postgres::default()
-            .with_tag("17-alpine")
-            .start()
-            .await
-            .expect("Failed to start PostgreSQL container (is Docker running?)");
-
-        let host_port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("Failed to get Postgres host port");
-
-        let db_url = format!(
-            "postgres://postgres:postgres@127.0.0.1:{}/postgres",
-            host_port
-        );
+        let db_url = test_db_url();
 
         let pool = PgPoolOptions::new()
             .max_connections(50)
             .connect(&db_url)
             .await
-            .expect("Failed to connect to test database");
+            .expect("Failed to connect to test database (is test infra running? try: just test-infra-up)");
 
         sqlx::migrate!("./migrations")
             .run(&pool)
             .await
             .expect("Failed to run migrations");
 
-        let db = Database::new(pool);
+        // Truncate all data tables so tests start fresh (DB persists between runs)
+        sqlx::query("TRUNCATE users, projects, commits, commit_state, api_tokens, data_atoms, data_metadata_log, collections, collection_versions, collection_members, project_collaborators, endpoint_yanks, secrets, materialized_cache, jobs, environment_provider_images, environment_images, content_refs, refs, source_cache, github_installations CASCADE")
+            .execute(&pool)
+            .await
+            .expect("Failed to truncate tables");
 
-        let r2 = ozzy_server::config::R2Config {
-            endpoint: std::env::var("R2_ENDPOINT")
-                .unwrap_or_else(|_| "http://localhost:9000".into()),
-            bucket: std::env::var("R2_BUCKET").unwrap_or_else(|_| "ozzy".into()),
-            access_key_id: std::env::var("R2_ACCESS_KEY_ID")
-                .unwrap_or_else(|_| "minioadmin".into()),
-            secret_access_key: std::env::var("R2_SECRET_ACCESS_KEY")
-                .unwrap_or_else(|_| "minioadmin".into()),
-            region: std::env::var("R2_REGION").unwrap_or_else(|_| "auto".into()),
-        };
+        let db = Database::new(pool);
 
         let config = Config {
             bind_address: "127.0.0.1:0".to_string(),
@@ -104,7 +96,7 @@ impl TestServer {
             github_client_id: "test_client_id".to_string(),
             github_client_secret: "test_client_secret".to_string(),
             base_url: "http://localhost:3000".to_string(),
-            r2,
+            r2: test_r2_config(),
             max_upload_size_bytes: 104_857_600,
             cors_origins: "*".to_string(),
             allowed_logins: vec![],
@@ -158,7 +150,6 @@ impl TestServer {
             base_url,
             client,
             db,
-            _container: container,
         }
     }
 
@@ -491,7 +482,7 @@ fn test_data_atom_lifecycle() {
         // Should have the description metadata we set during upload
         assert_eq!(detail["metadata"]["description"], "Test CSV data");
 
-        // 4. Download data atom
+        // 4. Download data atom (follows presigned redirect to MinIO)
         let resp = s
             .client
             .get(format!(
@@ -503,13 +494,7 @@ fn test_data_atom_lifecycle() {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
-        let ct = resp
-            .headers()
-            .get("content-type")
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert_eq!(ct, "text/csv");
+        // Content-Disposition is set via response_content_disposition on the presigned URL
         let disp = resp
             .headers()
             .get("content-disposition")

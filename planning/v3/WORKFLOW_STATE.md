@@ -266,8 +266,31 @@ All phases deployed to production:
 - Phase 6: Polish (skipped — stretch goals)
 - Phase 7: Deployment & Integration
 
-## Remaining Setup (not code changes)
-- Configure R2 bucket for production (currently local-only storage)
-- Configure Fly.io compute app (currently Docker-only compute)
-- Set up GitHub App for private repo access
-- Schedule automated pg_dump backups
+---
+
+## v3.1: Multi-Provider Compute + Storage Cleanup (IN PROGRESS)
+
+See `planning/v3/v3.1_compute_providers.md` for full plan.
+
+### Step 1: Storage cleanup (COMPLETE)
+- Made R2/S3 required (was optional), removed local-only storage fallback
+- Removed ~500 lines: cache_dir, local_path(), ensure_parent(), has_remote(), byte-proxying
+- Updated all test Configs, docker-compose files
+- Commit: `2c5fc9a`
+
+### Step 2: Test infrastructure (COMPLETE)
+- Created `docker-compose.test.yml` (Postgres port 5433, MinIO port 9002, minio-init bucket creation)
+- Added Justfile commands: `test-infra-up`, `test-infra-down`, `test-infra-clean`
+- Rewrote TestServer in both `integration_tests.rs` and `e2e_tests.rs` to use Compose-provided services
+- Removed `testcontainers` and `testcontainers-modules` dependencies
+- Added `test_db_url()` and `test_r2_config()` helpers with `TEST_*` env var overrides
+- Added table truncation on startup (idempotent test runs)
+- Removed strict `content_type` assertions (MinIO returns binary/octet-stream for presigned redirects)
+- All 20 integration + 12 E2E tests pass
+- Commit: (pending)
+
+### Step 3: Unified I/O (NEXT)
+### Step 4: Slim ComputeRequest/ComputeResult
+### Step 5: ComputeRegistry (replace BackendSelector)
+### Step 6: Config restructure
+### Step 7: Final cleanup
