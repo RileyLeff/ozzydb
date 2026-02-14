@@ -11,9 +11,13 @@ WORKDIR /app
 COPY Cargo.toml ./
 COPY crates/ ./crates/
 
-# Build release binary
+# Build release binary (cache mounts persist cargo registry + target dir across builds)
 ENV OPENSSL_STATIC=1
-RUN cargo build --release --package ozzy-server
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --package ozzy-server && \
+    cp /app/target/release/ozzy-server /usr/local/bin/ozzy-server
 
 # Runtime image
 FROM alpine:3.21
@@ -22,7 +26,7 @@ RUN apk add --no-cache ca-certificates curl docker-cli
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/ozzy-server /usr/local/bin/ozzy-server
+COPY --from=builder /usr/local/bin/ozzy-server /usr/local/bin/ozzy-server
 
 # Server needs Docker socket access for compute pipeline,
 # so it runs as root. Network isolation is handled by the
