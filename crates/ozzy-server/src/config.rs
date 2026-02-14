@@ -227,12 +227,16 @@ impl ComputeConfig {
     pub fn from_env() -> Self {
         Self {
             timeout_secs: std::env::var("COMPUTE_TIMEOUT_SECS")
-                .unwrap_or_else(|_| "300".into())
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "300".into())
                 .parse()
                 .unwrap_or(300),
             tmpdir: std::env::var("COMPUTE_TMPDIR")
-                .or_else(|_| std::env::var("TMPDIR"))
-                .unwrap_or_else(|_| "/tmp/ozzy".into()),
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| std::env::var("TMPDIR").ok().filter(|s| !s.is_empty()))
+                .unwrap_or_else(|| "/tmp/ozzy".into()),
             default_provider: std::env::var("COMPUTE_DEFAULT_PROVIDER")
                 .ok()
                 .filter(|s| !s.is_empty()),
@@ -245,8 +249,10 @@ impl DockerProviderConfig {
     /// Returns Some if DOCKER_COMPUTE_ENABLED=true or legacy COMPUTE_ENABLED=true.
     pub fn from_env_optional() -> Option<Self> {
         let enabled = std::env::var("DOCKER_COMPUTE_ENABLED")
-            .or_else(|_| std::env::var("COMPUTE_ENABLED"))
-            .unwrap_or_else(|_| "false".into())
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("COMPUTE_ENABLED").ok().filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| "false".into())
             .parse()
             .unwrap_or(false);
 
@@ -257,15 +263,19 @@ impl DockerProviderConfig {
         Some(Self {
             enabled: true,
             runtime: std::env::var("DOCKER_COMPUTE_RUNTIME")
-                .or_else(|_| std::env::var("COMPUTE_DOCKER_RUNTIME"))
                 .ok()
-                .filter(|s| !s.is_empty()),
+                .filter(|s| !s.is_empty())
+                .or_else(|| std::env::var("COMPUTE_DOCKER_RUNTIME").ok().filter(|s| !s.is_empty())),
             memory_limit: std::env::var("DOCKER_COMPUTE_MEMORY_LIMIT")
-                .or_else(|_| std::env::var("COMPUTE_MEMORY_LIMIT"))
-                .unwrap_or_else(|_| "2g".into()),
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| std::env::var("COMPUTE_MEMORY_LIMIT").ok().filter(|s| !s.is_empty()))
+                .unwrap_or_else(|| "2g".into()),
             cpu_limit: std::env::var("DOCKER_COMPUTE_CPU_LIMIT")
-                .or_else(|_| std::env::var("COMPUTE_CPU_LIMIT"))
-                .unwrap_or_else(|_| "1".into()),
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| std::env::var("COMPUTE_CPU_LIMIT").ok().filter(|s| !s.is_empty()))
+                .unwrap_or_else(|| "1".into()),
         })
     }
 }
@@ -310,15 +320,27 @@ impl FlyConfig {
             api_token,
             app_name,
             api_url: std::env::var("FLY_API_URL")
-                .unwrap_or_else(|_| "https://api.machines.dev".into()),
-            region: std::env::var("FLY_REGION").unwrap_or_else(|_| "fra".into()),
-            cpu_kind: std::env::var("FLY_CPU_KIND").unwrap_or_else(|_| "shared".into()),
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "https://api.machines.dev".into()),
+            region: std::env::var("FLY_REGION")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "fra".into()),
+            cpu_kind: std::env::var("FLY_CPU_KIND")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "shared".into()),
             cpus: std::env::var("FLY_CPUS")
-                .unwrap_or_else(|_| "1".into())
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "1".into())
                 .parse()
                 .unwrap_or(1),
             memory_mb: std::env::var("FLY_MEMORY_MB")
-                .unwrap_or_else(|_| "512".into())
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "512".into())
                 .parse()
                 .unwrap_or(512),
         })
@@ -330,11 +352,15 @@ impl RateLimitConfig {
     pub fn from_env() -> Self {
         Self {
             global_max_concurrent: std::env::var("RATE_LIMIT_GLOBAL_MAX")
-                .unwrap_or_else(|_| "20".into())
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "20".into())
                 .parse()
                 .unwrap_or(20),
             per_user_max_concurrent: std::env::var("RATE_LIMIT_PER_USER_MAX")
-                .unwrap_or_else(|_| "5".into())
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "5".into())
                 .parse()
                 .unwrap_or(5),
         }
@@ -353,7 +379,10 @@ impl R2Config {
                 .context("R2_ACCESS_KEY_ID environment variable required")?,
             secret_access_key: std::env::var("R2_SECRET_ACCESS_KEY")
                 .context("R2_SECRET_ACCESS_KEY environment variable required")?,
-            region: std::env::var("R2_REGION").unwrap_or_else(|_| "auto".into()),
+            region: std::env::var("R2_REGION")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "auto".into()),
             presign_endpoint: std::env::var("R2_PRESIGN_ENDPOINT")
                 .ok()
                 .filter(|s| !s.is_empty()),

@@ -100,10 +100,12 @@ impl FlyBackend {
         {
             Ok(resp) => resp,
             Err(e) => {
-                tracing::error!("Fly Machine creation request failed: {e:#}");
-                tracing::error!("Fly error debug: {e:?}");
-                tracing::error!("Fly is_connect: {}, is_timeout: {}, is_request: {}, is_builder: {}", e.is_connect(), e.is_timeout(), e.is_request(), e.is_builder());
-                tracing::error!("Fly URL: {}, token_len: {}", create_url, self.config.api_token.len());
+                tracing::error!(
+                    url = %create_url,
+                    is_connect = e.is_connect(),
+                    is_timeout = e.is_timeout(),
+                    "Fly Machine creation request failed: {e:#}"
+                );
                 return Err(e).context("Failed to create Fly Machine");
             }
         };
