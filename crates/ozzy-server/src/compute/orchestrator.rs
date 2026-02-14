@@ -397,8 +397,35 @@ async fn execute_node(
         crate::runners::init::generate_docker_init(runner_type)
     };
 
-    // Build input manifest and env vars
-    let compute_inputs: Vec<crate::compute::InputSpec> = Vec::new();
+    // Build compute inputs by hydrating files from storage
+    let mut compute_inputs: Vec<crate::compute::InputSpec> = Vec::new();
+    for (input_name, hash) in &input_hashes {
+        let content_type = resolve_input_content_type(input_name, hash, state, project_id, edges_for_node, node_outputs).await;
+        let ext = super::super::api::v1::fetch::content_type_to_extension(&content_type);
+
+        if !is_fly {
+            // Docker: hydrate file from storage to a local temp path for bind-mounting
+            let local_path = std::path::PathBuf::from(&state.config.compute.tmpdir)
+                .join(format!("input-{}-{}.{}", job_id, input_name, ext));
+            let bytes = state.storage.get(hash, &ext).await?;
+            tokio::fs::write(&local_path, &bytes).await?;
+            compute_inputs.push(crate::compute::InputSpec {
+                name: input_name.clone(),
+                local_path,
+                content_type,
+                is_collection: false,
+            });
+        } else {
+            // Fly: no local file needed, but InputSpec is still needed for the manifest
+            compute_inputs.push(crate::compute::InputSpec {
+                name: input_name.clone(),
+                local_path: std::path::PathBuf::new(), // unused for Fly
+                content_type,
+                is_collection: false,
+            });
+        }
+    }
+
     let input_manifest = crate::compute::docker::build_input_manifest(&compute_inputs);
     let param_env_vars = crate::compute::docker::build_param_env_vars(&node_params);
 
@@ -416,17 +443,21 @@ async fn execute_node(
     }
 
     // For Fly: build presigned download URLs for each input
+    // Reuse already-resolved hashes from input_hashes (no double DB query)
     if is_fly {
         let mut downloads: Vec<serde_json::Value> = Vec::new();
-        for (input_name, source) in edges_for_node {
-            let hash = resolve_edge_source(source, state, project_id, node_outputs).await?;
-            // Determine extension from data atom or default to "bin"
-            let ext = "bin";
+        for (input_name, hash) in &input_hashes {
+            let ext = compute_inputs
+                .iter()
+                .find(|i| &i.name == input_name)
+                .map(|i| super::super::api::v1::fetch::content_type_to_extension(&i.content_type))
+                .unwrap_or_else(|| "bin".to_string());
             let url = state
                 .storage
-                .presigned_get_url(&hash, ext, std::time::Duration::from_secs(3600))
+                .presigned_get_url(hash, &ext, std::time::Duration::from_secs(state.config.compute.timeout_secs + 300))
                 .await?;
-            let dest_path = format!("/workspace/inputs/{}/{}.{}", input_name, hash.get(..12).unwrap_or(&hash), ext);
+            // Dest path must match manifest format: /workspace/inputs/{name}
+            let dest_path = format!("/workspace/inputs/{}", input_name);
             downloads.push(serde_json::json!({
                 "name": input_name,
                 "url": url,
@@ -797,6 +828,40 @@ fn compute_source_hash(
             node_def.transform
         );
     }
+}
+
+/// Resolve the content type for an input edge.
+///
+/// For data atoms: reads content_type from DB.
+/// For collections: returns "collection".
+/// For node outputs: reads from the NodeOutput struct.
+/// Falls back to "application/octet-stream" if unknown.
+async fn resolve_input_content_type(
+    input_name: &str,
+    _hash: &str,
+    state: &AppState,
+    project_id: Uuid,
+    edges_for_node: &[(String, String)],
+    node_outputs: &HashMap<String, NodeOutput>,
+) -> String {
+    // Find the source string for this input name
+    let source = edges_for_node
+        .iter()
+        .find(|(name, _)| name == input_name)
+        .map(|(_, s)| s.as_str())
+        .unwrap_or("");
+
+    if let Some(data_name) = source.strip_prefix("data:") {
+        if let Ok(Some(atom)) = state.db.get_data_atom(project_id, data_name).await {
+            return atom.content_type;
+        }
+    } else if source.starts_with("collection:") {
+        return "collection".to_string();
+    } else if let Some(output) = node_outputs.get(source) {
+        return output.content_type.clone();
+    }
+
+    "application/octet-stream".to_string()
 }
 
 /// Resolve secrets hash for a transform.
