@@ -318,3 +318,36 @@ See `planning/v3/v3.1_compute_providers.md` for full plan.
 - Compute providers: docker + fly (default: fly)
 - Health check passed: `https://api.ozzydb.com/health` → `{"status":"ok","version":"0.1.0"}`
 - Frontend serving: `https://ozzydb.com` → 200 OK
+
+---
+
+## Post-v3.1: CLI Implementation Fix
+
+### Problem: All v3 CLI commands were stubs
+- push, data, collection, endpoint, secret commands all hit a `_ => "Command not yet implemented"` catch-all in main.rs
+- Discovered during manual E2E testing with tryozzydb repo
+
+### Fix: Implement all CLI commands (2026-02-14)
+- Created `commands/shared.rs` — shared auth, HTTP client, project loading, error extraction
+- Created `commands/push.rs` — POST /api/v1/push
+- Created `commands/data.rs` — upload (multipart), ls, show, describe, yank, download (presigned redirect)
+- Created `commands/collection.rs` — create, add, rm, ls, log, flatten
+- Created `commands/endpoint.rs` — ls, show, dag
+- Created `commands/secret.rs` — set (stdin prompt), ls, rm
+- Wired all commands into main.rs dispatch (replaced catch-all)
+- Rewrote integration tests for v3 command surface (16 tests)
+- All 65 tests pass (49 unit + 16 integration)
+- Commit: `c5a4c80`
+
+### CLI Exhaustive Review: CONVERGED (8 rounds, 2 consecutive clean)
+- Round 1: 7 fixes (output URL path, timestamp slicing, name validation)
+- Round 2: 5 fixes (query param encoding, fetch path validation, token name validation)
+- Round 3: 2 fixes (collection member validation, project name validation)
+- Round 4: 5 fixes (BLAKE3 hash verification, HTTPS warning, input validation, dag format constraint)
+- Round 5: 2 fixes (stderr flush, download hash verification)
+- Round 6: 1 fix (upload name/collection validation)
+- Round 7: 2 fixes (absolute URL handling in fetch, symlink skip in cache)
+- Round 8: CLEAN (no findings)
+- Review fix commits: `8c0b38f`, `c6908a0`, `70bcc29`, `1675af8`, `ac0fdb9`, `636c579`, `0bf88bf`
+- Models: Claude Opus only (~380k tokens, exceeds Codex/Gemini limits)
+- Total: 24 fixes across 7 rounds
