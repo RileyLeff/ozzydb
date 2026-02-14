@@ -118,6 +118,7 @@ impl TestServer {
                 global_max_concurrent: 0,
                 per_user_max_concurrent: 0,
             },
+            dev_auto_user: None,
         };
 
         let storage =

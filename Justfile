@@ -32,11 +32,11 @@ dev-clean:
 
 # Start services only (postgres + minio, no server — for running server locally)
 services-up:
-    docker compose -f crates/ozzy-server/docker/docker-compose.yml up -d
+    docker compose -f docker-compose.dev.yml up -d postgres minio minio-init
 
 # Stop services only
 services-down:
-    docker compose -f crates/ozzy-server/docker/docker-compose.yml down
+    docker compose -f docker-compose.dev.yml down
 
 # Run server locally against dev services
 dev-server:

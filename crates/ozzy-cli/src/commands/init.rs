@@ -101,9 +101,9 @@ pub fn run(cwd: &Path) -> Result<()> {
     toml.push_str("# description = \"...\"\n");
     toml.push_str("# [endpoints.my_endpoint.nodes]\n");
     toml.push_str("# step = { transform = \"my_transform\" }\n");
-    toml.push_str("# edges = [\n");
-    toml.push_str("#   { from = \"data:my_data\", to = \"step.data\" },\n");
-    toml.push_str("# ]\n");
+    toml.push_str("# [[endpoints.my_endpoint.edges]]\n");
+    toml.push_str("# from = \"data:my_data\"\n");
+    toml.push_str("# to = \"step.data\"\n");
 
     std::fs::write(&toml_path, &toml).context("Failed to write ozzy.toml")?;
 

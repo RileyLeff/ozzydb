@@ -65,10 +65,8 @@ pub async fn run(
 
     // Build query params: ref + user params
     let mut query: Vec<(&str, String)> = Vec::new();
-    let ref_string;
     if let Some(r) = git_ref {
-        ref_string = r.to_string();
-        query.push(("ref", ref_string.clone()));
+        query.push(("ref", r.to_string()));
     }
     for param in params {
         if let Some((key, value)) = param.split_once('=') {

@@ -56,6 +56,7 @@ async fn build_test_app() -> Option<Router> {
             global_max_concurrent: 0,
             per_user_max_concurrent: 0,
         },
+        dev_auto_user: None,
     };
 
     let storage = ContentStorage::from_config(&config).ok()?;

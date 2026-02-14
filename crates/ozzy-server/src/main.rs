@@ -66,7 +66,9 @@ async fn main() -> Result<()> {
             r#"
             INSERT INTO users (id, username, display_name, is_admin)
             VALUES ($1, $2, $3, true)
-            ON CONFLICT (username) DO UPDATE SET display_name = EXCLUDED.display_name
+            ON CONFLICT (username) DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                is_admin = EXCLUDED.is_admin
             RETURNING *
             "#,
         )

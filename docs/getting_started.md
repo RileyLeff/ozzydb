@@ -139,7 +139,7 @@ repo = "your-username/sensor-qc"
 [remote]
 url = "https://api.ozzydb.com"
 
-# Environment: use the base Python image (no extra deps needed for stdlib)
+# Environment: use a pre-built Python image (no extra deps needed for stdlib)
 [environments.default]
 image = "python:3.12-slim"
 
@@ -147,21 +147,46 @@ image = "python:3.12-slim"
 [transforms.clean]
 source = "transforms/clean.py:quality_control"
 environment = "default"
-inputs = ["raw_readings"]
-params = { min_value = { type = "float", default = 0 }, max_value = { type = "float", default = 100 } }
+output = "csv"
+
+# Declare named inputs (name = expected format)
+[transforms.clean.inputs]
+raw_readings = "csv"
+
+# Declare parameters with types and defaults
+[transforms.clean.params.min_value]
+type = "float"
+default = 0
+
+[transforms.clean.params.max_value]
+type = "float"
+default = 100
 
 # Endpoint: wire data to transforms
 [endpoints.cleaned]
-nodes = [
-  { name = "qc", transform = "clean", edges = [
-    { input = "raw_readings", source = "data:raw_readings" }
-  ]}
-]
-terminal = "qc"
-params = [
-  { name = "min_value", type = "float", default = 0, description = "Minimum valid reading" },
-  { name = "max_value", type = "float", default = 100, description = "Maximum valid reading" }
-]
+description = "Cleaned sensor readings"
+
+# Expose parameters to consumers (binds to transform params)
+[endpoints.cleaned.params.min_value]
+type = "float"
+default = 0
+binds = "qc.min_value"
+description = "Minimum valid reading"
+
+[endpoints.cleaned.params.max_value]
+type = "float"
+default = 100
+binds = "qc.max_value"
+description = "Maximum valid reading"
+
+# Nodes: each runs a transform
+[endpoints.cleaned.nodes]
+qc = { transform = "clean" }
+
+# Edges: wire data sources to node inputs
+[[endpoints.cleaned.edges]]
+from = "data:raw_readings"
+to = "qc.raw_readings"
 ```
 
 ## 7. Push to the registry

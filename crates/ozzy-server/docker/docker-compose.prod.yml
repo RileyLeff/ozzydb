@@ -64,6 +64,14 @@ services:
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       # Secrets encryption (hex-encoded 32-byte key; required for project secrets)
       SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
+      # Fly Machines compute backend (optional — enables remote compute)
+      FLY_API_TOKEN: ${FLY_API_TOKEN:-}
+      FLY_APP_NAME: ${FLY_APP_NAME:-}
+      FLY_REGION: ${FLY_REGION:-}
+      FLY_API_URL: ${FLY_API_URL:-}
+      FLY_CPU_KIND: ${FLY_CPU_KIND:-}
+      FLY_CPUS: ${FLY_CPUS:-}
+      FLY_MEMORY_MB: ${FLY_MEMORY_MB:-}
       RUST_LOG: ${RUST_LOG:-info,ozzy_server=debug}
     volumes:
       # Docker socket for server-side compute (transform execution)

@@ -57,27 +57,48 @@ lockfile = "requirements.txt"
 [transforms.clean]
 source = "transforms/clean.py:quality_control"
 environment = "default"
-inputs = ["raw_readings"]
+inputs.readings = "parquet"
 
 [transforms.calibrate]
 source = "transforms/calibrate.py:apply_calibration"
 environment = "default"
-inputs = ["cleaned"]
-params = { offset = { type = "float", default = 0.0 } }
+inputs.data = "parquet"
+inputs.constants = "parquet"
+
+[transforms.calibrate.params.offset]
+type = "float"
+default = 0.0
 
 [endpoints.cleaned]
-nodes = [
-  { name = "qc", transform = "clean", edges = [{ input = "raw_readings", source = "data:raw_readings" }] }
-]
-terminal = "qc"
+[endpoints.cleaned.nodes]
+qc = { transform = "clean" }
+
+[[endpoints.cleaned.edges]]
+from = "data:raw_readings"
+to = "qc.readings"
 
 [endpoints.calibrated]
-nodes = [
-  { name = "qc", transform = "clean", edges = [{ input = "raw_readings", source = "data:raw_readings" }] },
-  { name = "cal", transform = "calibrate", edges = [{ input = "cleaned", source = "qc" }] }
-]
-terminal = "cal"
-params = [{ name = "offset", type = "float", default = 0.0, description = "Calibration offset" }]
+[endpoints.calibrated.params.offset]
+type = "float"
+default = 0.0
+binds = "cal.offset"
+description = "Calibration offset"
+
+[endpoints.calibrated.nodes]
+qc = { transform = "clean" }
+cal = { transform = "calibrate" }
+
+[[endpoints.calibrated.edges]]
+from = "data:raw_readings"
+to = "qc.readings"
+
+[[endpoints.calibrated.edges]]
+from = "qc"
+to = "cal.data"
+
+[[endpoints.calibrated.edges]]
+from = "endpoint:acme/shared/constants@v1.0"
+to = "cal.constants"
 ```
 
 When someone fetches `acme/sensor-qc/calibrated`, OzzyDB:

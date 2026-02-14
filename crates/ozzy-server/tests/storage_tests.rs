@@ -450,6 +450,7 @@ async fn test_presigned_url_without_remote_fails() -> Result<()> {
                 global_max_concurrent: 0,
                 per_user_max_concurrent: 0,
             },
+            dev_auto_user: None,
         },
         "test",
     )?;
@@ -607,6 +608,7 @@ async fn test_store_stream_local_fallback() -> Result<()> {
                 global_max_concurrent: 0,
                 per_user_max_concurrent: 0,
             },
+            dev_auto_user: None,
         },
         "test",
     )?;
