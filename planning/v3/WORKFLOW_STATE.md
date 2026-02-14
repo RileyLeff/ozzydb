@@ -1,7 +1,7 @@
 # v3 Workflow State
 
 ## Current Phase: Phase 7 — Deployment & Integration
-## Current Step: Step 7.1 (Docker Compose config updates)
+## Current Step: Exhaustive review
 
 ## Completed Steps
 
@@ -224,7 +224,22 @@
 
 ### Phase 7: Deployment & Integration (IN PROGRESS)
 
+#### Step 7.1: Docker Compose config updates
+- Updated `.env.prod.example` with GitHub App, secrets encryption, and Fly env vars
+- (docker-compose.prod.yml already had them from Phase 5 round 2 fixes)
+- Commit: `12b329b` (bundled with 7.2)
+
+#### Step 7.2: E2E tests rewrite for async job model
+- Fixed critical bug: `compute: None` → `BackendSelector::Docker(...)` in TestServer
+- Rewrote all fetch tests: GET → POST (v3 async API)
+- Added `fetch_and_wait()` helper: POST → poll job status → download output
+- 12 E2E tests: basic compute, cache hit, param override, param validation,
+  unknown param, nonexistent endpoint, yank, private auth, wrong user,
+  public no auth, endpoint inspection, commit API
+- Commit: `12b329b`
+
+#### Phase 7 Exhaustive Review (IN PROGRESS)
+
 ## What's Next
-- Step 7.1: Docker Compose config updates (add missing env vars)
-- Step 7.2: End-to-end tests (compute pipeline E2E with Docker)
-- Step 7.3: Deploy to production
+- Phase 7 exhaustive review convergence (need 2 consecutive clean rounds)
+- Step 7.3: Deploy to production (manual procedure)
