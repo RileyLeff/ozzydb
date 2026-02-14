@@ -150,20 +150,16 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
 
         // Await all nodes in this wave
         for handle in handles {
-            let (node_name, result) = handle.await.map_err(|e| {
-                anyhow::anyhow!("Node execution task panicked: {}", e)
-            })?;
+            let (node_name, result) = handle
+                .await
+                .map_err(|e| anyhow::anyhow!("Node execution task panicked: {}", e))?;
 
             match result {
                 Ok(output) => {
                     node_outputs.insert(node_name, output);
                 }
                 Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "Node '{}' failed: {}",
-                        node_name,
-                        e
-                    ));
+                    return Err(anyhow::anyhow!("Node '{}' failed: {}", node_name, e));
                 }
             }
         }
@@ -216,15 +212,13 @@ async fn execute_node(
         .get(node_name)
         .ok_or_else(|| anyhow::anyhow!("Node '{}' missing from endpoint", node_name))?;
 
-    let transform_def = transforms
-        .get(&node_def.transform)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Transform '{}' not found for node '{}'",
-                node_def.transform,
-                node_name
-            )
-        })?;
+    let transform_def = transforms.get(&node_def.transform).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Transform '{}' not found for node '{}'",
+            node_def.transform,
+            node_name
+        )
+    })?;
 
     // Resolve inputs
     let mut input_hashes: Vec<(String, String)> = Vec::new();
@@ -270,12 +264,8 @@ async fn execute_node(
         .await?;
 
     // Compute source hash
-    let (source_hash, function_name) = compute_source_hash(
-        transform_def,
-        node_def,
-        commit,
-        source_dir,
-    )?;
+    let (source_hash, function_name) =
+        compute_source_hash(transform_def, node_def, commit, source_dir)?;
 
     let params_schema_hash =
         super::super::api::v1::fetch::compute_params_schema_hash(transform_def);
@@ -324,9 +314,10 @@ async fn execute_node(
     }
 
     // Execute uncached node
-    if !state.config.compute.enabled {
-        anyhow::bail!("Compute is not enabled on this server");
-    }
+    let backend = state
+        .compute
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Compute is not enabled on this server"))?;
 
     let env_image_ref = env_image
         .as_ref()
@@ -347,18 +338,16 @@ async fn execute_node(
 
     // Generate runner script
     let runner_script = if let Some(source) = &transform_def.source {
-        let (file_path, func_name) =
-            crate::runners::validate_source_ref(source).map_err(|e| {
-                anyhow::anyhow!(
-                    "Invalid source reference '{}' in transform '{}': {}",
-                    source,
-                    node_def.transform,
-                    e
-                )
-            })?;
-        let runner_type = crate::runners::detect_runner_type(source).ok_or_else(|| {
-            anyhow::anyhow!("Unsupported source file type in '{}'", source)
+        let (file_path, func_name) = crate::runners::validate_source_ref(source).map_err(|e| {
+            anyhow::anyhow!(
+                "Invalid source reference '{}' in transform '{}': {}",
+                source,
+                node_def.transform,
+                e
+            )
         })?;
+        let runner_type = crate::runners::detect_runner_type(source)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported source file type in '{}'", source))?;
         match runner_type {
             crate::runners::RunnerType::Python => {
                 crate::runners::python::generate(file_path, func_name)
@@ -379,9 +368,8 @@ async fn execute_node(
     };
 
     let runner_ext = if transform_def.source.is_some() {
-        let rt =
-            crate::runners::detect_runner_type(transform_def.source.as_deref().unwrap_or(""))
-                .unwrap_or(crate::runners::RunnerType::Python);
+        let rt = crate::runners::detect_runner_type(transform_def.source.as_deref().unwrap_or(""))
+            .unwrap_or(crate::runners::RunnerType::Python);
         match rt {
             crate::runners::RunnerType::Python => "py",
             crate::runners::RunnerType::R => "R",
@@ -432,18 +420,19 @@ async fn execute_node(
         "PYTHONUNBUFFERED",
     ];
     if !transform_def.secrets.is_empty() {
-        let enc_key = state.config.secrets_encryption_key.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Transform '{}' requires secrets but the server has no secrets encryption key",
-                node_def.transform
-            )
-        })?;
+        let enc_key = state
+            .config
+            .secrets_encryption_key
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Transform '{}' requires secrets but the server has no secrets encryption key",
+                    node_def.transform
+                )
+            })?;
         for secret_name in &transform_def.secrets {
             if secret_name.starts_with("OZZY_") {
-                anyhow::bail!(
-                    "Secret '{}' uses reserved prefix 'OZZY_'",
-                    secret_name
-                );
+                anyhow::bail!("Secret '{}' uses reserved prefix 'OZZY_'", secret_name);
             }
             if RESERVED_SECRET_NAMES
                 .iter()
@@ -478,7 +467,8 @@ async fn execute_node(
         source_dir: source_dir.map(|p| p.to_path_buf()),
     };
 
-    let result = crate::compute::docker::run(&compute_request, &state.config.compute.tmpdir)
+    let result = backend
+        .run(&compute_request)
         .await
         .map_err(|e| anyhow::anyhow!("Compute execution failed: {}", e))?;
 
@@ -499,15 +489,14 @@ async fn execute_node(
     let read_result: Result<(Vec<u8>, String), anyhow::Error> = async {
         let output_files =
             super::super::api::v1::fetch::list_output_files_anyhow(&result.output_dir).await?;
-        let primary_output =
-            super::super::api::v1::fetch::find_primary_output(&output_files).ok_or_else(|| {
+        let primary_output = super::super::api::v1::fetch::find_primary_output(&output_files)
+            .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Transform '{}' produced no output files",
                     node_def.transform
                 )
             })?;
-        let content_type =
-            super::super::api::v1::fetch::infer_output_content_type(primary_output);
+        let content_type = super::super::api::v1::fetch::infer_output_content_type(primary_output);
         let bytes = tokio::fs::read(primary_output).await?;
         Ok((bytes, content_type))
     }
@@ -516,8 +505,7 @@ async fn execute_node(
     let (output_bytes, output_content_type) = read_result?;
     let output_hash = ozzy_core::hash::blake3_hash(&output_bytes);
     let output_byte_size = output_bytes.len() as i64;
-    let output_ext =
-        super::super::api::v1::fetch::content_type_to_extension(&output_content_type);
+    let output_ext = super::super::api::v1::fetch::content_type_to_extension(&output_content_type);
 
     // Store output
     state.storage.store(&output_bytes, &output_ext).await?;
@@ -614,8 +602,7 @@ pub fn compute_waves(
         let wave: Vec<String> = deps
             .iter()
             .filter(|(name, node_deps)| {
-                !assigned.contains(**name)
-                    && node_deps.iter().all(|d| assigned.contains(d))
+                !assigned.contains(**name) && node_deps.iter().all(|d| assigned.contains(d))
             })
             .map(|(name, _)| name.to_string())
             .collect();

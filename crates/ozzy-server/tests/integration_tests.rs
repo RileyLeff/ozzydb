@@ -124,6 +124,7 @@ impl TestServer {
             db: db.clone(),
             storage,
             git,
+            compute: None,
         };
 
         let app = axum::Router::new().merge(api::router()).with_state(state);
@@ -1108,27 +1109,23 @@ async fn setup_job_test(
     let github_id = rand::random::<i64>() & i64::MAX;
     let username = format!("jobuser_{}", suffix);
     let slug = format!("jobproj_{}", suffix);
-    let user = s
-        .db
-        .upsert_user_from_github(github_id, &username, None, None)
-        .await
-        .unwrap();
+    let user =
+        s.db.upsert_user_from_github(github_id, &username, None, None)
+            .await
+            .unwrap();
 
-    let project = s
-        .db
-        .get_or_create_project(user.id, &slug, "private")
-        .await
-        .unwrap();
+    let project =
+        s.db.get_or_create_project(user.id, &slug, "private")
+            .await
+            .unwrap();
 
     let (plaintext, token_hash) = ozzy_server::auth::tokens::generate_api_token();
-    s.db
-        .create_token(user.id, "test-token", &token_hash, "account", None, None)
+    s.db.create_token(user.id, "test-token", &token_hash, "account", None, None)
         .await
         .unwrap();
 
-    let commit = s
-        .db
-        .insert_commit(
+    let commit =
+        s.db.insert_commit(
             project.id,
             "github",
             &format!("{}/{}", username, slug),
@@ -1141,9 +1138,8 @@ async fn setup_job_test(
         .unwrap();
 
     let node_status = serde_json::json!({"step1": "queued"});
-    let job = s
-        .db
-        .create_job(
+    let job =
+        s.db.create_job(
             project.id,
             "my_endpoint",
             commit.id,
@@ -1190,7 +1186,9 @@ fn test_job_status_endpoint() {
 fn test_job_status_not_found() {
     let s = &*TEST_SERVER;
     TEST_RT.block_on(async {
-        let (_, token) = s.create_test_user(&format!("jobnotfound_{}", rand::random::<u32>())).await;
+        let (_, token) = s
+            .create_test_user(&format!("jobnotfound_{}", rand::random::<u32>()))
+            .await;
         let fake_id = uuid::Uuid::new_v4();
 
         let resp = s
@@ -1237,7 +1235,9 @@ fn test_job_output_failed() {
             setup_job_test(s, &format!("failed_{}", rand::random::<u32>())).await;
 
         // Simulate failure
-        s.db.set_job_error(job_id, "transform crashed").await.unwrap();
+        s.db.set_job_error(job_id, "transform crashed")
+            .await
+            .unwrap();
 
         let resp = s
             .client

@@ -10,7 +10,29 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use tokio::process::Command;
 
-use super::types::{ComputeRequest, ComputeResult};
+use super::types::{ComputeBackend, ComputeRequest, ComputeResult};
+
+/// Docker compute backend: runs transforms in local Docker containers.
+///
+/// Holds the tmpdir path for creating workspaces. All other per-job config
+/// (image, timeout, resource limits, runtime) comes from `ComputeRequest`.
+#[derive(Debug, Clone)]
+pub struct DockerBackend {
+    /// Temporary directory for compute workspaces.
+    pub tmpdir: String,
+}
+
+impl DockerBackend {
+    pub fn new(tmpdir: String) -> Self {
+        Self { tmpdir }
+    }
+}
+
+impl ComputeBackend for DockerBackend {
+    async fn run(&self, request: &ComputeRequest) -> anyhow::Result<ComputeResult> {
+        run(request, &self.tmpdir).await
+    }
+}
 
 /// Execute a transform in a Docker container.
 ///

@@ -1,7 +1,7 @@
 # v3 Workflow State
 
 ## Current Phase: Phase 2 — Async Job Model + Parallel DAG
-## Current Step: Step 2.2 COMPLETE, starting Step 2.3
+## Current Step: Step 2.5 COMPLETE, starting Step 2.6
 
 ## Completed Steps
 
@@ -37,7 +37,32 @@
 - Added compute_materialized_hash() helper for individual node hash computation
 - Background execution via execute_job() with tokio::spawn
 - Refactored helpers with _inner pattern for dual error types (ApiError / anyhow)
-- All 110 library unit tests pass
+- Commit: `477c5b4`
+
+#### Step 2.3: Job status + output endpoints
+- Created `api/v1/jobs.rs` with GET /v1/jobs/{id} (status) and GET /v1/jobs/{id}/output (redirect/proxy)
+- JobStatusResponse with per-node breakdown
+- Access control: enforces read access on owning project
+- 6 integration tests
+- Commit: `039e08f`
+
+#### Step 2.4: DAG orchestrator (parallel wave execution)
+- Created `compute/orchestrator.rs` with run_job, execute_node, compute_waves
+- Wavefront scheduling: nodes grouped into waves, independent nodes run concurrently via tokio::spawn
+- Self-contained helpers: resolve_edge_source, compute_source_hash, resolve_secrets_hash
+- Removed ~460 lines of duplicated execute_job from fetch.rs
+- Made 10+ fetch.rs helpers pub(crate) for orchestrator access
+- 4 unit tests (linear, parallel, single, diamond DAG)
+- Commit: `a7a792f`
+
+#### Step 2.5: ComputeBackend trait
+- Added `ComputeBackend` trait to `compute/types.rs` (RPITIT-style, no async_trait)
+- Created `DockerBackend` struct in `docker.rs` implementing the trait
+- Added `BackendSelector` enum to `compute/mod.rs` with `from_config()` factory
+- Added `compute: Option<BackendSelector>` to `AppState`
+- Updated orchestrator to use backend from state instead of direct docker::run()
+- Updated main.rs + all test files (api_tests, e2e_tests, integration_tests)
+- 2 unit tests (disabled/enabled config)
 
 ## Deferred Steps
 
@@ -48,9 +73,6 @@
 **Reason:** Requires SSH access to VPS. Will be done manually.
 
 ## What's Next
-- Step 2.3: Job status + output + logs endpoints
-- Step 2.4: DAG orchestrator (parallel node execution)
-- Step 2.5: ComputeBackend trait
 - Step 2.6: Update CLI ozzy fetch for async model
 - Step 2.7: Update Python client fetch()
 - Phase 2 exhaustive review

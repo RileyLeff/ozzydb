@@ -121,6 +121,7 @@ impl TestServer {
             db: db.clone(),
             storage,
             git,
+            compute: None,
         };
 
         let app = axum::Router::new().merge(api::router()).with_state(state);

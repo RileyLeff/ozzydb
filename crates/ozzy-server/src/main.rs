@@ -74,12 +74,24 @@ async fn main() -> Result<()> {
     }
     let git = GitHubProvider::new(git_app_config, db.clone());
 
+    // Initialize compute backend
+    let compute = ozzy_server::compute::BackendSelector::from_config(&config.compute);
+    if compute.is_some() {
+        tracing::info!(
+            "Compute enabled (Docker backend, tmpdir: {})",
+            config.compute.tmpdir
+        );
+    } else {
+        tracing::info!("Compute disabled");
+    }
+
     // Build application state
     let state = AppState {
         config: Arc::new(config.clone()),
         db,
         storage,
         git,
+        compute,
     };
 
     // Build router

@@ -3,6 +3,20 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use anyhow::Result;
+
+/// Trait for compute backends (Docker, Fly Machines, etc.).
+///
+/// Each backend handles workspace lifecycle internally: downloading inputs,
+/// running the container, collecting output, and cleaning up.
+pub trait ComputeBackend: Send + Sync {
+    /// Execute a transform in a container and return the result.
+    fn run(
+        &self,
+        request: &ComputeRequest,
+    ) -> impl std::future::Future<Output = Result<ComputeResult>> + Send;
+}
+
 /// A request to execute a transform in a container.
 #[derive(Debug, Clone)]
 pub struct ComputeRequest {

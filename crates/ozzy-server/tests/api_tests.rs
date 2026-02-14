@@ -61,6 +61,7 @@ async fn build_test_app() -> Option<Router> {
         db,
         storage,
         git,
+        compute: None,
     };
 
     let app = Router::new().merge(api::router()).with_state(state);

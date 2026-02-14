@@ -28,4 +28,6 @@ pub struct AppState {
     pub db: Database,
     pub storage: ContentStorage,
     pub git: GitHubProvider,
+    /// Compute backend (None when compute is disabled).
+    pub compute: Option<compute::BackendSelector>,
 }
