@@ -1,8 +1,8 @@
 //! Docker compute backend — runs transforms in Docker containers.
 //!
-//! Used both server-side (gVisor sandbox) and by `ozzy run` (local Docker).
-//! Inputs are bind-mounted, the runner script is written to the workspace,
-//! and output is collected from the workspace after execution.
+//! Used server-side with optional gVisor sandbox. Inputs are bind-mounted,
+//! the runner script is written to the workspace, and output is collected
+//! from the workspace after execution.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;

@@ -38,28 +38,6 @@ enum Commands {
         command: EndpointCommands,
     },
 
-    /// Execute an endpoint locally (uses local working directory)
-    Run {
-        /// Endpoint name
-        endpoint: String,
-
-        /// Output file path
-        #[arg(short, long)]
-        output: Option<String>,
-
-        /// Force re-execution (ignore cache)
-        #[arg(long)]
-        force: bool,
-
-        /// Endpoint parameters (key=value, can be repeated)
-        #[arg(short, long = "param")]
-        params: Vec<String>,
-
-        /// Bind local files to data references (name=path, can be repeated)
-        #[arg(long = "local-data")]
-        local_data: Vec<String>,
-    },
-
     /// Fetch and execute a remote endpoint
     Fetch {
         /// Remote endpoint (owner/project/endpoint[@ref])
@@ -409,23 +387,6 @@ async fn main() -> Result<()> {
                 }
             },
         },
-        Commands::Run {
-            endpoint,
-            output,
-            force,
-            params,
-            local_data,
-        } => {
-            commands::run::run(
-                &cwd,
-                &endpoint,
-                output.as_deref(),
-                force,
-                &params,
-                &local_data,
-            )
-            .await?;
-        }
         Commands::Fetch {
             endpoint,
             output,

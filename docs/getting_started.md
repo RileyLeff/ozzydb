@@ -5,7 +5,6 @@ This guide walks you through creating your first OzzyDB project: uploading data,
 ## Prerequisites
 
 - **Python 3.10+** with `uv` or `pip`
-- **Docker** (for local execution with `ozzy run`)
 - **Git** (your transforms live in a git repo)
 - A **GitHub account** (for authentication)
 
@@ -165,17 +164,7 @@ params = [
 ]
 ```
 
-## 7. Run locally
-
-Test your pipeline locally before pushing:
-
-```bash
-ozzy run cleaned --local-data raw_readings=readings.csv
-```
-
-This spins up a Docker container, mounts your data and code, runs the transform, and outputs the result. The `--local-data` flag maps data names to local files (since data hasn't been pushed to the registry yet for local-only testing).
-
-## 8. Push to the registry
+## 7. Push to the registry
 
 Commit your code, push to GitHub, then register with OzzyDB:
 
@@ -189,7 +178,7 @@ ozzy push -m "initial pipeline"
 
 `ozzy push` tells OzzyDB "at this git commit, here's what my pipeline looks like." OzzyDB reads your `ozzy.toml` from the git repo, validates it, and registers the commit.
 
-## 9. Fetch results
+## 8. Fetch results
 
 Now anyone can fetch your endpoint:
 
@@ -216,7 +205,7 @@ df = ozzydb.fetch("your-username/sensor-qc/cleaned", params={"min_value": 10})
 
 The first fetch runs the pipeline and caches the result. Subsequent fetches with the same inputs and parameters return the cached result instantly.
 
-## 10. Inspect on the web
+## 9. Inspect on the web
 
 Visit [ozzydb.com/your-username/sensor-qc](https://ozzydb.com) to see your project: endpoints, transforms, data, commit history, and the DAG visualization.
 
@@ -241,7 +230,6 @@ ozzy init                          Initialize a project
 ozzy data upload/ls/show/yank      Manage data atoms
 ozzy collection create/add/ls      Manage collections
 ozzy transform scaffold            Scaffold a new transform
-ozzy run <endpoint>                Execute locally (Docker)
 ozzy push                          Register a commit with the registry
 ozzy fetch <owner/project/ep>      Fetch a remote endpoint
 ozzy auth login/logout             Authentication

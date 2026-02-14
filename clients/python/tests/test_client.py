@@ -19,7 +19,6 @@ from ozzydb.client import (
     fetch_lazy,
     inspect,
     inspect_project,
-    run,
     upload,
     download,
     download_dataframe,
@@ -462,61 +461,6 @@ class TestDownload:
         result = download_dataframe("alice/proj", "raw", client=mock_client)
         assert isinstance(result, pl.DataFrame)
         assert result.shape == (3, 1)
-
-
-# ── Run tests ────────────────────────────────────────────────────
-
-
-class TestRun:
-    @patch("ozzydb.client.subprocess.run")
-    @patch("ozzydb.client.shutil.which", return_value="/usr/bin/ozzy")
-    def test_run_subprocess(self, mock_which, mock_subprocess, tmp_path):
-        # Create a parquet file that the "CLI" would produce
-        output_df = pl.DataFrame({"result": [10, 20, 30]})
-        output_file = tmp_path / "output.parquet"
-        output_df.write_parquet(output_file)
-
-        def side_effect(*args, **kwargs):
-            # Copy the output to wherever the client asks
-            import shutil
-            cmd = args[0]
-            output_idx = cmd.index("--output") + 1
-            output_path = cmd[output_idx]
-            shutil.copy(output_file, output_path)
-            result = MagicMock()
-            result.returncode = 0
-            result.stderr = ""
-            return result
-
-        mock_subprocess.side_effect = side_effect
-
-        result = run("my-endpoint", cwd=tmp_path, threshold=50)
-        assert isinstance(result, pl.DataFrame)
-        assert result.shape == (3, 1)
-
-        # Verify CLI args
-        call_args = mock_subprocess.call_args[0][0]
-        assert "run" in call_args
-        assert "my-endpoint" in call_args
-        assert "--param" in call_args
-        assert "threshold=50" in call_args
-
-    @patch("ozzydb.client.shutil.which", return_value=None)
-    def test_run_missing_cli(self, mock_which, tmp_path):
-        with patch("ozzydb.client.Path.home") as mock_home:
-            mock_home.return_value = tmp_path  # No .cargo/bin/ozzy exists
-            with pytest.raises(RuntimeError, match="ozzy CLI not found"):
-                run("ep", cwd=tmp_path)
-
-    @patch("ozzydb.client.subprocess.run")
-    @patch("ozzydb.client.shutil.which", return_value="/usr/bin/ozzy")
-    def test_run_cli_failure(self, mock_which, mock_subprocess):
-        mock_subprocess.return_value = MagicMock(
-            returncode=1,
-            stderr="Error: endpoint 'missing' not found",
-        )
-        with pytest.raises(RuntimeError, match="ozzy run failed"):
-            run("missing")
 
 
 # ── Auth tests ───────────────────────────────────────────────────

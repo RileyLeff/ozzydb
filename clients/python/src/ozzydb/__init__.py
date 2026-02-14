@@ -13,7 +13,6 @@ from .client import (
     fetch_lazy,
     inspect,
     inspect_project,
-    run,
     upload,
 )
 from .http import OzzyApiError, OzzyClient
@@ -49,7 +48,6 @@ __all__ = [
     # Functions
     "fetch",
     "fetch_lazy",
-    "run",
     "inspect",
     "inspect_project",
     "upload",

@@ -31,5 +31,4 @@ class TestCliIntegration:
 
         assert ozzydb.__version__ == "0.2.0"
         assert callable(ozzydb.fetch)
-        assert callable(ozzydb.run)
         assert callable(ozzydb.inspect)

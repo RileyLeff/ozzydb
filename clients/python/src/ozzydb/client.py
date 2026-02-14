@@ -1,10 +1,8 @@
-"""OzzyDB client functions — fetch, inspect, run, upload, download."""
+"""OzzyDB client functions — fetch, inspect, upload, download."""
 
 from __future__ import annotations
 
 import io
-import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -309,68 +307,6 @@ def inspect_project(
         f"/projects/{quote(owner, safe='')}/{quote(project, safe='')}",
     )
     return _from_dict(ProjectDetail, data)
-
-
-# ── Local execution ──────────────────────────────────────────────
-
-
-def run(
-    endpoint: str,
-    *,
-    cwd: str | Path | None = None,
-    as_pandas: bool = False,
-    force: bool = False,
-    **params: Any,
-) -> Any:
-    """Execute an endpoint locally via the ozzy CLI.
-
-    Args:
-        endpoint: Endpoint name (from local ozzy.toml).
-        cwd: Working directory (defaults to current directory).
-        as_pandas: Return pandas DataFrame instead of polars.
-        force: Force re-execution, ignoring cache.
-        **params: Endpoint parameters.
-
-    Returns:
-        polars.DataFrame, pandas.DataFrame, or bytes.
-    """
-    ozzy_bin = shutil.which("ozzy")
-    if ozzy_bin is None:
-        cargo_bin = Path.home() / ".cargo" / "bin" / "ozzy"
-        if cargo_bin.exists():
-            ozzy_bin = str(cargo_bin)
-        else:
-            raise RuntimeError(
-                "ozzy CLI not found. Install it or add it to PATH."
-            )
-
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        output_path = tmp.name
-
-    cmd = [ozzy_bin, "run", endpoint, "--output", output_path]
-    if force:
-        cmd.append("--force")
-    for key, value in params.items():
-        cmd.extend(["--param", f"{key}={value}"])
-
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=cwd or Path.cwd(),
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"ozzy run failed (exit {result.returncode}): {result.stderr.strip()}"
-            )
-
-        # Infer content type from output file
-        content_type = _infer_content_type(output_path)
-        return _read_output(output_path, content_type, as_pandas=as_pandas)
-    finally:
-        Path(output_path).unlink(missing_ok=True)
 
 
 # ── Data management ──────────────────────────────────────────────
