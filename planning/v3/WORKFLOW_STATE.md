@@ -1,51 +1,56 @@
 # v3 Workflow State
 
-## Current Phase: Phase 1 COMPLETE — R2 Storage + Presigned URLs + Streaming Uploads
-## Current Step: All steps complete (1.1-1.3 implemented, 1.4-1.5 deferred)
+## Current Phase: Phase 2 — Async Job Model + Parallel DAG
+## Current Step: Step 2.2 COMPLETE, starting Step 2.3
 
 ## Completed Steps
 
-### Step 1.1: Presigned URL generation
-- Added `aws-sdk-s3`, `aws-config`, `aws-credential-types` to workspace
-- Extended `ContentStorage` with `s3_client` + `bucket` fields
-- Implemented `presigned_get_url()`, `presigned_put_url()`, `presigned_put_url_for_content()`
-- 4 integration tests (format, download, upload, no-remote error)
+### Phase 1: R2 Storage + Presigned URLs + Streaming Uploads (COMPLETE)
+
+#### Step 1.1: Presigned URL generation
 - Commit: `641f5ba`
 
-### Step 1.2: Streaming downloads via presigned redirect
-- Data download handler returns 302 to presigned GET URL when R2 configured
-- Falls back to proxying bytes for local-only dev
-- Header renamed to `X-OzzyDB-Content-Hash`
+#### Step 1.2: Streaming downloads via presigned redirect
 - Commit: `4029222`
 
-### Step 1.3: Streaming uploads
-- `store_stream()` method on ContentStorage: hashes on the fly while uploading
-- Single PutObject for files ≤5MB, multipart for larger files
-- Raised default max upload size to 10GB
-- 4 new tests (small file, large file multipart, hash consistency, local fallback)
-- Added blake3 as direct dependency of ozzy-server
+#### Step 1.3: Streaming uploads
 - Commit: `6ff2edd`
+
+#### Phase 1 Review: 3 rounds, converged (2 consecutive clean)
+- Commit: `e798544`
+
+### Phase 2: Async Job Model + Parallel DAG (IN PROGRESS)
+
+#### Step 2.1: Jobs table migration + DB operations + tests
+- Created `migrations/002_v3_jobs.sql` (jobs + environment_provider_images tables)
+- Added `Job` and `EnvironmentProviderImage` models
+- Added 9 query functions: create_job, get_job, find_active_job, update_job_status, update_node_status, set_job_output, set_job_error, list_jobs, cleanup_expired_jobs
+- Added 2 env provider image queries: get_provider_image, upsert_provider_image
+- 8 new DB tests
+- Commit: `2d52909`
+
+#### Step 2.2: Convert fetch endpoint to async POST
+- Changed route from GET to POST
+- Added FetchResponse struct (job_id, status, output_url, output_hash)
+- Handler flow: validate → dedup check → cache-hit fast path → create job + spawn background → return 202
+- Added check_all_node_caches() for inline cache checking
+- Added compute_materialized_hash() helper for individual node hash computation
+- Background execution via execute_job() with tokio::spawn
+- Refactored helpers with _inner pattern for dual error types (ApiError / anyhow)
+- All 110 library unit tests pass
 
 ## Deferred Steps
 
 ### Step 1.4: CLI upload progress bar
-**Reason:** CLI `ozzy data add` is not yet implemented (stub only). Progress bar will be added when the CLI data upload command is implemented in a later phase.
+**Reason:** CLI `ozzy data add` is not yet implemented (stub only).
 
 ### Step 1.5: Deploy R2 to production
-**Reason:** Requires SSH access to VPS. Will be done manually when ready. R2 credentials are already in `.env.prod`.
-
-## Review Rounds
-
-### Review Round 1 (Claude-only, Codex+Gemini failed)
-- 6 fixes applied: M1 (abort multipart), M2 (copy_source leading slash), M3 (temp key cleanup), m2 (presigned download filenames), m3 (pub(crate) presigned_put_url), m4 (1GB default limit)
-- Deferred: M4 (streaming upload handler — multipart field ordering constraint prevents naive streaming), m1 (Content-Disposition injection — currently safe), m5 (buffer clone — negligible for <5MB), m6 (get_stream remote hash verification — pre-existing), m7 (sync fs ops — pre-existing)
-- Commit: `e798544`
-
-### Review Round 2 (Claude-only, Gemini E2BIG)
-- CLEAN: All prior fixes verified, no new issues found
-
-### Review Round 3 (Claude-only, convergence round)
-- CLEAN: 2 consecutive clean rounds achieved, Phase 1 converged
+**Reason:** Requires SSH access to VPS. Will be done manually.
 
 ## What's Next
-- Phase 2: Async Job Model + Parallel DAG
+- Step 2.3: Job status + output + logs endpoints
+- Step 2.4: DAG orchestrator (parallel node execution)
+- Step 2.5: ComputeBackend trait
+- Step 2.6: Update CLI ozzy fetch for async model
+- Step 2.7: Update Python client fetch()
+- Phase 2 exhaustive review
