@@ -93,7 +93,15 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
     };
 
     // Compute execution waves (groups of nodes that can run in parallel)
-    let waves = compute_waves(endpoint_def)?;
+    let waves = match compute_waves(endpoint_def) {
+        Ok(w) => w,
+        Err(e) => {
+            if let Some(ref key) = source_cleanup_key {
+                let _ = state.storage.delete_by_key(key).await;
+            }
+            return Err(e);
+        }
+    };
     tracing::info!(
         "Job {}: {} waves, {} total nodes",
         job_id,

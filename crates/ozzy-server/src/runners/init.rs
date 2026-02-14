@@ -115,7 +115,7 @@ cd /workspace/output
 tar czf /tmp/output.tar.gz .
 UPLOAD_URL=$(cat /tmp/ozzy_upload_url)
 rm -f /tmp/ozzy_upload_url
-curl -s -X PUT -T /tmp/output.tar.gz "$UPLOAD_URL" || {{
+curl -sSf -X PUT -T /tmp/output.tar.gz "$UPLOAD_URL" || {{
     echo "ERROR: Failed to upload output" >&2
     exit 1
 }}
