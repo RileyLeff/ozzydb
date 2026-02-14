@@ -1,7 +1,7 @@
 # v3 Workflow State
 
-## Current Phase: Phase 7 — Deployment & Integration
-## Current Step: Exhaustive review
+## Current Phase: COMPLETE
+## Current Step: All phases deployed
 
 ## Completed Steps
 
@@ -222,7 +222,7 @@
 
 ### Phase 6: Polish (SKIPPED — stretch goals, not blocking deployment)
 
-### Phase 7: Deployment & Integration (IN PROGRESS)
+### Phase 7: Deployment & Integration (COMPLETE)
 
 #### Step 7.1: Docker Compose config updates
 - Updated `.env.prod.example` with GitHub App, secrets encryption, and Fly env vars
@@ -245,5 +245,29 @@
 - Review fix commits: `5cb0bbd`, `6a5a1d2`
 - Models: Claude Opus only (~376k tokens, exceeds Codex/Gemini limits)
 
-## What's Next
-- Step 7.3: Deploy to production (manual procedure — requires SSH to VPS)
+#### Step 7.3: Deploy to production
+- Pushed 43 commits to GitHub
+- Pulled on VPS (`ssh root@ozzydb`)
+- Dropped v2 database schema, let v3 migrations recreate (22 tables including new `jobs` + `environment_provider_images`)
+- Rebuilt server Docker image (12m 20s compile)
+- Restarted services: postgres (kept running) + server (recreated) + caddy (restarted)
+- Rebuilt frontend (`npm install && npm run build`)
+- Smoke test passed: `https://api.ozzydb.com/health` → `{"status":"ok","version":"0.1.0"}`
+- Frontend live: `https://ozzydb.com` → 200 OK
+
+## v3 Implementation Complete
+
+All phases deployed to production:
+- Phase 1: R2 Storage + Presigned URLs
+- Phase 2: Async Job Model + Parallel DAG
+- Phase 3: Fly Backend + Rate Limiting
+- Phase 4: Admin Dashboard
+- Phase 5: Cleanup + Local Dev Stack
+- Phase 6: Polish (skipped — stretch goals)
+- Phase 7: Deployment & Integration
+
+## Remaining Setup (not code changes)
+- Configure R2 bucket for production (currently local-only storage)
+- Configure Fly.io compute app (currently Docker-only compute)
+- Set up GitHub App for private repo access
+- Schedule automated pg_dump backups
