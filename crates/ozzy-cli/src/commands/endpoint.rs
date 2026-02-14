@@ -80,19 +80,17 @@ pub async fn ls(ref_name: Option<&str>) -> Result<()> {
     let registry_url = shared::registry_url(&creds);
     let client = shared::http_client()?;
 
-    let mut url = format!(
+    let url = format!(
         "{}/api/v1/endpoints/{}/{}",
         registry_url, project.owner, project.slug
     );
+
+    let mut request = client.get(&url).bearer_auth(&creds.token);
     if let Some(r) = ref_name {
-        url.push_str(&format!("?ref={}", r));
+        request = request.query(&[("ref", r)]);
     }
 
-    let resp = client
-        .get(&url)
-        .bearer_auth(&creds.token)
-        .send()
-        .await?;
+    let resp = request.send().await?;
 
     if !resp.status().is_success() {
         let err = shared::extract_error(resp).await;
@@ -131,19 +129,17 @@ pub async fn show(name: &str, ref_name: Option<&str>) -> Result<()> {
     let registry_url = shared::registry_url(&creds);
     let client = shared::http_client()?;
 
-    let mut url = format!(
+    let url = format!(
         "{}/api/v1/endpoints/{}/{}/{}",
         registry_url, project.owner, project.slug, name
     );
+
+    let mut request = client.get(&url).bearer_auth(&creds.token);
     if let Some(r) = ref_name {
-        url.push_str(&format!("?ref={}", r));
+        request = request.query(&[("ref", r)]);
     }
 
-    let resp = client
-        .get(&url)
-        .bearer_auth(&creds.token)
-        .send()
-        .await?;
+    let resp = request.send().await?;
 
     if !resp.status().is_success() {
         let err = shared::extract_error(resp).await;
@@ -220,23 +216,20 @@ pub async fn dag(name: &str, format: &str, ref_name: Option<&str>) -> Result<()>
     let registry_url = shared::registry_url(&creds);
     let client = shared::http_client()?;
 
-    let mut query_parts = vec![format!("format={}", format)];
-    if let Some(r) = ref_name {
-        query_parts.push(format!("ref={}", r));
-    }
-
     let url = format!(
-        "{}/api/v1/endpoints/{}/{}/{}/dag?{}",
-        registry_url,
-        project.owner,
-        project.slug,
-        name,
-        query_parts.join("&"),
+        "{}/api/v1/endpoints/{}/{}/{}/dag",
+        registry_url, project.owner, project.slug, name,
     );
+
+    let mut query: Vec<(&str, &str)> = vec![("format", format)];
+    if let Some(r) = ref_name {
+        query.push(("ref", r));
+    }
 
     let resp = client
         .get(&url)
         .bearer_auth(&creds.token)
+        .query(&query)
         .send()
         .await?;
 

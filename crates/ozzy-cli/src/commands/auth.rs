@@ -403,6 +403,7 @@ pub async fn token_list() -> Result<()> {
 
 /// `ozzy auth token revoke` — delete a token by name.
 pub async fn token_revoke(name: &str) -> Result<()> {
+    super::shared::validate_name(name, "token")?;
     let creds = load_credentials()?;
     let Some(creds) = creds else {
         bail!("Not logged in. Run `ozzy auth login` first.");

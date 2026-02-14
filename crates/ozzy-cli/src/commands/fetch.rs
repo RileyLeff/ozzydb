@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use super::auth::load_credentials;
+use super::shared;
 
 /// Fetch response from POST /api/v1/fetch/{owner}/{project}/{endpoint}.
 #[derive(Debug, Deserialize)]
@@ -47,6 +48,9 @@ pub async fn run(
         );
     }
     let (owner, project, ep_name) = (parts[0], parts[1], parts[2]);
+    shared::validate_name(owner, "owner")?;
+    shared::validate_name(project, "project")?;
+    shared::validate_name(ep_name, "endpoint")?;
 
     // Load credentials (optional — public projects don't require auth)
     let creds = load_credentials()?;
