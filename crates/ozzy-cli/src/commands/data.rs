@@ -371,6 +371,11 @@ pub async fn download(name: &str, output: Option<&str>) -> Result<()> {
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| anyhow::anyhow!("Redirect missing Location header"))?
             .to_string();
+        let expected_hash = resp
+            .headers()
+            .get("x-ozzydb-content-hash")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
 
         // Follow redirect without auth (presigned URL)
         let dl_client = shared::http_client()?;
@@ -381,8 +386,8 @@ pub async fn download(name: &str, output: Option<&str>) -> Result<()> {
         }
 
         let bytes = dl_resp.bytes().await?;
+        verify_download_hash(&bytes, expected_hash.as_deref())?;
 
-        // Determine output filename
         let out_path = output.unwrap_or(name);
         std::fs::write(out_path, &bytes)
             .with_context(|| format!("Failed to write {}", out_path))?;
@@ -395,13 +400,28 @@ pub async fn download(name: &str, output: Option<&str>) -> Result<()> {
         bail!("Download failed for '{}': {}", name, err);
     }
 
-    // Direct response (local storage mode)
+    // Direct response (local storage mode) — no hash header available
     let bytes = resp.bytes().await?;
     let out_path = output.unwrap_or(name);
     std::fs::write(out_path, &bytes)
         .with_context(|| format!("Failed to write {}", out_path))?;
     println!("Downloaded {} ({} bytes) to {}", name, bytes.len(), out_path);
 
+    Ok(())
+}
+
+/// Verify downloaded bytes against expected BLAKE3 hash (if provided).
+fn verify_download_hash(bytes: &[u8], expected: Option<&str>) -> Result<()> {
+    if let Some(expected) = expected {
+        let actual = blake3::hash(bytes).to_hex().to_string();
+        if actual != expected {
+            bail!(
+                "Hash mismatch: expected {}, got {}. Download may be corrupted.",
+                expected,
+                actual
+            );
+        }
+    }
     Ok(())
 }
 

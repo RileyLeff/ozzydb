@@ -35,6 +35,7 @@ pub async fn set(name: &str) -> Result<()> {
 
     // Read secret value from stdin
     eprint!("Enter secret value for {}: ", name);
+    std::io::Write::flush(&mut std::io::stderr())?;
     let mut value = String::new();
     std::io::stdin()
         .read_line(&mut value)
