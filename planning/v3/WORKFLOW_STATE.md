@@ -303,6 +303,9 @@ See `planning/v3/v3.1_compute_providers.md` for full plan.
 - Removed stale COMPUTE_TMPFS_SIZE references
 - Commit: `c849338`
 
-### Exhaustive Review: PENDING
-- All 7 steps implemented and committed
-- Ready for exhaustive review loop (2 consecutive clean rounds required)
+### Exhaustive Review: CONVERGED (3 rounds, 2 consecutive clean)
+- Round 1: 6 fixes (M1 secrets presigned URL, M2 wave drain handles, M5 secrets key collision, m7/m8 Fly timeouts, m9 output key, m10 redundant check)
+- Round 2: CLEAN + 2 minor fixes (m3 source cleanup, m4 curl flags)
+- Round 3: CLEAN
+- Review fix commits: `3b8f906`, `0295059`
+- Models: Claude Opus only (~377k tokens, exceeds Codex/Gemini limits)
