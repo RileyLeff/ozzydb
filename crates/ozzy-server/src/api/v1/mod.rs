@@ -1,6 +1,7 @@
 //! V1 API endpoints.
 
 mod access;
+mod admin;
 pub mod auth;
 mod collections;
 mod commits;
@@ -31,4 +32,5 @@ pub fn router() -> Router<AppState> {
         .nest("/fetch", fetch::router())
         .nest("/jobs", jobs::router())
         .nest("/commits", commits::router())
+        .nest("/admin", admin::router())
 }

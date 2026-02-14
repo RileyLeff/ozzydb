@@ -2034,4 +2034,69 @@ impl Database {
         .await?;
         Ok(image)
     }
+
+    // ========================================================================
+    // Admin Operations
+    // ========================================================================
+
+    /// List all jobs globally with optional status filter, ordered by most recent.
+    pub async fn list_jobs_global(
+        &self,
+        status_filter: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Job>> {
+        let jobs = match status_filter {
+            Some(status) => {
+                sqlx::query_as::<_, Job>(
+                    "SELECT * FROM jobs WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
+                )
+                .bind(status)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_as::<_, Job>("SELECT * FROM jobs ORDER BY created_at DESC LIMIT $1")
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+        };
+        Ok(jobs)
+    }
+
+    /// Cancel a job by setting its status to 'failed' with an error message.
+    pub async fn cancel_job(&self, job_id: Uuid) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE jobs SET status = 'failed', error_message = 'Cancelled by admin', completed_at = now()
+             WHERE id = $1 AND status IN ('queued', 'running')",
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(result.is_some())
+    }
+
+    /// List all users with pagination.
+    pub async fn list_users(&self, limit: i64, offset: i64) -> Result<Vec<User>> {
+        let users = sqlx::query_as::<_, User>(
+            "SELECT * FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(users)
+    }
+
+    /// Set or unset admin flag on a user.
+    pub async fn set_user_admin(&self, user_id: Uuid, is_admin: bool) -> Result<bool> {
+        let result =
+            sqlx::query("UPDATE users SET is_admin = $2, updated_at = now() WHERE id = $1")
+                .bind(user_id)
+                .bind(is_admin)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }

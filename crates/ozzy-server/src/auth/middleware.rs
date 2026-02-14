@@ -32,6 +32,12 @@ pub struct AccountAuthUser {
     pub scope: String,
 }
 
+/// Authenticated admin user. Requires account-level scope AND is_admin = true.
+#[derive(Debug, Clone)]
+pub struct AdminUser {
+    pub user: User,
+}
+
 /// Optional authenticated user (for public endpoints).
 #[derive(Debug, Clone)]
 pub struct MaybeAuthUser {
@@ -101,6 +107,27 @@ impl FromRequestParts<AppState> for AccountAuthUser {
                 return Err(AuthError::InsufficientScope);
             }
             Ok(AccountAuthUser { user, scope })
+        }
+    }
+}
+
+impl FromRequestParts<AppState> for AdminUser {
+    type Rejection = AuthError;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        async move {
+            let token = extract_token(parts)?;
+            let (user, scope) = validate_token(&state.db, &token).await?;
+            if !is_account_scope(&scope) {
+                return Err(AuthError::InsufficientScope);
+            }
+            if !user.is_admin {
+                return Err(AuthError::InsufficientScope);
+            }
+            Ok(AdminUser { user })
         }
     }
 }
