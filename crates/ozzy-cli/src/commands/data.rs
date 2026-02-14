@@ -68,6 +68,13 @@ pub async fn upload(
         bail!("--name can only be used with a single file");
     }
 
+    if let Some(n) = name {
+        shared::validate_name(n, "data atom")?;
+    }
+    if let Some(c) = collection {
+        shared::validate_name(c, "collection")?;
+    }
+
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
     let registry_url = shared::registry_url(&creds);
