@@ -6,7 +6,7 @@ mod collections;
 mod commits;
 mod data;
 mod endpoints;
-mod fetch;
+pub(crate) mod fetch;
 mod jobs;
 mod projects;
 mod push;

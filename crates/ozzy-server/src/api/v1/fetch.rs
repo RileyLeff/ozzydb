@@ -18,6 +18,7 @@ use uuid::Uuid;
 use super::auth::ApiError;
 use crate::AppState;
 use crate::auth::middleware::MaybeAuthUser;
+use crate::compute::orchestrator::NodeOutput;
 
 /// Build the fetch router.
 pub fn router() -> Router<AppState> {
@@ -247,12 +248,7 @@ async fn fetch_endpoint(
 
     let job_id = job.id;
     let state_clone = state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = execute_job(state_clone.clone(), job_id).await {
-            tracing::error!("Job {} failed: {}", job_id, e);
-            let _ = state_clone.db.set_job_error(job_id, &e.to_string()).await;
-        }
-    });
+    tokio::spawn(crate::compute::orchestrator::run_job(state_clone, job_id));
 
     tracing::info!(
         "Created job {} for {}/{}/{}",
@@ -492,7 +488,7 @@ fn compute_source_hash(
 }
 
 /// Compute params schema hash for a transform.
-fn compute_params_schema_hash(transform_def: &ozzy_core::toml_spec::TransformDef) -> String {
+pub(crate) fn compute_params_schema_hash(transform_def: &ozzy_core::toml_spec::TransformDef) -> String {
     if transform_def.params.is_empty() {
         ozzy_core::hash::blake3_hash(b"")
     } else {
@@ -507,486 +503,7 @@ fn compute_params_schema_hash(transform_def: &ozzy_core::toml_spec::TransformDef
     }
 }
 
-// ── Background job execution ──────────────────────────────────────
-
-/// Execute a job in the background.
-///
-/// Re-loads all context from the database and runs the DAG. Updates job status
-/// and node status as execution progresses.
-async fn execute_job(state: AppState, job_id: Uuid) -> Result<(), anyhow::Error> {
-    let job = state
-        .db
-        .get_job(job_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Job {} not found", job_id))?;
-
-    state.db.update_job_status(job_id, "running").await?;
-
-    // Re-load context from DB
-    let project = state
-        .db
-        .get_project_by_id(job.project_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Project {} not found", job.project_id))?;
-
-    let commit = state
-        .db
-        .get_commit_by_id(job.commit_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Commit {} not found", job.commit_id))?;
-
-    let commit_state = state
-        .db
-        .get_commit_state(commit.id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Commit state missing for commit {}", commit.id))?;
-
-    let endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef> =
-        serde_json::from_value(commit_state.endpoints.clone())?;
-
-    let endpoint_def = endpoints
-        .get(&job.endpoint_name)
-        .ok_or_else(|| anyhow::anyhow!("Endpoint '{}' not found", job.endpoint_name))?;
-
-    let transforms: HashMap<String, ozzy_core::toml_spec::TransformDef> =
-        serde_json::from_value(commit_state.transforms.clone())?;
-
-    let environments: HashMap<String, ozzy_core::toml_spec::EnvironmentDef> =
-        serde_json::from_value(commit_state.environments.clone())?;
-
-    let resolved_params: serde_json::Value = job.params.clone();
-    let exec_order = build_execution_order_anyhow(endpoint_def)?;
-    let source_dir = retrieve_source_code(&state, &commit).await;
-    let edge_map = build_edge_map(endpoint_def);
-    let platform = ozzy_core::platform::PlatformFingerprint::detect();
-    let platform_hash = platform.hash();
-
-    let mut node_outputs: HashMap<String, NodeOutput> = HashMap::new();
-
-    for node_name in &exec_order {
-        state
-            .db
-            .update_node_status(job_id, node_name, "running")
-            .await?;
-
-        let node_def = endpoint_def
-            .nodes
-            .get(node_name)
-            .ok_or_else(|| anyhow::anyhow!("Node '{}' missing from endpoint", node_name))?;
-
-        let transform_def = transforms
-            .get(&node_def.transform)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Transform '{}' not found for node '{}'",
-                    node_def.transform,
-                    node_name
-                )
-            })?;
-
-        // Resolve inputs
-        let mut input_hashes: Vec<(&str, String)> = Vec::new();
-        let empty_vec = vec![];
-        let edges_for_node = edge_map.get(node_name.as_str()).unwrap_or(&empty_vec);
-        for (input_name, source) in edges_for_node {
-            let hash = resolve_edge_source_anyhow(source, &state, project.id, &node_outputs).await?;
-            input_hashes.push((input_name, hash));
-        }
-
-        // Resolve node params
-        let node_params =
-            resolve_node_params(node_name, node_def, endpoint_def, &resolved_params);
-        let params_hash = ozzy_core::hash::blake3_hash(
-            serde_json::to_string(&node_params)
-                .unwrap_or_default()
-                .as_bytes(),
-        );
-
-        // Resolve secrets hash
-        let secrets_hash = resolve_secrets_hash_anyhow(&state, project.id, transform_def).await?;
-
-        // Resolve environment
-        let env_def = environments.get(&transform_def.environment).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Environment '{}' not found for transform '{}'",
-                transform_def.environment,
-                node_def.transform,
-            )
-        })?;
-
-        let (env_image, env_hash, lockfile_hash) =
-            resolve_environment_image_anyhow(&state, env_def, &commit.git_repo, &commit.git_commit_sha)
-                .await?;
-
-        // Compute source hash
-        let (source_hash, function_name) = if let Some(source) = &transform_def.source {
-            let (file_path, func) =
-                crate::runners::parse_source_ref(source).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Invalid source ref '{}' for transform '{}'",
-                        source,
-                        node_def.transform
-                    )
-                })?;
-            let hash = if let Some(sd) = source_dir.as_ref() {
-                let full_path = sd.path().join(file_path);
-                let canonical = full_path.canonicalize().ok();
-                let within_source = canonical
-                    .as_ref()
-                    .and_then(|c| sd.path().canonicalize().ok().map(|sd| c.starts_with(sd)))
-                    .unwrap_or(false);
-                if !within_source {
-                    anyhow::bail!("Source path '{}' escapes source directory", file_path);
-                }
-                tokio::fs::read(&full_path)
-                    .await
-                    .map(|bytes| ozzy_core::hash::blake3_hash(&bytes))
-                    .unwrap_or_else(|_| {
-                        ozzy_core::hash::blake3_hash(
-                            format!("{}:{}", node_def.transform, commit.git_commit_sha).as_bytes(),
-                        )
-                    })
-            } else {
-                ozzy_core::hash::blake3_hash(
-                    format!("{}:{}", node_def.transform, commit.git_commit_sha).as_bytes(),
-                )
-            };
-            (hash, func)
-        } else if let Some(command) = &transform_def.command {
-            (
-                ozzy_core::hash::blake3_hash(command.as_bytes()),
-                "command",
-            )
-        } else {
-            anyhow::bail!(
-                "Transform '{}' has neither source nor command",
-                node_def.transform,
-            );
-        };
-
-        let params_schema_hash = compute_params_schema_hash(transform_def);
-
-        let transform_hash = ozzy_core::hash::transform_hash(
-            &source_hash,
-            function_name,
-            &lockfile_hash,
-            &env_hash,
-            &params_schema_hash,
-        );
-
-        let input_refs: Vec<(&str, &str)> = input_hashes
-            .iter()
-            .map(|(name, hash)| (*name, hash.as_str()))
-            .collect();
-
-        let mat_hash = ozzy_core::hash::materialized_hash(
-            &input_refs,
-            &transform_hash,
-            &params_hash,
-            &platform_hash,
-            secrets_hash.as_deref(),
-        );
-
-        // ── Check materialized cache ────────────────────────────
-        if let Some(cached) = state.db.get_materialized_cache(&mat_hash).await? {
-            state.db.touch_materialized_cache(&mat_hash).await?;
-            tracing::info!(
-                "Job {}: cache hit for node '{}': {}",
-                job_id,
-                node_name,
-                mat_hash.get(..12).unwrap_or(&mat_hash)
-            );
-            node_outputs.insert(
-                node_name.clone(),
-                NodeOutput {
-                    materialized_hash: mat_hash,
-                    output_hash: cached.output_hash,
-                    content_type: cached.output_content_type,
-                    byte_size: cached.output_byte_size,
-                    cache_hit: true,
-                },
-            );
-            state
-                .db
-                .update_node_status(job_id, node_name, "done")
-                .await?;
-            continue;
-        }
-
-        // ── Execute uncached node ───────────────────────────────
-        if !state.config.compute.enabled {
-            anyhow::bail!("Compute is not enabled on this server");
-        }
-
-        let env_image_ref = env_image
-            .as_ref()
-            .map(|img| img.image_ref.clone())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Environment '{}' has not been built yet",
-                    transform_def.environment
-                )
-            })?;
-
-        if env_image.as_ref().and_then(|img| img.built_at).is_none() {
-            anyhow::bail!(
-                "Environment '{}' is still building",
-                transform_def.environment
-            );
-        }
-
-        // Generate runner script
-        let runner_script = if let Some(source) = &transform_def.source {
-            let (file_path, func_name) =
-                crate::runners::validate_source_ref(source).map_err(|e| {
-                    anyhow::anyhow!(
-                        "Invalid source reference '{}' in transform '{}': {}",
-                        source,
-                        node_def.transform,
-                        e
-                    )
-                })?;
-            let runner_type = crate::runners::detect_runner_type(source).ok_or_else(|| {
-                anyhow::anyhow!("Unsupported source file type in '{}'", source)
-            })?;
-            match runner_type {
-                crate::runners::RunnerType::Python => {
-                    crate::runners::python::generate(file_path, func_name)
-                }
-                crate::runners::RunnerType::R => crate::runners::r::generate(file_path, func_name),
-                crate::runners::RunnerType::Command => {
-                    anyhow::bail!("Source-based transform incorrectly detected as Command type");
-                }
-            }
-        } else if let Some(command) = &transform_def.command {
-            let input_names: Vec<&str> = transform_def.inputs.keys().map(|s| s.as_str()).collect();
-            crate::runners::command::generate_shell_wrapper(command, &input_names)
-        } else {
-            anyhow::bail!(
-                "Transform '{}' has neither source nor command",
-                node_def.transform,
-            );
-        };
-
-        let runner_ext = if transform_def.source.is_some() {
-            let rt =
-                crate::runners::detect_runner_type(transform_def.source.as_deref().unwrap_or(""))
-                    .unwrap_or(crate::runners::RunnerType::Python);
-            match rt {
-                crate::runners::RunnerType::Python => "py",
-                crate::runners::RunnerType::R => "R",
-                crate::runners::RunnerType::Command => "sh",
-            }
-        } else {
-            "sh"
-        };
-
-        let runner_type = if transform_def.source.is_some() {
-            crate::runners::detect_runner_type(transform_def.source.as_deref().unwrap_or(""))
-                .unwrap_or(crate::runners::RunnerType::Python)
-        } else {
-            crate::runners::RunnerType::Command
-        };
-
-        let init_script = crate::runners::init::generate_docker_init(runner_type);
-
-        // Build input manifest and env vars
-        let compute_inputs: Vec<crate::compute::InputSpec> = Vec::new();
-        let input_manifest = crate::compute::docker::build_input_manifest(&compute_inputs);
-        let param_env_vars = crate::compute::docker::build_param_env_vars(&node_params);
-
-        let mut env_vars: HashMap<String, String> = HashMap::new();
-        env_vars.insert(
-            "OZZY_PARAMS".to_string(),
-            serde_json::to_string(&node_params).unwrap_or_default(),
-        );
-        env_vars.insert(
-            "OZZY_INPUT_MANIFEST".to_string(),
-            serde_json::to_string(&input_manifest).unwrap_or_default(),
-        );
-        for (key, value) in param_env_vars {
-            env_vars.insert(key, value);
-        }
-
-        // Inject secrets
-        const RESERVED_SECRET_NAMES: &[&str] = &[
-            "PATH",
-            "HOME",
-            "PYTHONHASHSEED",
-            "OMP_NUM_THREADS",
-            "MKL_NUM_THREADS",
-            "OPENBLAS_NUM_THREADS",
-            "NUMEXPR_NUM_THREADS",
-            "VECLIB_MAXIMUM_THREADS",
-            "PYTHONDONTWRITEBYTECODE",
-            "PYTHONUNBUFFERED",
-        ];
-        if !transform_def.secrets.is_empty() {
-            let enc_key = state.config.secrets_encryption_key.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Transform '{}' requires secrets but the server has no secrets encryption key",
-                    node_def.transform
-                )
-            })?;
-            for secret_name in &transform_def.secrets {
-                if secret_name.starts_with("OZZY_") {
-                    anyhow::bail!(
-                        "Secret '{}' uses reserved prefix 'OZZY_'",
-                        secret_name
-                    );
-                }
-                if RESERVED_SECRET_NAMES
-                    .iter()
-                    .any(|&r| r.eq_ignore_ascii_case(secret_name))
-                {
-                    anyhow::bail!(
-                        "Secret '{}' would override a reserved runtime environment variable",
-                        secret_name
-                    );
-                }
-                if let Some(secret) = state.db.get_secret(project.id, secret_name).await? {
-                    let decrypted = decrypt_secret(&secret.encrypted_value, enc_key)?;
-                    env_vars.insert(secret_name.clone(), decrypted);
-                }
-            }
-        }
-
-        // Execute via Docker
-        let compute_request = crate::compute::ComputeRequest {
-            image: env_image_ref,
-            runner_script,
-            runner_ext: runner_ext.to_string(),
-            init_script,
-            inputs: compute_inputs,
-            env_vars,
-            timeout_secs: state.config.compute.timeout_secs,
-            memory_limit: Some(state.config.compute.memory_limit.clone()),
-            cpu_limit: Some(state.config.compute.cpu_limit.clone()),
-            network: transform_def.network,
-            runtime: state.config.compute.docker_runtime.clone(),
-            source_dir: source_dir.as_ref().map(|d| d.path().to_path_buf()),
-        };
-
-        let result = crate::compute::docker::run(&compute_request, &state.config.compute.tmpdir)
-            .await
-            .map_err(|e| anyhow::anyhow!("Compute execution failed: {}", e))?;
-
-        if !result.success() {
-            let logs = result.logs.clone();
-            let exit_code = result.exit_code;
-            result.cleanup().await;
-            anyhow::bail!(
-                "Transform '{}' failed (exit {}): {}",
-                node_def.transform,
-                exit_code,
-                logs
-            );
-        }
-
-        // Read output from workspace
-        let compute_duration_ms = result.duration_ms;
-        let read_result: Result<(Vec<u8>, String), anyhow::Error> = async {
-            let output_files = list_output_files_anyhow(&result.output_dir).await?;
-            let primary_output = find_primary_output(&output_files).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Transform '{}' produced no output files",
-                    node_def.transform
-                )
-            })?;
-            let content_type = infer_output_content_type(primary_output);
-            let bytes = tokio::fs::read(primary_output).await?;
-            Ok((bytes, content_type))
-        }
-        .await;
-        result.cleanup().await;
-        let (output_bytes, output_content_type) = read_result?;
-        let output_hash = ozzy_core::hash::blake3_hash(&output_bytes);
-        let output_byte_size = output_bytes.len() as i64;
-        let output_ext = content_type_to_extension(&output_content_type);
-
-        // Store output in content storage
-        state
-            .storage
-            .store(&output_bytes, &output_ext)
-            .await?;
-        let output_r2_key = state
-            .storage
-            .storage_key(&output_hash, &output_ext)?;
-
-        // Insert materialized cache record
-        let platform_str = serde_json::to_string(&platform).unwrap_or_default();
-        state
-            .db
-            .insert_materialized_cache(
-                &mat_hash,
-                project.id,
-                commit.id,
-                &job.endpoint_name,
-                node_name,
-                &node_def.transform,
-                &output_hash,
-                &output_r2_key,
-                &output_content_type,
-                output_byte_size,
-                &platform_str,
-                1,
-            )
-            .await?;
-
-        tracing::info!(
-            "Job {}: computed node '{}' ({}ms): {}",
-            job_id,
-            node_name,
-            compute_duration_ms,
-            mat_hash.get(..12).unwrap_or(&mat_hash)
-        );
-
-        node_outputs.insert(
-            node_name.clone(),
-            NodeOutput {
-                materialized_hash: mat_hash,
-                output_hash,
-                content_type: output_content_type,
-                byte_size: output_byte_size,
-                cache_hit: false,
-            },
-        );
-
-        state
-            .db
-            .update_node_status(job_id, node_name, "done")
-            .await?;
-    }
-
-    // ── Set job output ──────────────────────────────────────────
-    let final_node = find_terminal_node_anyhow(endpoint_def)?;
-    let final_output = node_outputs
-        .get(final_node)
-        .ok_or_else(|| anyhow::anyhow!("Final node '{}' has no output", final_node))?;
-
-    state
-        .db
-        .set_job_output(
-            job_id,
-            &final_output.output_hash,
-            &final_output.content_type,
-        )
-        .await?;
-
-    tracing::info!("Job {} completed successfully", job_id);
-    Ok(())
-}
-
-// ── Internal types ────────────────────────────────────────────────
-
-#[allow(dead_code)]
-struct NodeOutput {
-    materialized_hash: String,
-    output_hash: String,
-    content_type: String,
-    byte_size: i64,
-    cache_hit: bool,
-}
+// ── Background job execution is now in compute::orchestrator ──────
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -1126,13 +643,6 @@ fn build_execution_order(
     build_execution_order_inner(endpoint).map_err(|e| ApiError::Internal(e))
 }
 
-/// Build execution order, returning anyhow::Error for background task use.
-fn build_execution_order_anyhow(
-    endpoint: &ozzy_core::toml_spec::EndpointDef,
-) -> Result<Vec<String>, anyhow::Error> {
-    build_execution_order_inner(endpoint)
-}
-
 fn build_execution_order_inner(
     endpoint: &ozzy_core::toml_spec::EndpointDef,
 ) -> Result<Vec<String>, anyhow::Error> {
@@ -1192,7 +702,7 @@ fn find_terminal_node(endpoint: &ozzy_core::toml_spec::EndpointDef) -> Result<&s
     find_terminal_node_inner(endpoint).map_err(ApiError::Internal)
 }
 
-fn find_terminal_node_anyhow(
+pub(crate) fn find_terminal_node_anyhow(
     endpoint: &ozzy_core::toml_spec::EndpointDef,
 ) -> Result<&str, anyhow::Error> {
     find_terminal_node_inner(endpoint)
@@ -1236,7 +746,7 @@ fn find_terminal_node_inner(
 }
 
 /// Build a map from node_name → [(input_name, edge_source)] for quick lookup.
-fn build_edge_map<'a>(
+pub(crate) fn build_edge_map<'a>(
     endpoint: &'a ozzy_core::toml_spec::EndpointDef,
 ) -> HashMap<&'a str, Vec<(&'a str, &'a str)>> {
     let mut map: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
@@ -1260,15 +770,6 @@ async fn resolve_edge_source(
     resolve_edge_source_inner(source, state, project_id, node_outputs)
         .await
         .map_err(ApiError::Internal)
-}
-
-async fn resolve_edge_source_anyhow(
-    source: &str,
-    state: &AppState,
-    project_id: Uuid,
-    node_outputs: &HashMap<String, NodeOutput>,
-) -> Result<String, anyhow::Error> {
-    resolve_edge_source_inner(source, state, project_id, node_outputs).await
 }
 
 async fn resolve_edge_source_inner(
@@ -1316,7 +817,7 @@ async fn resolve_edge_source_inner(
 }
 
 /// Retrieve and extract the source tarball for a commit.
-async fn retrieve_source_code(
+pub(crate) async fn retrieve_source_code(
     state: &AppState,
     commit: &crate::db::Commit,
 ) -> Option<tempfile::TempDir> {
@@ -1397,7 +898,7 @@ async fn resolve_environment_image(
         .map_err(ApiError::Internal)
 }
 
-async fn resolve_environment_image_anyhow(
+pub(crate) async fn resolve_environment_image_anyhow(
     state: &AppState,
     env_def: &ozzy_core::toml_spec::EnvironmentDef,
     git_repo: &str,
@@ -1473,7 +974,7 @@ async fn resolve_environment_image_inner(
 }
 
 /// Resolve params for a specific node.
-fn resolve_node_params(
+pub(crate) fn resolve_node_params(
     node_name: &str,
     node_def: &ozzy_core::toml_spec::NodeDef,
     endpoint: &ozzy_core::toml_spec::EndpointDef,
@@ -1512,13 +1013,6 @@ async fn resolve_secrets_hash(
         .map_err(ApiError::Internal)
 }
 
-async fn resolve_secrets_hash_anyhow(
-    state: &AppState,
-    project_id: Uuid,
-    transform: &ozzy_core::toml_spec::TransformDef,
-) -> Result<Option<String>, anyhow::Error> {
-    resolve_secrets_hash_inner(state, project_id, transform).await
-}
 
 async fn resolve_secrets_hash_inner(
     state: &AppState,
@@ -1552,7 +1046,7 @@ async fn resolve_secrets_hash_inner(
 }
 
 /// Decrypt a secret value using AES-256-GCM.
-fn decrypt_secret(encrypted: &[u8], key: &[u8]) -> Result<String, anyhow::Error> {
+pub(crate) fn decrypt_secret(encrypted: &[u8], key: &[u8]) -> Result<String, anyhow::Error> {
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 
     if key.len() != 32 {
@@ -1582,7 +1076,7 @@ async fn list_output_files(dir: &std::path::Path) -> Result<Vec<std::path::PathB
 }
 
 /// List output files in a directory (for background task use).
-async fn list_output_files_anyhow(
+pub(crate) async fn list_output_files_anyhow(
     dir: &std::path::Path,
 ) -> Result<Vec<std::path::PathBuf>, anyhow::Error> {
     list_output_files_inner(dir).await
@@ -1603,7 +1097,7 @@ async fn list_output_files_inner(
 }
 
 /// Select the primary output file from a sorted list.
-fn find_primary_output(files: &[std::path::PathBuf]) -> Option<&std::path::PathBuf> {
+pub(crate) fn find_primary_output(files: &[std::path::PathBuf]) -> Option<&std::path::PathBuf> {
     for f in files {
         if let Some(name) = f.file_name().and_then(|n| n.to_str()) {
             if name.starts_with("result") {
@@ -1615,7 +1109,7 @@ fn find_primary_output(files: &[std::path::PathBuf]) -> Option<&std::path::PathB
 }
 
 /// Infer content type from file extension.
-fn infer_output_content_type(path: &std::path::Path) -> String {
+pub(crate) fn infer_output_content_type(path: &std::path::Path) -> String {
     match path.extension().and_then(|e| e.to_str()) {
         Some("parquet") => "application/vnd.apache.parquet".to_string(),
         Some("json") => "application/json".to_string(),
@@ -1629,7 +1123,7 @@ fn infer_output_content_type(path: &std::path::Path) -> String {
 }
 
 /// Convert a MIME content type to a file extension for storage.
-fn content_type_to_extension(content_type: &str) -> String {
+pub(crate) fn content_type_to_extension(content_type: &str) -> String {
     match content_type {
         "application/vnd.apache.parquet" => "parquet".to_string(),
         "application/json" => "json".to_string(),
