@@ -124,17 +124,19 @@ impl FlyBackend {
             .await
             .context("Failed to parse Fly Machine creation response")?;
         let machine_id = machine.id;
+        let instance_id = machine.instance_id;
 
         tracing::info!(
-            "Fly Machine created: {} (id: {}, region: {})",
+            "Fly Machine created: {} (id: {}, instance: {}, region: {})",
             machine_name,
             machine_id,
+            instance_id,
             machine.region.as_deref().unwrap_or("unknown"),
         );
 
         // Wait for machine to stop
         let wait_result = self
-            .wait_for_machine(&machine_id, request.timeout_secs)
+            .wait_for_machine(&machine_id, &instance_id, request.timeout_secs)
             .await;
 
         // Get machine state for exit code
@@ -196,10 +198,10 @@ impl FlyBackend {
 
 impl FlyBackend {
     /// Wait for a machine to reach "stopped" state.
-    async fn wait_for_machine(&self, machine_id: &str, timeout_secs: u64) -> Result<()> {
+    async fn wait_for_machine(&self, machine_id: &str, instance_id: &str, timeout_secs: u64) -> Result<()> {
         let wait_url = format!(
-            "{}/v1/apps/{}/machines/{}/wait?state=stopped&timeout={}",
-            self.config.api_url, self.config.app_name, machine_id, timeout_secs
+            "{}/v1/apps/{}/machines/{}/wait?state=stopped&timeout={}&instance_id={}",
+            self.config.api_url, self.config.app_name, machine_id, timeout_secs, instance_id
         );
 
         let resp = self
@@ -398,6 +400,7 @@ struct InitConfig {
 #[derive(Debug, Deserialize)]
 struct CreateMachineResponse {
     id: String,
+    instance_id: String,
     #[allow(dead_code)]
     name: Option<String>,
     region: Option<String>,
