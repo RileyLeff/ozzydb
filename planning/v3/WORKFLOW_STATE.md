@@ -1,7 +1,7 @@
 # v3 Workflow State
 
-## Current Phase: COMPLETE
-## Current Step: All phases deployed
+## Current Phase: v3.1 COMPLETE
+## Current Step: All steps implemented, ready for review
 
 ## Completed Steps
 
@@ -130,37 +130,9 @@
 
 #### Phase 3 Exhaustive Review (IN PROGRESS)
 - Round 1: 11 fixes applied (M1-M4, m1-m4, m8, n7, secrets TTL)
-  - M1: OZZY_INPUT_DOWNLOADS presigned URLs for Fly inputs
-  - M2: Tarball extraction safety settings
-  - M3: Rate limit TOCTOU documented as advisory
-  - M4: Presigned PUT URL TTL = timeout+5min
-  - m1: Raw response logging for exit_code debugging
-  - m2: Orphan max_age derived from config timeout
-  - m3: Conditional input downloads in init script
-  - m4: Secrets cleanup on all error paths (scope guard)
-  - m8: Unset sensitive env vars before user code
-  - n7: Default exit_code=-1 on state fetch failure
-  - Secrets presigned GET URL TTL = timeout+5min
-- Review fix commit: `c0a934c`
 - Round 2: 4 fixes applied (M1 input population, M2 input TTL, m1 double resolution, m2 download paths)
-  - M1: Orchestrator now builds proper InputSpec from resolved edges
-  - M2: Input download presigned URL TTL = timeout+300 (was 3600)
-  - m1: Reuse already-resolved input hashes for Fly downloads
-  - m2: Download dest paths match manifest format (/workspace/inputs/{name})
-  - Added resolve_input_content_type helper
-- Review fix commit: `715d893`
-- Models: Claude Opus only (Gemini: E2BIG, Codex: context too large)
 - Round 3: 5 fixes applied (M1 source delivery, M2 input cleanup, m1 exit_code fallback, m2 doc, m3 safety comment)
-  - M1: Fly source code delivery — upload tarball to R2, presigned download, init script extracts to /workspace/source/
-  - M2: Docker input temp files cleaned up after compute (prevents disk leak)
-  - m1: Fallback exit_code parsing from Fly events array (nested exit_event.exit_code)
-  - m2: Documented python3/curl requirement for Fly environment images
-  - m3: Safety comment on source_dir TempDir lifetime
-- Review fix commit: `117c4cc`
 - Round 4: 2 fixes applied (client timeout shadow, dead code)
-  - minor-1: Removed hardcoded 600s reqwest client timeout (was shadowing per-request timeouts)
-  - minor-2: Removed dead input_hashes_snapshot code in orchestrator wave loop
-- Review fix commit: `e031bb0`
 - Rounds 5-6: CLEAN (convergence reached — 2 consecutive clean rounds)
 
 ### Phase 4: Admin Dashboard (COMPLETE)
@@ -268,7 +240,7 @@ All phases deployed to production:
 
 ---
 
-## v3.1: Multi-Provider Compute + Storage Cleanup (IN PROGRESS)
+## v3.1: Multi-Provider Compute + Storage Cleanup (COMPLETE)
 
 See `planning/v3/v3.1_compute_providers.md` for full plan.
 
@@ -297,10 +269,40 @@ See `planning/v3/v3.1_compute_providers.md` for full plan.
 - Removed all is_fly branching from orchestrator (~6 branch points eliminated)
 - Secrets always delivered via R2 presigned URL (not raw env vars)
 - Source code always uploaded to R2 for container download
-- BackendSelector::from_config() now requires &ContentStorage (was Option)
 - Commit: `b21dc40`
 
-### Step 4: Slim ComputeRequest/ComputeResult (NEXT)
-### Step 5: ComputeRegistry (replace BackendSelector)
-### Step 6: Config restructure
-### Step 7: Final cleanup
+### Step 4: Slim ComputeRequest/ComputeResult (COMPLETE)
+- Removed from ComputeRequest: runner_script, runner_ext, init_script, inputs, source_dir, network, runtime
+- Removed from ComputeResult: output_dir, workspace_dir, cleanup()
+- Removed local_path from InputSpec
+- Moved build_input_manifest() and build_param_env_vars() to types.rs
+- Orchestrator encodes all I/O (init/runner scripts, determinism vars, output URL) into env_vars
+- Orchestrator downloads output tarball from R2 after compute
+- Commit: `0a43ccb`
+
+### Step 5: ComputeRegistry (COMPLETE)
+- Replaced BackendSelector enum with ComputeRegistry (HashMap<String, Arc<dyn ComputeBackend>>)
+- ComputeBackend trait uses boxed futures for object safety (dyn dispatch)
+- ComputeRegistry::resolve(machine) looks up named providers or falls back to default
+- AppState.compute is now ComputeRegistry (not Option<BackendSelector>)
+- Added GET /v1/compute/providers endpoint
+- Added COMPUTE_DEFAULT_PROVIDER config option
+- Orchestrator passes node_def.machine to resolve() for per-node backend selection
+- Commit: `fa6751d`
+
+### Step 6: Config restructure (COMPLETE)
+- Split ComputeConfig into global (timeout_secs, tmpdir, default_provider) + DockerProviderConfig (enabled, runtime, memory_limit, cpu_limit)
+- Resource limits now live in DockerBackend config (not in ComputeRequest)
+- Env vars renamed: COMPUTE_ENABLED → DOCKER_COMPUTE_ENABLED, etc. (backwards compat maintained)
+- Updated all docker-compose files and env examples
+- Commit: `c313192`
+
+### Step 7: Final cleanup (COMPLETE)
+- R2/S3 now required in prod compose (was optional)
+- Updated .env.prod.example with new provider-specific env var names
+- Removed stale COMPUTE_TMPFS_SIZE references
+- Commit: `c849338`
+
+### Exhaustive Review: PENDING
+- All 7 steps implemented and committed
+- Ready for exhaustive review loop (2 consecutive clean rounds required)
