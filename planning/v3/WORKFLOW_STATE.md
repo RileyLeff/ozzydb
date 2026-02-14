@@ -309,3 +309,12 @@ See `planning/v3/v3.1_compute_providers.md` for full plan.
 - Round 3: CLEAN
 - Review fix commits: `3b8f906`, `0295059`
 - Models: Claude Opus only (~377k tokens, exceeds Codex/Gemini limits)
+
+### Deployment: v3.1 deployed to production (2026-02-14)
+- Pushed all v3.1 commits to GitHub
+- Pulled on VPS, updated .env.prod with new env var names
+- Rebuilt server Docker image, restarted services
+- R2 storage live: `https://983eaa1bf70a5df64e477fbe4a50aaf5.r2.cloudflarestorage.com/ozzydb`
+- Compute providers: docker + fly (default: fly)
+- Health check passed: `https://api.ozzydb.com/health` → `{"status":"ok","version":"0.1.0"}`
+- Frontend serving: `https://ozzydb.com` → 200 OK

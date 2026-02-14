@@ -281,7 +281,8 @@ impl GitHubAppConfig {
             .ok()?;
         let private_key = std::env::var("GITHUB_APP_PRIVATE_KEY")
             .ok()
-            .filter(|s| !s.is_empty())?;
+            .filter(|s| !s.is_empty())
+            .map(|s| s.replace("\\n", "\n"))?;
         let webhook_secret = std::env::var("GITHUB_WEBHOOK_SECRET")
             .ok()
             .filter(|s| !s.is_empty());
