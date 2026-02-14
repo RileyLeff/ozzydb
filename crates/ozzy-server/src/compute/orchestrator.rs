@@ -428,6 +428,7 @@ async fn execute_node(
         "PYTHONDONTWRITEBYTECODE",
         "PYTHONUNBUFFERED",
     ];
+    let mut secrets_cleanup_key: Option<String> = None;
     if !transform_def.secrets.is_empty() {
         let enc_key = state
             .config
@@ -439,6 +440,9 @@ async fn execute_node(
                     node_def.transform
                 )
             })?;
+
+        // Decrypt all secrets
+        let mut decrypted_secrets: HashMap<String, String> = HashMap::new();
         for secret_name in &transform_def.secrets {
             if secret_name.starts_with("OZZY_") {
                 anyhow::bail!("Secret '{}' uses reserved prefix 'OZZY_'", secret_name);
@@ -461,11 +465,28 @@ async fn execute_node(
                 })?;
             let decrypted =
                 super::super::api::v1::fetch::decrypt_secret(&secret.encrypted_value, enc_key)?;
-            env_vars.insert(secret_name.clone(), decrypted);
+            decrypted_secrets.insert(secret_name.clone(), decrypted);
+        }
+
+        if is_fly {
+            // Fly: upload secrets to R2, pass presigned URL as env var
+            let prepared = super::secrets::prepare_secrets(
+                &state.storage,
+                job_id,
+                &decrypted_secrets,
+            )
+            .await?;
+            env_vars.insert("OZZY_SECRETS_URL".to_string(), prepared.url);
+            secrets_cleanup_key = Some(prepared.r2_key);
+        } else {
+            // Docker: inject as raw env vars (container is local)
+            for (name, value) in decrypted_secrets {
+                env_vars.insert(name, value);
+            }
         }
     }
 
-    // Execute via Docker
+    // Execute via compute backend
     let compute_request = crate::compute::ComputeRequest {
         image: env_image_ref,
         runner_script,
@@ -490,6 +511,10 @@ async fn execute_node(
         let logs = result.logs.clone();
         let exit_code = result.exit_code;
         result.cleanup().await;
+        // Clean up secrets blob (best-effort)
+        if let Some(ref key) = secrets_cleanup_key {
+            let _ = super::secrets::cleanup_secrets(&state.storage, key).await;
+        }
         anyhow::bail!(
             "Transform '{}' failed (exit {}): {}",
             node_def.transform,
@@ -516,6 +541,10 @@ async fn execute_node(
     }
     .await;
     result.cleanup().await;
+    // Clean up secrets blob (best-effort)
+    if let Some(ref key) = secrets_cleanup_key {
+        let _ = super::secrets::cleanup_secrets(&state.storage, key).await;
+    }
     let (output_bytes, output_content_type) = read_result?;
     let output_hash = ozzy_core::hash::blake3_hash(&output_bytes);
     let output_byte_size = output_bytes.len() as i64;

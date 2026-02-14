@@ -9,6 +9,7 @@ pub mod environments;
 pub mod fly;
 pub mod orchestrator;
 pub mod rate_limit;
+pub mod secrets;
 pub mod types;
 
 pub use types::{ComputeBackend, ComputeRequest, ComputeResult, InputSpec};

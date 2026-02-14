@@ -67,6 +67,26 @@ set -e
 
 echo "OzzyDB init: starting (Fly mode)"
 
+# Download and export secrets (if OZZY_SECRETS_URL is set)
+if [ -n "$OZZY_SECRETS_URL" ]; then
+    python3 -c "
+import json, os, sys, urllib.request
+try:
+    data = urllib.request.urlopen(os.environ['OZZY_SECRETS_URL']).read()
+    secrets = json.loads(data)
+    with open('/tmp/secrets.env', 'w') as f:
+        for k, v in secrets.items():
+            v_esc = v.replace(chr(39), chr(39)+chr(92)+chr(39)+chr(39))
+            f.write('export ' + k + '=' + chr(39) + v_esc + chr(39) + chr(10))
+    print('Loaded ' + str(len(secrets)) + ' secret(s)')
+except Exception as e:
+    print('ERROR: Failed to load secrets: ' + str(e), file=sys.stderr)
+    sys.exit(1)
+" || exit 1
+    . /tmp/secrets.env
+    rm -f /tmp/secrets.env
+fi
+
 # Decode runner script from env var
 echo "$OZZY_RUNNER_SCRIPT_B64" | base64 -d > /workspace/runner.{runner_ext}
 chmod +x /workspace/runner.{runner_ext}
@@ -153,6 +173,14 @@ mod tests {
         let script = generate_fly_init(RunnerType::R);
         assert!(script.contains("base64 -d > /workspace/runner.R"));
         assert!(script.contains("Rscript /workspace/runner.R"));
+    }
+
+    #[test]
+    fn test_fly_init_loads_secrets() {
+        let script = generate_fly_init(RunnerType::Python);
+        assert!(script.contains("OZZY_SECRETS_URL"));
+        assert!(script.contains("/tmp/secrets.env"));
+        assert!(script.contains("urllib.request"));
     }
 
     #[test]

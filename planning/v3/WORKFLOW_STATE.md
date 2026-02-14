@@ -115,7 +115,18 @@
 - Anonymous users: global limit only; authenticated: per-user + global
 - Commit: (pending)
 
+#### Step 3.4: Orphan machine cleanup
+- cleanup_orphans() method on FlyBackend (age-based, ozzy-job-* naming convention)
+- Periodic tokio background task (every 5 min, 30 min age threshold)
+- Commit: `c056eb0`
+
+#### Step 3.5: Secrets delivery for compute
+- compute/secrets.rs: prepare_secrets() uploads JSON blob to R2, returns presigned GET URL
+- Orchestrator uses presigned URL for Fly (OZZY_SECRETS_URL), raw env vars for Docker
+- Fly init script downloads + exports secrets via Python urllib
+- Cleanup of R2 blob on both success and failure paths
+- Added store_by_key() and presigned_get_url_by_key() to ContentStorage
+- Commit: (pending)
+
 ## What's Next
-- Step 3.4: Orphan machine cleanup
-- Step 3.5: Secrets delivery for compute
 - Phase 3 exhaustive review

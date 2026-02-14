@@ -737,6 +737,45 @@ impl ContentStorage {
         Ok(())
     }
 
+    /// Store bytes under a raw R2/S3 key (not content-addressed).
+    ///
+    /// Used for temporary objects like secrets blobs.
+    pub async fn store_by_key(&self, key: &str, bytes: &[u8]) -> Result<()> {
+        let remote = self
+            .remote_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Cannot store_by_key: R2/S3 not configured"))?;
+        let path = ObjectPath::from(key);
+        remote
+            .put(&path, bytes::Bytes::copy_from_slice(bytes).into())
+            .await
+            .with_context(|| format!("Failed to store object by key: {}", key))?;
+        Ok(())
+    }
+
+    /// Generate a presigned GET URL for a raw R2/S3 key (not content-addressed).
+    ///
+    /// Used for temporary objects like secrets blobs.
+    pub async fn presigned_get_url_by_key(
+        &self,
+        key: &str,
+        ttl: Duration,
+    ) -> Result<String> {
+        let client = self.s3_client.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Cannot generate presigned URL: R2/S3 not configured")
+        })?;
+        let bucket = self.bucket.as_ref().unwrap();
+        let presigning = PresigningConfig::expires_in(ttl).context("Invalid presigning TTL")?;
+        let presigned = client
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .presigned(presigning)
+            .await
+            .context("Failed to generate presigned GET URL")?;
+        Ok(presigned.uri().to_string())
+    }
+
     /// Store content from a stream, hashing on the fly.
     ///
     /// Returns `(content_hash, byte_size)`. For files ≤5MB, uses a single PutObject.

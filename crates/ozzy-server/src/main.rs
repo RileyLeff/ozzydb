@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
     };
 
     // Spawn periodic orphan cleanup for Fly backend
-    if let Some(fly) = compute.as_ref().and_then(|c| c.as_fly()) {
+    if let Some(fly) = state.compute.as_ref().and_then(|c| c.as_fly()) {
         let fly_clone = fly.clone();
         tokio::spawn(async move {
             let interval = std::time::Duration::from_secs(5 * 60); // every 5 minutes
