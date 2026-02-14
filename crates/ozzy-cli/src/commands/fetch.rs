@@ -27,7 +27,12 @@ struct JobStatus {
 }
 
 /// Execute `ozzy fetch <owner/project/endpoint[@ref]>`.
-pub async fn run(endpoint: &str, output: Option<&str>, params: &[String], timeout_secs: u64) -> Result<()> {
+pub async fn run(
+    endpoint: &str,
+    output: Option<&str>,
+    params: &[String],
+    timeout_secs: u64,
+) -> Result<()> {
     // Parse reference: owner/project/endpoint[@ref]
     let (path, git_ref) = match endpoint.split_once('@') {
         Some((p, r)) => (p, Some(r)),
@@ -130,11 +135,7 @@ pub async fn run(endpoint: &str, output: Option<&str>, params: &[String], timeou
         tokio::time::sleep(poll_interval).await;
 
         if poll_start.elapsed() > timeout {
-            bail!(
-                "Job {} did not complete within {}s",
-                job_id,
-                timeout_secs
-            );
+            bail!("Job {} did not complete within {}s", job_id, timeout_secs);
         }
 
         let mut request = client.get(&poll_url);

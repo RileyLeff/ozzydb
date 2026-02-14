@@ -236,12 +236,9 @@ async fn fetch_endpoint(
     // the check before job creation (TOCTOU). This is standard for rate limiters
     // and acceptable since the limits are for resource protection, not billing.
     if let Some(user_id) = auth_user_id {
-        if let Err(e) = crate::compute::rate_limit::check_limits(
-            &state.db,
-            &state.config.rate_limit,
-            user_id,
-        )
-        .await
+        if let Err(e) =
+            crate::compute::rate_limit::check_limits(&state.db, &state.config.rate_limit, user_id)
+                .await
         {
             return Err(ApiError::TooManyRequests(e.to_string()));
         }

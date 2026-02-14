@@ -41,9 +41,7 @@ pub async fn prepare_secrets(
 
     // Generate a presigned GET URL (timeout + 5 min buffer)
     let ttl = std::time::Duration::from_secs(timeout_secs + 300);
-    let url = storage
-        .presigned_get_url_by_key(&r2_key, ttl)
-        .await?;
+    let url = storage.presigned_get_url_by_key(&r2_key, ttl).await?;
 
     Ok(PreparedSecrets { url, r2_key })
 }

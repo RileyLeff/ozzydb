@@ -756,11 +756,7 @@ impl ContentStorage {
     /// Generate a presigned GET URL for a raw R2/S3 key (not content-addressed).
     ///
     /// Used for temporary objects like secrets blobs.
-    pub async fn presigned_get_url_by_key(
-        &self,
-        key: &str,
-        ttl: Duration,
-    ) -> Result<String> {
+    pub async fn presigned_get_url_by_key(&self, key: &str, ttl: Duration) -> Result<String> {
         let client = self.s3_client.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Cannot generate presigned URL: R2/S3 not configured")
         })?;

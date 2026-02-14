@@ -46,9 +46,7 @@ impl BackendSelector {
                         compute_config.tmpdir.clone(),
                     )));
                 }
-                tracing::warn!(
-                    "Fly config present but R2 not configured — falling back to Docker"
-                );
+                tracing::warn!("Fly config present but R2 not configured — falling back to Docker");
             } else {
                 tracing::warn!(
                     "Fly config present but no storage available — falling back to Docker"
@@ -71,9 +69,7 @@ impl BackendSelector {
             Self::Docker(backend) => {
                 <docker::DockerBackend as ComputeBackend>::run(backend, request).await
             }
-            Self::Fly(backend) => {
-                <fly::FlyBackend as ComputeBackend>::run(backend, request).await
-            }
+            Self::Fly(backend) => <fly::FlyBackend as ComputeBackend>::run(backend, request).await,
         }
     }
 
@@ -153,8 +149,7 @@ mod tests {
             cpus: 1,
             memory_mb: 512,
         };
-        let backend =
-            BackendSelector::from_config(&compute_config, Some(&fly_config), None);
+        let backend = BackendSelector::from_config(&compute_config, Some(&fly_config), None);
         // Falls back to Docker since no storage is available
         assert!(backend.is_some());
         assert!(!backend.unwrap().is_fly());
@@ -181,8 +176,7 @@ mod tests {
             cpus: 1,
             memory_mb: 512,
         };
-        let backend =
-            BackendSelector::from_config(&compute_config, Some(&fly_config), None);
+        let backend = BackendSelector::from_config(&compute_config, Some(&fly_config), None);
         assert!(backend.is_none());
     }
 }
