@@ -194,14 +194,13 @@ async fn fetch_endpoint(
         // - source transforms: hash the actual file contents
         // - command transforms: hash the command string
         let (source_hash, function_name) = if let Some(source) = &transform_def.source {
-            let (file_path, func) = crate::runners::parse_source_ref(source)
-                .ok_or_else(|| {
-                    ApiError::Internal(anyhow::anyhow!(
-                        "Invalid source ref '{}' for transform '{}'",
-                        source,
-                        node_def.transform
-                    ))
-                })?;
+            let (file_path, func) = crate::runners::parse_source_ref(source).ok_or_else(|| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "Invalid source ref '{}' for transform '{}'",
+                    source,
+                    node_def.transform
+                ))
+            })?;
             let hash = if let Some(ref sd) = source_dir {
                 let full_path = sd.path().join(file_path);
                 // Verify path stays within source dir (defense-in-depth)
@@ -222,8 +221,7 @@ async fn fetch_endpoint(
                     .unwrap_or_else(|_| {
                         // Fallback: hash source ref + commit SHA if file not extractable
                         ozzy_core::hash::blake3_hash(
-                            format!("{}:{}", node_def.transform, commit.git_commit_sha)
-                                .as_bytes(),
+                            format!("{}:{}", node_def.transform, commit.git_commit_sha).as_bytes(),
                         )
                     })
             } else {
@@ -504,11 +502,13 @@ async fn fetch_endpoint(
         let output_ext = content_type_to_extension(&output_content_type);
 
         // Store output in content storage (content-addressed by output_hash)
-        state.storage
+        state
+            .storage
             .store(&output_bytes, &output_ext)
             .await
             .map_err(ApiError::Internal)?;
-        let output_r2_key = state.storage
+        let output_r2_key = state
+            .storage
             .storage_key(&output_hash, &output_ext)
             .map_err(ApiError::Internal)?;
 
@@ -561,7 +561,8 @@ async fn fetch_endpoint(
 
     // Fetch the output bytes from storage
     let final_ext = content_type_to_extension(&final_output.content_type);
-    let output_bytes = state.storage
+    let output_bytes = state
+        .storage
         .get(&final_output.output_hash, &final_ext)
         .await
         .map_err(ApiError::Internal)?;

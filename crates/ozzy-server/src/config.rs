@@ -148,7 +148,7 @@ impl Config {
                 .unwrap_or_else(|_| "/tmp/ozzydb-content".into()),
             r2: R2Config::from_env_optional(),
             max_upload_size_bytes: std::env::var("MAX_UPLOAD_SIZE_BYTES")
-                .unwrap_or_else(|_| "104857600".into()) // 100MB default
+                .unwrap_or_else(|_| "10737418240".into()) // 10GB default
                 .parse()
                 .context("MAX_UPLOAD_SIZE_BYTES must be a number")?,
             cors_origins: std::env::var("CORS_ORIGINS").unwrap_or_else(|_| "*".into()),

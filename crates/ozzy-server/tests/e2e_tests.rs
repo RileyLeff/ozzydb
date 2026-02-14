@@ -407,10 +407,7 @@ fn test_compute_pipeline_output_content() {
             .get("x-ozzydb-hash")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        assert!(
-            !hash_header.is_empty(),
-            "X-OzzyDB-Hash should be non-empty"
-        );
+        assert!(!hash_header.is_empty(), "X-OzzyDB-Hash should be non-empty");
 
         // Parse CSV body
         let body = resp.text().await.unwrap();
@@ -582,18 +579,22 @@ fn test_compute_pipeline_yank_blocks_fetch() {
         let ctx = setup_param_only_test(s, "yank").await;
 
         // Get user ID for yanked_by
-        let user = s
-            .db
-            .get_user_by_username(&ctx.owner)
-            .await
-            .unwrap()
-            .unwrap();
+        let user =
+            s.db.get_user_by_username(&ctx.owner)
+                .await
+                .unwrap()
+                .unwrap();
 
         // Yank the endpoint
-        s.db
-            .insert_endpoint_yank(ctx.project_id, "generate-data", ctx.commit_id, "test yank", user.id)
-            .await
-            .expect("Failed to yank endpoint");
+        s.db.insert_endpoint_yank(
+            ctx.project_id,
+            "generate-data",
+            ctx.commit_id,
+            "test yank",
+            user.id,
+        )
+        .await
+        .expect("Failed to yank endpoint");
 
         let resp = s
             .client
@@ -815,10 +816,7 @@ fn test_endpoint_inspection() {
         let dag: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(dag["format"], "mermaid");
         let content = dag["content"].as_str().unwrap_or("");
-        assert!(
-            content.contains("graph"),
-            "Mermaid should contain 'graph'"
-        );
+        assert!(content.contains("graph"), "Mermaid should contain 'graph'");
     });
 }
 

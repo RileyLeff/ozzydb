@@ -82,10 +82,7 @@ async fn list_commits(
     enforce_read_access(&state, &project, &owner, &slug, &auth).await?;
 
     let limit = query.limit.max(1).min(100);
-    let commits = state
-        .db
-        .list_commits(project.id, limit)
-        .await?;
+    let commits = state.db.list_commits(project.id, limit).await?;
 
     let mut summaries = Vec::with_capacity(commits.len());
     for c in commits {

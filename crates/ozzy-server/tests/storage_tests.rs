@@ -466,3 +466,155 @@ async fn test_presigned_url_without_remote_fails() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_store_stream_small_file() -> Result<()> {
+    if should_skip_r2_tests() {
+        eprintln!("Skipping R2 tests - no credentials configured");
+        return Ok(());
+    }
+
+    let config = get_test_config().unwrap();
+    let storage = ContentStorage::with_prefix(&config, test_prefix())?;
+
+    // Small file (< 5MB) should use single PutObject
+    let content = b"small file content for streaming upload test";
+    let expected_hash = ozzy_core::hash::blake3_hash(content);
+
+    let stream = futures::stream::once(async {
+        Ok::<_, std::io::Error>(bytes::Bytes::from_static(content))
+    });
+    let (hash, size) = storage.store_stream(Box::pin(stream), "txt").await?;
+
+    assert_eq!(hash, expected_hash);
+    assert_eq!(size, content.len() as u64);
+
+    // Verify content is retrievable
+    let retrieved = storage.get(&hash, "txt").await?;
+    assert_eq!(&retrieved[..], content);
+
+    // Cleanup
+    storage.delete(&hash, "txt").await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_store_stream_large_file() -> Result<()> {
+    if should_skip_r2_tests() {
+        eprintln!("Skipping R2 tests - no credentials configured");
+        return Ok(());
+    }
+
+    let config = get_test_config().unwrap();
+    let storage = ContentStorage::with_prefix(&config, test_prefix())?;
+
+    // Large file (> 5MB) should use multipart upload
+    // Create 6MB of data, split into 1MB chunks
+    let chunk_size = 1024 * 1024; // 1MB
+    let num_chunks = 6;
+    let full_content: Vec<u8> = (0..(chunk_size * num_chunks))
+        .map(|i| (i % 256) as u8)
+        .collect();
+    let expected_hash = ozzy_core::hash::blake3_hash(&full_content);
+
+    let chunks: Vec<bytes::Bytes> = full_content
+        .chunks(chunk_size)
+        .map(|c| bytes::Bytes::copy_from_slice(c))
+        .collect();
+
+    let stream = futures::stream::iter(chunks.into_iter().map(Ok::<_, std::io::Error>));
+    let (hash, size) = storage.store_stream(Box::pin(stream), "bin").await?;
+
+    assert_eq!(hash, expected_hash);
+    assert_eq!(size, full_content.len() as u64);
+
+    // Verify content is retrievable and matches
+    let retrieved = storage.get(&hash, "bin").await?;
+    assert_eq!(retrieved.len(), full_content.len());
+    assert_eq!(&retrieved[..], &full_content[..]);
+
+    // Cleanup
+    storage.delete(&hash, "bin").await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_store_stream_hash_matches_buffered() -> Result<()> {
+    if should_skip_r2_tests() {
+        eprintln!("Skipping R2 tests - no credentials configured");
+        return Ok(());
+    }
+
+    let config = get_test_config().unwrap();
+    let storage = ContentStorage::with_prefix(&config, test_prefix())?;
+
+    // Verify that streaming and buffered produce the same hash
+    let content = b"verify hash consistency between stream and buffer paths";
+    let buffered_hash = storage.store(content, "txt").await?;
+
+    let stream = futures::stream::once(async {
+        Ok::<_, std::io::Error>(bytes::Bytes::from_static(content))
+    });
+    let (stream_hash, _) = storage.store_stream(Box::pin(stream), "txt").await?;
+
+    assert_eq!(buffered_hash, stream_hash);
+
+    // Cleanup
+    storage.delete(&buffered_hash, "txt").await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_store_stream_local_fallback() -> Result<()> {
+    // Test that store_stream works without R2 (local-only mode)
+    let dir = tempfile::tempdir()?;
+    use ozzy_server::config::Config;
+
+    let storage = ContentStorage::from_config_with_prefix(
+        &Config {
+            bind_address: "0.0.0.0:3000".into(),
+            database_url: "postgres://localhost/test".into(),
+            db_max_connections: 5,
+            github_client_id: "test".into(),
+            github_client_secret: "test".into(),
+            base_url: "http://localhost:3000".into(),
+            cache_dir: dir.path().to_str().unwrap().into(),
+            r2: None,
+            max_upload_size_bytes: 100_000_000,
+            cors_origins: "*".into(),
+            allowed_logins: vec![],
+            secrets_encryption_key: None,
+            github_app: None,
+            compute: ozzy_server::config::ComputeConfig {
+                enabled: false,
+                docker_runtime: None,
+                memory_limit: "2g".into(),
+                cpu_limit: "1".into(),
+                timeout_secs: 300,
+                tmpdir: "/tmp".into(),
+                tmpfs_size: "512m".into(),
+            },
+        },
+        "test",
+    )?;
+
+    let content = b"local-only streaming test content";
+    let expected_hash = ozzy_core::hash::blake3_hash(content);
+
+    let stream = futures::stream::once(async {
+        Ok::<_, std::io::Error>(bytes::Bytes::from_static(content))
+    });
+    let (hash, size) = storage.store_stream(Box::pin(stream), "txt").await?;
+
+    assert_eq!(hash, expected_hash);
+    assert_eq!(size, content.len() as u64);
+
+    // Verify content is retrievable locally
+    let retrieved = storage.get(&hash, "txt").await?;
+    assert_eq!(&retrieved[..], content);
+
+    Ok(())
+}

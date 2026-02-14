@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 # Internal
 ozzy-core.workspace = true
+blake3.workspace = true
 
 # Async runtime
 tokio.workspace = true
