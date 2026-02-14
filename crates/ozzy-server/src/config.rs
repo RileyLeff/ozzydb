@@ -83,6 +83,10 @@ pub struct Config {
 
     /// Rate limiting configuration for compute jobs.
     pub rate_limit: RateLimitConfig,
+
+    /// Dev mode: auto-create a user with this username on startup
+    /// and print an auth token. Set via DEV_AUTO_USER env var.
+    pub dev_auto_user: Option<String>,
 }
 
 /// Compute configuration for Docker-based environment building and execution.
@@ -197,6 +201,9 @@ impl Config {
             compute: ComputeConfig::from_env(),
             fly: FlyConfig::from_env_optional(),
             rate_limit: RateLimitConfig::from_env(),
+            dev_auto_user: std::env::var("DEV_AUTO_USER")
+                .ok()
+                .filter(|s| !s.is_empty()),
         })
     }
 }

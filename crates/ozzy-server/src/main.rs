@@ -59,6 +59,40 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Dev mode: auto-create user and print auth token
+    if let Some(ref username) = config.dev_auto_user {
+        let db_tmp = Database::new(pool.clone());
+        let user = sqlx::query_as::<_, ozzy_server::db::models::User>(
+            r#"
+            INSERT INTO users (id, username, display_name, is_admin)
+            VALUES ($1, $2, $3, true)
+            ON CONFLICT (username) DO UPDATE SET display_name = EXCLUDED.display_name
+            RETURNING *
+            "#,
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(username)
+        .bind(username)
+        .fetch_one(&pool)
+        .await?;
+
+        // Clean up old dev tokens, then create a fresh one
+        sqlx::query("DELETE FROM api_tokens WHERE user_id = $1 AND name = 'dev-token'")
+            .bind(user.id)
+            .execute(&pool)
+            .await?;
+        let raw_token = format!("ozzy_dev_{}", uuid::Uuid::new_v4().simple());
+        let token_hash = ozzy_core::hash::blake3_hash(raw_token.as_bytes());
+        db_tmp
+            .create_token(user.id, "dev-token", &token_hash, "account", None, None)
+            .await?;
+
+        tracing::info!("=== DEV MODE ===");
+        tracing::info!("Auto-created user: {} (admin)", username);
+        tracing::info!("Auth token: {}", raw_token);
+        tracing::info!("================");
+    }
+
     // Initialize git provider
     let db = Database::new(pool);
     let git_app_config = config.github_app.as_ref().map(|app| {

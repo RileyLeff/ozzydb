@@ -1,0 +1,109 @@
+# Local development Docker Compose
+# MinIO (S3-compatible) + PostgreSQL + ozzy-server
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d
+#   # Server logs: docker compose -f docker-compose.dev.yml logs -f server
+#   # Look for "Auth token:" in the logs to get a dev token
+#
+# The server auto-creates an admin user ("dev") and prints an auth
+# token on startup. Use that token for CLI and API requests.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: ozzy-dev-postgres
+    environment:
+      POSTGRES_USER: ozzy
+      POSTGRES_PASSWORD: ozzy_dev_password
+      POSTGRES_DB: ozzy
+    volumes:
+      - dev_postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ozzy -d ozzy"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: ozzy-dev-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - dev_minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Create the MinIO bucket on first startup
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin;
+        mc mb --ignore-existing local/ozzy-content;
+        echo 'Bucket ozzy-content ready';
+      "
+
+  server:
+    build:
+      context: .
+      dockerfile: crates/ozzy-server/docker/Dockerfile
+    container_name: ozzy-dev-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      BIND_ADDRESS: "0.0.0.0:3000"
+      DATABASE_URL: "postgres://ozzy:ozzy_dev_password@postgres:5432/ozzy"
+      BASE_URL: "http://localhost:3000"
+      # Dummy GitHub OAuth (not used — DEV_AUTO_USER bypasses OAuth)
+      GITHUB_CLIENT_ID: "dev-placeholder"
+      GITHUB_CLIENT_SECRET: "dev-placeholder"
+      # MinIO as S3-compatible storage
+      R2_ENDPOINT: "http://minio:9000"
+      R2_BUCKET: "ozzy-content"
+      R2_ACCESS_KEY_ID: "minioadmin"
+      R2_SECRET_ACCESS_KEY: "minioadmin"
+      R2_REGION: "us-east-1"
+      # Dev mode: auto-create admin user + print token
+      DEV_AUTO_USER: "dev"
+      # Compute (Docker backend, no gVisor in dev)
+      COMPUTE_ENABLED: "true"
+      TMPDIR: /tmp/ozzy
+      # No login restriction in dev
+      ALLOWED_LOGINS: ""
+      CORS_ORIGINS: "*"
+      RUST_LOG: "debug,ozzy_server=trace,sqlx=warn"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Bind mount (not volume) so compute containers spawned via Docker
+      # socket can access the same tmpdir on the host
+      - /tmp/ozzy-dev:/tmp/ozzy
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  dev_postgres_data:
+  dev_minio_data:
