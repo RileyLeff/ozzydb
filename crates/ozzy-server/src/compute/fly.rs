@@ -69,9 +69,11 @@ impl ComputeBackend for FlyBackend {
 
         // Generate a temp R2 key for the output tarball
         let output_temp_key = format!("fly-output/{}.tar.gz", job_uuid);
+        // TTL = compute timeout + 5 min buffer (not a fixed 4 hours)
+        let put_ttl = std::time::Duration::from_secs(request.timeout_secs + 300);
         let output_upload_url = self
             .storage
-            .presigned_put_url(&output_temp_key, std::time::Duration::from_secs(14400))
+            .presigned_put_url(&output_temp_key, put_ttl)
             .await
             .context("Failed to generate presigned PUT URL for output")?;
 
@@ -202,7 +204,7 @@ impl ComputeBackend for FlyBackend {
                     }
                     Err(e) => {
                         tracing::warn!("Failed to get machine state for {}: {}", machine_id, e);
-                        (0, String::new())
+                        (-1, String::new())
                     }
                 }
             }
@@ -309,9 +311,10 @@ impl FlyBackend {
             anyhow::bail!("Failed to get machine state ({}): {}", status, body);
         }
 
-        resp.json()
-            .await
-            .context("Failed to parse machine state response")
+        // Log raw response for debugging exit_code location in Fly API
+        let body = resp.text().await.context("Failed to read machine state body")?;
+        tracing::debug!("Fly Machine {} state response: {}", machine_id, body);
+        serde_json::from_str(&body).context("Failed to parse machine state response")
     }
 
     /// Destroy a machine (force=true to skip grace period).
@@ -373,10 +376,13 @@ impl FlyBackend {
         // Download the tarball bytes from R2 via the storage client
         let tarball_bytes = self.storage.get_by_key(temp_key).await?;
 
-        // Extract tar.gz to output_dir
+        // Extract tar.gz to output_dir (with safety settings for untrusted archives)
         let cursor = std::io::Cursor::new(&tarball_bytes);
         let gz = flate2::read::GzDecoder::new(cursor);
         let mut archive = tar::Archive::new(gz);
+        archive.set_preserve_permissions(false);
+        archive.set_unpack_xattrs(false);
+        archive.set_overwrite(false);
 
         archive
             .unpack(output_dir)

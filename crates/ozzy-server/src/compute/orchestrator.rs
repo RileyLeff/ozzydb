@@ -415,6 +415,32 @@ async fn execute_node(
         env_vars.insert(key, value);
     }
 
+    // For Fly: build presigned download URLs for each input
+    if is_fly {
+        let mut downloads: Vec<serde_json::Value> = Vec::new();
+        for (input_name, source) in edges_for_node {
+            let hash = resolve_edge_source(source, state, project_id, node_outputs).await?;
+            // Determine extension from data atom or default to "bin"
+            let ext = "bin";
+            let url = state
+                .storage
+                .presigned_get_url(&hash, ext, std::time::Duration::from_secs(3600))
+                .await?;
+            let dest_path = format!("/workspace/inputs/{}/{}.{}", input_name, hash.get(..12).unwrap_or(&hash), ext);
+            downloads.push(serde_json::json!({
+                "name": input_name,
+                "url": url,
+                "path": dest_path,
+            }));
+        }
+        if !downloads.is_empty() {
+            env_vars.insert(
+                "OZZY_INPUT_DOWNLOADS".to_string(),
+                serde_json::to_string(&downloads).unwrap_or_default(),
+            );
+        }
+    }
+
     // Inject secrets
     const RESERVED_SECRET_NAMES: &[&str] = &[
         "PATH",
@@ -474,6 +500,7 @@ async fn execute_node(
                 &state.storage,
                 job_id,
                 &decrypted_secrets,
+                state.config.compute.timeout_secs,
             )
             .await?;
             env_vars.insert("OZZY_SECRETS_URL".to_string(), prepared.url);
@@ -502,50 +529,54 @@ async fn execute_node(
         source_dir: source_dir.map(|p| p.to_path_buf()),
     };
 
-    let result = backend
-        .run(&compute_request)
-        .await
-        .map_err(|e| anyhow::anyhow!("Compute execution failed: {}", e))?;
+    // Execute compute and read output, ensuring secrets cleanup on all paths
+    let compute_result: Result<(Vec<u8>, String, u64), anyhow::Error> = async {
+        let result = backend
+            .run(&compute_request)
+            .await
+            .map_err(|e| anyhow::anyhow!("Compute execution failed: {}", e))?;
 
-    if !result.success() {
-        let logs = result.logs.clone();
-        let exit_code = result.exit_code;
-        result.cleanup().await;
-        // Clean up secrets blob (best-effort)
-        if let Some(ref key) = secrets_cleanup_key {
-            let _ = super::secrets::cleanup_secrets(&state.storage, key).await;
+        if !result.success() {
+            let logs = result.logs.clone();
+            let exit_code = result.exit_code;
+            result.cleanup().await;
+            anyhow::bail!(
+                "Transform '{}' failed (exit {}): {}",
+                node_def.transform,
+                exit_code,
+                logs
+            );
         }
-        anyhow::bail!(
-            "Transform '{}' failed (exit {}): {}",
-            node_def.transform,
-            exit_code,
-            logs
-        );
-    }
 
-    // Read output
-    let compute_duration_ms = result.duration_ms;
-    let read_result: Result<(Vec<u8>, String), anyhow::Error> = async {
-        let output_files =
-            super::super::api::v1::fetch::list_output_files_anyhow(&result.output_dir).await?;
-        let primary_output = super::super::api::v1::fetch::find_primary_output(&output_files)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Transform '{}' produced no output files",
-                    node_def.transform
-                )
-            })?;
-        let content_type = super::super::api::v1::fetch::infer_output_content_type(primary_output);
-        let bytes = tokio::fs::read(primary_output).await?;
-        Ok((bytes, content_type))
+        let compute_duration_ms = result.duration_ms;
+        let read_result: Result<(Vec<u8>, String), anyhow::Error> = async {
+            let output_files =
+                super::super::api::v1::fetch::list_output_files_anyhow(&result.output_dir).await?;
+            let primary_output = super::super::api::v1::fetch::find_primary_output(&output_files)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Transform '{}' produced no output files",
+                        node_def.transform
+                    )
+                })?;
+            let content_type =
+                super::super::api::v1::fetch::infer_output_content_type(primary_output);
+            let bytes = tokio::fs::read(primary_output).await?;
+            Ok((bytes, content_type))
+        }
+        .await;
+        result.cleanup().await;
+        let (bytes, ct) = read_result?;
+        Ok((bytes, ct, compute_duration_ms))
     }
     .await;
-    result.cleanup().await;
-    // Clean up secrets blob (best-effort)
+
+    // Always clean up secrets blob (best-effort), regardless of compute outcome
     if let Some(ref key) = secrets_cleanup_key {
         let _ = super::secrets::cleanup_secrets(&state.storage, key).await;
     }
-    let (output_bytes, output_content_type) = read_result?;
+
+    let (output_bytes, output_content_type, compute_duration_ms) = compute_result?;
     let output_hash = ozzy_core::hash::blake3_hash(&output_bytes);
     let output_byte_size = output_bytes.len() as i64;
     let output_ext = super::super::api::v1::fetch::content_type_to_extension(&output_content_type);

@@ -232,6 +232,9 @@ async fn fetch_endpoint(
     }
 
     // ── 8. Rate limit check (only for non-cached execution) ─────
+    // NOTE: This is an advisory/soft limit — concurrent requests can race past
+    // the check before job creation (TOCTOU). This is standard for rate limiters
+    // and acceptable since the limits are for resource protection, not billing.
     if let Some(user_id) = auth_user_id {
         if let Err(e) = crate::compute::rate_limit::check_limits(
             &state.db,

@@ -91,20 +91,30 @@ fi
 echo "$OZZY_RUNNER_SCRIPT_B64" | base64 -d > /workspace/runner.{runner_ext}
 chmod +x /workspace/runner.{runner_ext}
 
-# Download inputs from presigned URLs
+# Save output upload URL for later, then unset infrastructure env vars
+echo "$OZZY_OUTPUT_UPLOAD_URL" > /tmp/ozzy_upload_url
+unset OZZY_RUNNER_SCRIPT_B64
+unset OZZY_INIT_SCRIPT_B64
+unset OZZY_SECRETS_URL
+unset OZZY_OUTPUT_UPLOAD_URL
+
+# Download inputs from presigned URLs (if any)
 mkdir -p /workspace/inputs
-DOWNLOADS=$(echo "$OZZY_INPUT_DOWNLOADS" | python3 -c "
+if [ -n "$OZZY_INPUT_DOWNLOADS" ]; then
+    DOWNLOADS=$(echo "$OZZY_INPUT_DOWNLOADS" | python3 -c "
 import sys, json, urllib.request
 downloads = json.loads(sys.stdin.read())
 for d in downloads:
     urllib.request.urlretrieve(d['url'], d['path'])
-    print(f\"Downloaded {{d['name']}} -> {{d['path']}}\")
+    print('Downloaded ' + d['name'] + ' -> ' + d['path'])
 " 2>&1) || {{
-    echo "ERROR: Failed to download inputs" >&2
-    echo "$DOWNLOADS" >&2
-    exit 1
-}}
-echo "$DOWNLOADS"
+        echo "ERROR: Failed to download inputs" >&2
+        echo "$DOWNLOADS" >&2
+        exit 1
+    }}
+    echo "$DOWNLOADS"
+    unset OZZY_INPUT_DOWNLOADS
+fi
 
 # Ensure output directory exists
 mkdir -p /workspace/output
@@ -121,7 +131,9 @@ fi
 # Upload output tarball to presigned URL
 cd /workspace/output
 tar czf /tmp/output.tar.gz .
-curl -s -X PUT -T /tmp/output.tar.gz "$OZZY_OUTPUT_UPLOAD_URL" || {{
+UPLOAD_URL=$(cat /tmp/ozzy_upload_url)
+rm -f /tmp/ozzy_upload_url
+curl -s -X PUT -T /tmp/output.tar.gz "$UPLOAD_URL" || {{
     echo "ERROR: Failed to upload output" >&2
     exit 1
 }}
@@ -165,7 +177,7 @@ mod tests {
         assert!(script.contains("base64 -d > /workspace/runner.py"));
         assert!(script.contains("OZZY_INPUT_DOWNLOADS"));
         assert!(script.contains("python3 /workspace/runner.py"));
-        assert!(script.contains("OZZY_OUTPUT_UPLOAD_URL"));
+        assert!(script.contains("ozzy_upload_url"));
     }
 
     #[test]
@@ -194,5 +206,21 @@ mod tests {
         let script = generate_fly_init(RunnerType::Python);
         assert!(script.contains("tar czf"));
         assert!(script.contains("curl"));
+    }
+
+    #[test]
+    fn test_fly_init_unsets_sensitive_vars() {
+        let script = generate_fly_init(RunnerType::Python);
+        assert!(script.contains("unset OZZY_RUNNER_SCRIPT_B64"));
+        assert!(script.contains("unset OZZY_INIT_SCRIPT_B64"));
+        assert!(script.contains("unset OZZY_SECRETS_URL"));
+        assert!(script.contains("unset OZZY_OUTPUT_UPLOAD_URL"));
+    }
+
+    #[test]
+    fn test_fly_init_conditional_downloads() {
+        let script = generate_fly_init(RunnerType::Python);
+        // Input downloads should be wrapped in a conditional
+        assert!(script.contains("if [ -n \"$OZZY_INPUT_DOWNLOADS\" ]"));
     }
 }
