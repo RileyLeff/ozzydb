@@ -5,6 +5,7 @@
 //! based on server configuration.
 
 pub mod docker;
+pub mod environments;
 pub mod fly;
 pub mod orchestrator;
 pub mod rate_limit;
