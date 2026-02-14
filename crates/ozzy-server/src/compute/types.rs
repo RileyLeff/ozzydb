@@ -42,10 +42,6 @@ pub struct ComputeRequest {
     pub env_vars: HashMap<String, String>,
     /// Timeout in seconds.
     pub timeout_secs: u64,
-    /// Memory limit (e.g., "2g").
-    pub memory_limit: Option<String>,
-    /// CPU limit (e.g., "1").
-    pub cpu_limit: Option<String>,
 }
 
 /// Specification for an input file (used to build the input manifest).

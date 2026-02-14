@@ -14,21 +14,20 @@ use super::types::{ComputeBackend, ComputeRequest, ComputeResult};
 /// Docker compute backend: runs transforms in local Docker containers.
 #[derive(Clone)]
 pub struct DockerBackend {
-    /// Docker runtime (e.g., "runsc" for gVisor).
-    pub runtime: Option<String>,
+    pub config: crate::config::DockerProviderConfig,
 }
 
 impl std::fmt::Debug for DockerBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DockerBackend")
-            .field("runtime", &self.runtime)
+            .field("runtime", &self.config.runtime)
             .finish()
     }
 }
 
 impl DockerBackend {
-    pub fn new(runtime: Option<String>) -> Self {
-        Self { runtime }
+    pub fn new(config: crate::config::DockerProviderConfig) -> Self {
+        Self { config }
     }
 }
 
@@ -53,16 +52,12 @@ impl DockerBackend {
         let mut cmd = Command::new("docker");
         cmd.arg("run").arg("--rm").args(["--name", &container_name]);
 
-        // Resource limits
-        if let Some(ref mem) = request.memory_limit {
-            cmd.args(["--memory", mem]);
-        }
-        if let Some(ref cpu) = request.cpu_limit {
-            cmd.args(["--cpus", cpu]);
-        }
+        // Resource limits from provider config
+        cmd.args(["--memory", &self.config.memory_limit]);
+        cmd.args(["--cpus", &self.config.cpu_limit]);
 
-        // Runtime (e.g., gVisor) — from backend config, not request
-        if let Some(ref runtime) = self.runtime {
+        // Runtime (e.g., gVisor) — from backend config
+        if let Some(ref runtime) = self.config.runtime {
             cmd.args(["--runtime", runtime]);
         }
 

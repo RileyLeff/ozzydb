@@ -51,15 +51,11 @@ async fn build_test_app() -> Option<Router> {
         secrets_encryption_key: None,
         github_app: None,
         compute: ozzy_server::config::ComputeConfig {
-            enabled: false,
-            docker_runtime: None,
-            memory_limit: "2g".to_string(),
-            cpu_limit: "1".to_string(),
             timeout_secs: 300,
             tmpdir: "/tmp/ozzy-test".to_string(),
-            tmpfs_size: "512m".to_string(),
             default_provider: None,
         },
+        docker: None,
         fly: None,
         rate_limit: ozzy_server::config::RateLimitConfig {
             global_max_concurrent: 0,
@@ -72,7 +68,7 @@ async fn build_test_app() -> Option<Router> {
     let db = Database::new(pool);
     let git = ozzy_server::GitHubProvider::new(None, db.clone());
     let compute =
-        ozzy_server::compute::ComputeRegistry::from_config(&config.compute, config.fly.as_ref());
+        ozzy_server::compute::ComputeRegistry::from_config(&config.compute, config.docker.as_ref(), config.fly.as_ref());
     let state = AppState {
         config: Arc::new(config),
         db,

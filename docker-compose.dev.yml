@@ -84,7 +84,7 @@ services:
       # Dev mode: auto-create admin user + print token
       DEV_AUTO_USER: "dev"
       # Compute (Docker backend, no gVisor in dev)
-      COMPUTE_ENABLED: "true"
+      DOCKER_COMPUTE_ENABLED: "true"
       TMPDIR: /tmp/ozzy
       # No login restriction in dev
       ALLOWED_LOGINS: ""

@@ -72,10 +72,13 @@ pub struct Config {
     /// via GitHub App installation tokens. Without this, only public repos are accessible.
     pub github_app: Option<GitHubAppConfig>,
 
-    /// Compute configuration for environment building and transform execution.
+    /// Global compute configuration.
     pub compute: ComputeConfig,
 
-    /// Fly Machines configuration (optional). When set, compute dispatches to Fly.
+    /// Docker compute provider configuration (optional).
+    pub docker: Option<DockerProviderConfig>,
+
+    /// Fly Machines compute provider configuration (optional).
     pub fly: Option<FlyConfig>,
 
     /// Rate limiting configuration for compute jobs.
@@ -86,26 +89,29 @@ pub struct Config {
     pub dev_auto_user: Option<String>,
 }
 
-/// Compute configuration for Docker-based environment building and execution.
+/// Global compute configuration (applies to all providers).
 #[derive(Debug, Clone)]
 pub struct ComputeConfig {
-    /// Whether compute is enabled on this server.
-    pub enabled: bool,
-    /// Docker runtime to use for compute containers (e.g., "runsc" for gVisor).
-    pub docker_runtime: Option<String>,
-    /// Memory limit for compute containers (e.g., "2g").
-    pub memory_limit: String,
-    /// CPU limit for compute containers (e.g., "1").
-    pub cpu_limit: String,
     /// Timeout in seconds for compute jobs (default: 300).
     pub timeout_secs: u64,
-    /// Temporary directory for compute workspaces.
+    /// Temporary directory for orchestrator workspaces (output extraction, etc.).
     pub tmpdir: String,
-    /// tmpfs size for compute containers (e.g., "512m").
-    pub tmpfs_size: String,
     /// Default compute provider name (e.g., "fly", "docker").
     /// If not set, auto-selects: fly > docker.
     pub default_provider: Option<String>,
+}
+
+/// Docker compute provider configuration.
+#[derive(Debug, Clone)]
+pub struct DockerProviderConfig {
+    /// Whether Docker compute is enabled.
+    pub enabled: bool,
+    /// Docker runtime (e.g., "runsc" for gVisor).
+    pub runtime: Option<String>,
+    /// Memory limit for Docker containers (e.g., "2g").
+    pub memory_limit: String,
+    /// CPU limit for Docker containers (e.g., "1").
+    pub cpu_limit: String,
 }
 
 /// GitHub App configuration for repository access.
@@ -206,6 +212,7 @@ impl Config {
             secrets_encryption_key: parse_hex_key("SECRETS_ENCRYPTION_KEY", 32)?,
             github_app: GitHubAppConfig::from_env_optional(),
             compute: ComputeConfig::from_env(),
+            docker: DockerProviderConfig::from_env_optional(),
             fly: FlyConfig::from_env_optional(),
             rate_limit: RateLimitConfig::from_env(),
             dev_auto_user: std::env::var("DEV_AUTO_USER")
@@ -216,18 +223,9 @@ impl Config {
 }
 
 impl ComputeConfig {
-    /// Load compute configuration from environment variables.
+    /// Load global compute configuration from environment variables.
     pub fn from_env() -> Self {
         Self {
-            enabled: std::env::var("COMPUTE_ENABLED")
-                .unwrap_or_else(|_| "false".into())
-                .parse()
-                .unwrap_or(false),
-            docker_runtime: std::env::var("COMPUTE_DOCKER_RUNTIME")
-                .ok()
-                .filter(|s| !s.is_empty()),
-            memory_limit: std::env::var("COMPUTE_MEMORY_LIMIT").unwrap_or_else(|_| "2g".into()),
-            cpu_limit: std::env::var("COMPUTE_CPU_LIMIT").unwrap_or_else(|_| "1".into()),
             timeout_secs: std::env::var("COMPUTE_TIMEOUT_SECS")
                 .unwrap_or_else(|_| "300".into())
                 .parse()
@@ -235,11 +233,40 @@ impl ComputeConfig {
             tmpdir: std::env::var("COMPUTE_TMPDIR")
                 .or_else(|_| std::env::var("TMPDIR"))
                 .unwrap_or_else(|_| "/tmp/ozzy".into()),
-            tmpfs_size: std::env::var("COMPUTE_TMPFS_SIZE").unwrap_or_else(|_| "512m".into()),
             default_provider: std::env::var("COMPUTE_DEFAULT_PROVIDER")
                 .ok()
                 .filter(|s| !s.is_empty()),
         }
+    }
+}
+
+impl DockerProviderConfig {
+    /// Load Docker provider config from environment variables.
+    /// Returns Some if DOCKER_COMPUTE_ENABLED=true or legacy COMPUTE_ENABLED=true.
+    pub fn from_env_optional() -> Option<Self> {
+        let enabled = std::env::var("DOCKER_COMPUTE_ENABLED")
+            .or_else(|_| std::env::var("COMPUTE_ENABLED"))
+            .unwrap_or_else(|_| "false".into())
+            .parse()
+            .unwrap_or(false);
+
+        if !enabled {
+            return None;
+        }
+
+        Some(Self {
+            enabled: true,
+            runtime: std::env::var("DOCKER_COMPUTE_RUNTIME")
+                .or_else(|_| std::env::var("COMPUTE_DOCKER_RUNTIME"))
+                .ok()
+                .filter(|s| !s.is_empty()),
+            memory_limit: std::env::var("DOCKER_COMPUTE_MEMORY_LIMIT")
+                .or_else(|_| std::env::var("COMPUTE_MEMORY_LIMIT"))
+                .unwrap_or_else(|_| "2g".into()),
+            cpu_limit: std::env::var("DOCKER_COMPUTE_CPU_LIMIT")
+                .or_else(|_| std::env::var("COMPUTE_CPU_LIMIT"))
+                .unwrap_or_else(|_| "1".into()),
+        })
     }
 }
 

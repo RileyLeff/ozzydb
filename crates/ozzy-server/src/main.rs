@@ -107,6 +107,7 @@ async fn main() -> Result<()> {
     // Initialize compute registry
     let compute = ozzy_server::compute::ComputeRegistry::from_config(
         &config.compute,
+        config.docker.as_ref(),
         config.fly.as_ref(),
     );
     if compute.is_enabled() {

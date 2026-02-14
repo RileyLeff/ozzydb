@@ -37,18 +37,19 @@ impl ComputeRegistry {
     /// the registry is empty (compute is effectively disabled).
     pub fn from_config(
         compute_config: &crate::config::ComputeConfig,
+        docker_config: Option<&crate::config::DockerProviderConfig>,
         fly_config: Option<&crate::config::FlyConfig>,
     ) -> Self {
         let mut providers: HashMap<String, Arc<dyn ComputeBackend>> = HashMap::new();
 
         // Register Docker provider
-        if compute_config.enabled {
-            providers.insert(
-                "docker".to_string(),
-                Arc::new(docker::DockerBackend::new(
-                    compute_config.docker_runtime.clone(),
-                )),
-            );
+        if let Some(docker) = docker_config {
+            if docker.enabled {
+                providers.insert(
+                    "docker".to_string(),
+                    Arc::new(docker::DockerBackend::new(docker.clone())),
+                );
+            }
         }
 
         // Register Fly provider
@@ -137,35 +138,40 @@ impl ComputeRegistry {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::ComputeConfig;
+    use crate::config::{ComputeConfig, DockerProviderConfig};
 
     use super::*;
 
-    fn test_compute_config(enabled: bool) -> ComputeConfig {
+    fn test_compute_config() -> ComputeConfig {
         ComputeConfig {
-            enabled,
-            docker_runtime: None,
-            memory_limit: "2g".to_string(),
-            cpu_limit: "1".to_string(),
             timeout_secs: 300,
             tmpdir: "/tmp/ozzy".to_string(),
-            tmpfs_size: "512m".to_string(),
             default_provider: None,
+        }
+    }
+
+    fn test_docker_config() -> DockerProviderConfig {
+        DockerProviderConfig {
+            enabled: true,
+            runtime: None,
+            memory_limit: "2g".to_string(),
+            cpu_limit: "1".to_string(),
         }
     }
 
     #[test]
     fn test_registry_disabled() {
-        let config = test_compute_config(false);
-        let registry = ComputeRegistry::from_config(&config, None);
+        let config = test_compute_config();
+        let registry = ComputeRegistry::from_config(&config, None, None);
         assert!(!registry.is_enabled());
         assert!(registry.resolve(None).is_err());
     }
 
     #[test]
     fn test_registry_docker_enabled() {
-        let config = test_compute_config(true);
-        let registry = ComputeRegistry::from_config(&config, None);
+        let config = test_compute_config();
+        let docker = test_docker_config();
+        let registry = ComputeRegistry::from_config(&config, Some(&docker), None);
         assert!(registry.is_enabled());
         assert_eq!(registry.default_provider(), Some("docker"));
         assert!(registry.resolve(None).is_ok());
@@ -175,8 +181,9 @@ mod tests {
 
     #[test]
     fn test_registry_unknown_provider() {
-        let config = test_compute_config(true);
-        let registry = ComputeRegistry::from_config(&config, None);
+        let config = test_compute_config();
+        let docker = test_docker_config();
+        let registry = ComputeRegistry::from_config(&config, Some(&docker), None);
         let err = registry.resolve(Some("gpu")).err().expect("should be an error");
         assert!(err.to_string().contains("not available"));
     }

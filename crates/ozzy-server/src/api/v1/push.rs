@@ -335,7 +335,7 @@ async fn push(
     // Report initial status as "building" (or "disabled" if compute is off).
     let mut env_statuses = Vec::new();
 
-    if state.config.compute.enabled {
+    if state.compute.is_enabled() {
         for (env_name, env_def) in &ozzy_toml.environments {
             let status = match env_def.tier() {
                 Some(ozzy_core::toml_spec::EnvironmentTier::Prebuilt { .. }) => "ready".to_string(),

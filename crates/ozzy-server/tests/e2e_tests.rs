@@ -106,15 +106,16 @@ impl TestServer {
             secrets_encryption_key: Some(vec![0x42; 32]),
             github_app: None,
             compute: ozzy_server::config::ComputeConfig {
-                enabled: true,
-                docker_runtime: None,
-                memory_limit: "2g".to_string(),
-                cpu_limit: "1".to_string(),
                 timeout_secs: 120,
                 tmpdir: tmpdir.path().to_string_lossy().to_string(),
-                tmpfs_size: "512m".to_string(),
-            default_provider: None,
+                default_provider: None,
             },
+            docker: Some(ozzy_server::config::DockerProviderConfig {
+                enabled: true,
+                runtime: None,
+                memory_limit: "2g".to_string(),
+                cpu_limit: "1".to_string(),
+            }),
             fly: None,
             rate_limit: ozzy_server::config::RateLimitConfig {
                 global_max_concurrent: 0,
@@ -128,7 +129,8 @@ impl TestServer {
 
         let compute = ozzy_server::compute::ComputeRegistry::from_config(
             &config.compute,
-            None,
+            config.docker.as_ref(),
+            config.fly.as_ref(),
         );
 
         let git = ozzy_server::GitHubProvider::new(None, db.clone());

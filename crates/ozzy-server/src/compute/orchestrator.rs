@@ -565,8 +565,6 @@ async fn execute_node(
         image: env_image_ref,
         env_vars,
         timeout_secs: state.config.compute.timeout_secs,
-        memory_limit: Some(state.config.compute.memory_limit.clone()),
-        cpu_limit: Some(state.config.compute.cpu_limit.clone()),
     };
 
     // Execute compute and download output from R2, ensuring cleanup on all paths
