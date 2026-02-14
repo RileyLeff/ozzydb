@@ -31,7 +31,10 @@ impl FlyBackend {
     pub fn new(config: FlyConfig) -> Self {
         // No client-level timeout — each request sets its own .timeout() to avoid
         // a global 600s cap shadowing longer compute timeouts.
+        // Force IPv4: Docker's default bridge network lacks IPv6, and
+        // api.machines.dev resolves to both IPv4 and IPv6.
         let http = reqwest::Client::builder()
+            .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
             .build()
             .expect("Failed to create HTTP client");
         Self { config, http }
