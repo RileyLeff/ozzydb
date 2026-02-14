@@ -444,11 +444,30 @@ where
 struct MachineEvent {
     #[serde(rename = "type")]
     event_type: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_timestamp")]
     timestamp: Option<String>,
     #[serde(default)]
     message: Option<String>,
     #[serde(default)]
     request: Option<EventRequest>,
+}
+
+/// Accept timestamp as either a string or an integer (millis since epoch).
+fn deserialize_timestamp<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNumber {
+        Str(String),
+        Num(i64),
+    }
+    match Option::<StringOrNumber>::deserialize(deserializer)? {
+        Some(StringOrNumber::Str(s)) => Ok(Some(s)),
+        Some(StringOrNumber::Num(n)) => Ok(Some(n.to_string())),
+        None => Ok(None),
+    }
 }
 
 #[derive(Debug, Deserialize)]
