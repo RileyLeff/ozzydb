@@ -198,28 +198,47 @@ impl FlyBackend {
 
 impl FlyBackend {
     /// Wait for a machine to reach "stopped" state.
+    ///
+    /// The Fly wait endpoint caps `timeout` at 60s, so we poll in a loop
+    /// with 30s intervals until the overall deadline is reached.
     async fn wait_for_machine(&self, machine_id: &str, instance_id: &str, timeout_secs: u64) -> Result<()> {
-        let wait_url = format!(
-            "{}/v1/apps/{}/machines/{}/wait?state=stopped&timeout={}&instance_id={}",
-            self.config.api_url, self.config.app_name, machine_id, timeout_secs, instance_id
-        );
+        let deadline = Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        let poll_secs: u64 = 30;
 
-        let resp = self
-            .http
-            .get(&wait_url)
-            .bearer_auth(&self.config.api_token)
-            .timeout(std::time::Duration::from_secs(timeout_secs + 30))
-            .send()
-            .await
-            .context("Fly Machine wait request failed")?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                anyhow::bail!("Fly Machine {} timed out after {}s", machine_id, timeout_secs);
+            }
+            let this_timeout = remaining.as_secs().min(poll_secs).max(1);
 
-        if !resp.status().is_success() {
+            let wait_url = format!(
+                "{}/v1/apps/{}/machines/{}/wait?state=stopped&timeout={}&instance_id={}",
+                self.config.api_url, self.config.app_name, machine_id, this_timeout, instance_id
+            );
+
+            let resp = self
+                .http
+                .get(&wait_url)
+                .bearer_auth(&self.config.api_token)
+                .timeout(std::time::Duration::from_secs(this_timeout + 10))
+                .send()
+                .await
+                .context("Fly Machine wait request failed")?;
+
+            if resp.status().is_success() {
+                return Ok(());
+            }
+
+            // 408 = timeout (machine still running), retry
+            if resp.status() == reqwest::StatusCode::REQUEST_TIMEOUT {
+                continue;
+            }
+
             let status = resp.status();
             let body = resp.text().await.unwrap_or_else(|_| "no body".into());
             anyhow::bail!("Fly Machine wait failed ({}): {}", status, body);
         }
-
-        Ok(())
     }
 
     /// Get machine state (for exit code after stopping).
