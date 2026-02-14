@@ -15,5 +15,12 @@ Cargo.lock
 /tmp/
 *.log
 
+# Environment files (secrets)
+.env.prod
+
+# Python
+__pycache__/
+*.pyc
+
 # OzzyDB local cache (global, not project-specific)
 # Project .ozzy/ directories have their own .gitignore
