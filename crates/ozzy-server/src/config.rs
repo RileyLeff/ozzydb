@@ -50,11 +50,8 @@ pub struct Config {
     /// Base URL for this server (for OAuth callbacks)
     pub base_url: String,
 
-    /// Local cache directory for read-through caching of R2 content.
-    pub cache_dir: String,
-
-    /// Optional R2/S3 storage backend (primary when configured).
-    pub r2: Option<R2Config>,
+    /// R2/S3 storage backend (required).
+    pub r2: R2Config,
 
     /// Maximum multipart upload size in bytes (default: 1GB)
     pub max_upload_size_bytes: u64,
@@ -182,9 +179,7 @@ impl Config {
             github_client_secret: std::env::var("GITHUB_CLIENT_SECRET")
                 .context("GITHUB_CLIENT_SECRET environment variable required")?,
             base_url: std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3000".into()),
-            cache_dir: std::env::var("LOCAL_STORAGE_PATH")
-                .unwrap_or_else(|_| "/tmp/ozzydb-content".into()),
-            r2: R2Config::from_env_optional(),
+            r2: R2Config::from_env()?,
             max_upload_size_bytes: std::env::var("MAX_UPLOAD_SIZE_BYTES")
                 .unwrap_or_else(|_| "1073741824".into()) // 1GB default
                 .parse()
@@ -319,26 +314,4 @@ impl R2Config {
         })
     }
 
-    /// Load optional R2 configuration.
-    /// Returns None when required R2 credentials are not all present (or empty).
-    pub fn from_env_optional() -> Option<Self> {
-        let endpoint = std::env::var("R2_ENDPOINT")
-            .ok()
-            .filter(|s| !s.is_empty())?;
-        let bucket = std::env::var("R2_BUCKET").ok().filter(|s| !s.is_empty())?;
-        let access_key_id = std::env::var("R2_ACCESS_KEY_ID")
-            .ok()
-            .filter(|s| !s.is_empty())?;
-        let secret_access_key = std::env::var("R2_SECRET_ACCESS_KEY")
-            .ok()
-            .filter(|s| !s.is_empty())?;
-
-        Some(Self {
-            endpoint,
-            bucket,
-            access_key_id,
-            secret_access_key,
-            region: std::env::var("R2_REGION").unwrap_or_else(|_| "auto".into()),
-        })
-    }
 }

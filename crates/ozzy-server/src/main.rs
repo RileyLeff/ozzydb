@@ -44,13 +44,7 @@ async fn main() -> Result<()> {
 
     // Initialize storage
     let storage = ContentStorage::from_config(&config)?;
-    if let Some(r2) = &config.r2 {
-        tracing::info!("R2 storage: {}/{}", r2.endpoint, r2.bucket);
-        tracing::info!("Local cache at {}", config.cache_dir);
-    } else {
-        tracing::info!("Running in local-only mode (no R2 configured)");
-        tracing::info!("Local storage at {}", config.cache_dir);
-    }
+    tracing::info!("R2 storage: {}/{}", config.r2.endpoint, config.r2.bucket);
 
     if !config.allowed_logins.is_empty() {
         tracing::info!(

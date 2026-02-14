@@ -1,8 +1,7 @@
 //! API endpoint integration tests.
 //!
 //! Tests the Axum HTTP routes directly using tower::ServiceExt.
-//! The health endpoint test runs without external dependencies.
-//! Other tests require DATABASE_URL.
+//! Requires DATABASE_URL and R2 credentials (R2_ENDPOINT, R2_BUCKET, etc.).
 
 use axum::Router;
 use axum::body::Body;
@@ -14,9 +13,20 @@ use std::env;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+fn get_r2_config() -> Option<ozzy_server::config::R2Config> {
+    Some(ozzy_server::config::R2Config {
+        endpoint: env::var("R2_ENDPOINT").ok()?,
+        bucket: env::var("R2_BUCKET").ok()?,
+        access_key_id: env::var("R2_ACCESS_KEY_ID").ok()?,
+        secret_access_key: env::var("R2_SECRET_ACCESS_KEY").ok()?,
+        region: env::var("R2_REGION").unwrap_or_else(|_| "auto".into()),
+    })
+}
+
 /// Build a test app with real DB + storage (returns None if credentials unavailable).
 async fn build_test_app() -> Option<Router> {
     let db_url = env::var("DATABASE_URL").ok()?;
+    let r2 = get_r2_config()?;
 
     let pool = PgPoolOptions::new()
         .max_connections(2)
@@ -26,8 +36,6 @@ async fn build_test_app() -> Option<Router> {
 
     sqlx::migrate!("./migrations").run(&pool).await.ok()?;
 
-    let cache_dir = tempfile::tempdir().ok()?.into_path();
-
     let config = Config {
         bind_address: "127.0.0.1:0".to_string(),
         database_url: db_url,
@@ -35,8 +43,7 @@ async fn build_test_app() -> Option<Router> {
         github_client_id: "test_client_id".to_string(),
         github_client_secret: "test_client_secret".to_string(),
         base_url: "http://localhost:3000".to_string(),
-        cache_dir: cache_dir.to_string_lossy().to_string(),
-        r2: None,
+        r2,
         max_upload_size_bytes: 104_857_600,
         cors_origins: "*".to_string(),
         allowed_logins: vec![],
@@ -78,7 +85,7 @@ async fn build_test_app() -> Option<Router> {
 #[tokio::test]
 async fn test_health_endpoint() {
     let Some(app) = build_test_app().await else {
-        eprintln!("Skipping API tests: DATABASE_URL not set");
+        eprintln!("Skipping API tests: DATABASE_URL or R2 credentials not set");
         return;
     };
 

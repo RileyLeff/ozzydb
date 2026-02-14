@@ -143,40 +143,26 @@ async fn get_job_output(
 
     let ext = extension_for_content_type(content_type);
 
-    // Serve output from content-addressed storage (where the orchestrator stored it)
-    if state.storage.has_remote() {
-        let url = state
-            .storage
-            .presigned_get_url_with_filename(
-                output_hash,
-                ext,
-                std::time::Duration::from_secs(3600),
-                Some(&format!("{}.{}", job.endpoint_name, ext)),
-            )
-            .await?;
+    // Redirect to presigned URL (zero server bandwidth)
+    let url = state
+        .storage
+        .presigned_get_url_with_filename(
+            output_hash,
+            ext,
+            std::time::Duration::from_secs(3600),
+            Some(&format!("{}.{}", job.endpoint_name, ext)),
+        )
+        .await?;
 
-        Ok((
-            StatusCode::FOUND,
-            [
-                ("Location", url.as_str()),
-                ("X-OzzyDB-Content-Hash", output_hash),
-                ("X-OzzyDB-Content-Type", content_type),
-            ],
-        )
-            .into_response())
-    } else {
-        // Local fallback: proxy the bytes
-        let bytes = state.storage.get(output_hash, ext).await?;
-        Ok((
-            StatusCode::OK,
-            [
-                ("Content-Type", content_type),
-                ("X-OzzyDB-Content-Hash", output_hash),
-            ],
-            bytes,
-        )
-            .into_response())
-    }
+    Ok((
+        StatusCode::FOUND,
+        [
+            ("Location", url.as_str()),
+            ("X-OzzyDB-Content-Hash", output_hash),
+            ("X-OzzyDB-Content-Type", content_type),
+        ],
+    )
+        .into_response())
 }
 
 fn extension_for_content_type(content_type: &str) -> &str {

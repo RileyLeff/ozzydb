@@ -29,29 +29,25 @@ pub enum BackendSelector {
 impl BackendSelector {
     /// Create a backend from server configuration.
     ///
-    /// Priority: Fly (if FLY_API_TOKEN + FLY_APP_NAME set + R2 configured) > Docker (if COMPUTE_ENABLED=true).
+    /// Priority: Fly (if FLY_API_TOKEN + FLY_APP_NAME set) > Docker (if COMPUTE_ENABLED=true).
     /// Returns `None` when no compute backend is available.
     pub fn from_config(
         compute_config: &crate::config::ComputeConfig,
         fly_config: Option<&crate::config::FlyConfig>,
         storage: Option<&crate::storage::ContentStorage>,
     ) -> Option<Self> {
-        // Fly takes priority when configured (requires R2 storage for presigned URLs)
+        // Fly takes priority when configured
         if let Some(fly) = fly_config {
             if let Some(storage) = storage {
-                if storage.has_remote() {
-                    return Some(Self::Fly(fly::FlyBackend::new(
-                        fly.clone(),
-                        storage.clone(),
-                        compute_config.tmpdir.clone(),
-                    )));
-                }
-                tracing::warn!("Fly config present but R2 not configured — falling back to Docker");
-            } else {
-                tracing::warn!(
-                    "Fly config present but no storage available — falling back to Docker"
-                );
+                return Some(Self::Fly(fly::FlyBackend::new(
+                    fly.clone(),
+                    storage.clone(),
+                    compute_config.tmpdir.clone(),
+                )));
             }
+            tracing::warn!(
+                "Fly config present but no storage available — falling back to Docker"
+            );
         }
 
         // Fall back to Docker
@@ -129,8 +125,8 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_selector_fly_without_storage_falls_back_to_docker() {
-        // Fly is configured but no R2 storage — should fall back to Docker
+    fn test_backend_selector_fly_without_storage_ref_falls_back_to_docker() {
+        // Fly is configured but no storage ref passed — should fall back to Docker
         let compute_config = ComputeConfig {
             enabled: true,
             docker_runtime: None,
@@ -150,14 +146,14 @@ mod tests {
             memory_mb: 512,
         };
         let backend = BackendSelector::from_config(&compute_config, Some(&fly_config), None);
-        // Falls back to Docker since no storage is available
+        // Falls back to Docker since no storage ref is available
         assert!(backend.is_some());
         assert!(!backend.unwrap().is_fly());
     }
 
     #[test]
-    fn test_backend_selector_fly_without_docker_or_storage() {
-        // Fly configured, Docker disabled, no storage — no backend available
+    fn test_backend_selector_fly_without_docker_or_storage_ref() {
+        // Fly configured, Docker disabled, no storage ref — no backend available
         let compute_config = ComputeConfig {
             enabled: false,
             docker_runtime: None,

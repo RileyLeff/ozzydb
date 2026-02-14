@@ -33,9 +33,8 @@ struct TestServer {
     base_url: String,
     client: reqwest::Client,
     db: Database,
-    // Keep container and storage dir alive for the test session.
+    // Keep container alive for the test session.
     _container: testcontainers::ContainerAsync<Postgres>,
-    _storage_dir: tempfile::TempDir,
 }
 
 // Safety: PgPool, reqwest::Client, and ContainerAsync are all Send+Sync.
@@ -87,7 +86,16 @@ impl TestServer {
 
         let db = Database::new(pool);
 
-        let storage_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let r2 = ozzy_server::config::R2Config {
+            endpoint: std::env::var("R2_ENDPOINT")
+                .unwrap_or_else(|_| "http://localhost:9000".into()),
+            bucket: std::env::var("R2_BUCKET").unwrap_or_else(|_| "ozzy".into()),
+            access_key_id: std::env::var("R2_ACCESS_KEY_ID")
+                .unwrap_or_else(|_| "minioadmin".into()),
+            secret_access_key: std::env::var("R2_SECRET_ACCESS_KEY")
+                .unwrap_or_else(|_| "minioadmin".into()),
+            region: std::env::var("R2_REGION").unwrap_or_else(|_| "auto".into()),
+        };
 
         let config = Config {
             bind_address: "127.0.0.1:0".to_string(),
@@ -96,8 +104,7 @@ impl TestServer {
             github_client_id: "test_client_id".to_string(),
             github_client_secret: "test_client_secret".to_string(),
             base_url: "http://localhost:3000".to_string(),
-            cache_dir: storage_dir.path().to_string_lossy().to_string(),
-            r2: None,
+            r2,
             max_upload_size_bytes: 104_857_600,
             cors_origins: "*".to_string(),
             allowed_logins: vec![],
@@ -152,7 +159,6 @@ impl TestServer {
             client,
             db,
             _container: container,
-            _storage_dir: storage_dir,
         }
     }
 

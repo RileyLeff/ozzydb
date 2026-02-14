@@ -40,7 +40,6 @@ services:
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?GITHUB_CLIENT_ID required}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?GITHUB_CLIENT_SECRET required}
       BASE_URL: ${BASE_URL:?BASE_URL required}
-      LOCAL_STORAGE_PATH: /opt/ozzy/data
       TMPDIR: /opt/ozzy/tmp
       # R2 storage (leave unset for local-only mode)
       R2_ENDPOINT: ${R2_ENDPOINT:-}
@@ -78,8 +77,6 @@ services:
     volumes:
       # Docker socket for server-side compute (transform execution)
       - /var/run/docker.sock:/var/run/docker.sock
-      # Persistent content storage
-      - ozzy_data:/opt/ozzy/data
       # Shared tmpdir: must be a bind mount (not a volume) so compute
       # containers can access it via the host Docker daemon
       - /opt/ozzy/tmp:/opt/ozzy/tmp
@@ -112,6 +109,5 @@ services:
 
 volumes:
   postgres_data:
-  ozzy_data:
   caddy_data:
   caddy_config:

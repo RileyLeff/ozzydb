@@ -492,40 +492,25 @@ async fn download_data(
     let ext = content_type_to_extension(&atom.content_type);
     let filename = format!("{}.{}", atom.name, ext);
 
-    // When R2 is configured, redirect to a presigned URL (zero server bandwidth).
+    // Redirect to a presigned URL (zero server bandwidth).
     // The presigned URL includes response-content-disposition so the browser
     // saves the file with a human-readable name (not the content hash).
-    // Otherwise, proxy the bytes through the server (local-only dev mode).
-    if state.storage.has_remote() {
-        let presigned_url = state
-            .storage
-            .presigned_get_url_with_filename(
-                &atom.hash,
-                "bin",
-                std::time::Duration::from_secs(3600),
-                Some(&filename),
-            )
-            .await?;
+    let presigned_url = state
+        .storage
+        .presigned_get_url_with_filename(
+            &atom.hash,
+            "bin",
+            std::time::Duration::from_secs(3600),
+            Some(&filename),
+        )
+        .await?;
 
-        Response::builder()
-            .status(axum::http::StatusCode::FOUND)
-            .header(header::LOCATION, &presigned_url)
-            .header("X-OzzyDB-Content-Hash", &atom.hash)
-            .body(Body::empty())
-            .map_err(|e| ApiError::Internal(anyhow::anyhow!("Failed to build response: {}", e)))
-    } else {
-        let content = state.storage.get(&atom.hash, "bin").await?;
-
-        Response::builder()
-            .header(header::CONTENT_TYPE, &atom.content_type)
-            .header(
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", filename),
-            )
-            .header("X-OzzyDB-Content-Hash", &atom.hash)
-            .body(Body::from(content))
-            .map_err(|e| ApiError::Internal(anyhow::anyhow!("Failed to build response: {}", e)))
-    }
+    Response::builder()
+        .status(axum::http::StatusCode::FOUND)
+        .header(header::LOCATION, &presigned_url)
+        .header("X-OzzyDB-Content-Hash", &atom.hash)
+        .body(Body::empty())
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("Failed to build response: {}", e)))
 }
 
 /// Yank a data atom (soft delete with reason).

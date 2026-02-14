@@ -88,7 +88,6 @@ services:
       TMPDIR: /tmp/ozzy
       # No login restriction in dev
       ALLOWED_LOGINS: ""
-      LOCAL_STORAGE_PATH: "/opt/ozzy/cache"
       CORS_ORIGINS: "*"
       RUST_LOG: "debug,ozzy_server=trace,sqlx=warn"
     volumes:
@@ -96,7 +95,6 @@ services:
       # Bind mount (not volume) so compute containers spawned via Docker
       # socket can access the same tmpdir on the host
       - /tmp/ozzy-dev:/tmp/ozzy
-      - dev_cache:/opt/ozzy/cache
     ports:
       - "3000:3000"
     healthcheck:
@@ -109,4 +107,3 @@ services:
 volumes:
   dev_postgres_data:
   dev_minio_data:
-  dev_cache:

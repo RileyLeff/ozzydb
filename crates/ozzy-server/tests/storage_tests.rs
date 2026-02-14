@@ -283,21 +283,6 @@ async fn test_large_file() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_has_remote() -> Result<()> {
-    if should_skip_r2_tests() {
-        eprintln!("Skipping R2 tests - no credentials configured");
-        return Ok(());
-    }
-
-    let config = get_test_config().unwrap();
-    let storage = ContentStorage::with_prefix(&config, test_prefix())?;
-
-    assert!(storage.has_remote());
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_presigned_get_url_format() -> Result<()> {
     if should_skip_r2_tests() {
         eprintln!("Skipping R2 tests - no credentials configured");
@@ -412,68 +397,6 @@ async fn test_presigned_put_url_upload() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_presigned_url_without_remote_fails() -> Result<()> {
-    // Create a local-only storage (no R2 config)
-    let dir = tempfile::tempdir()?;
-    use ozzy_server::config::Config;
-
-    // Manually create a Config without R2
-    let config = Config::from_env();
-    // If Config::from_env fails (missing DB etc.), just test the has_remote check
-    // by using a storage with no remote
-    let storage = ContentStorage::from_config_with_prefix(
-        &Config {
-            bind_address: "0.0.0.0:3000".into(),
-            database_url: "postgres://localhost/test".into(),
-            db_max_connections: 5,
-            github_client_id: "test".into(),
-            github_client_secret: "test".into(),
-            base_url: "http://localhost:3000".into(),
-            cache_dir: dir.path().to_str().unwrap().into(),
-            r2: None,
-            max_upload_size_bytes: 100_000_000,
-            cors_origins: "*".into(),
-            allowed_logins: vec![],
-            secrets_encryption_key: None,
-            github_app: None,
-            compute: ozzy_server::config::ComputeConfig {
-                enabled: false,
-                docker_runtime: None,
-                memory_limit: "2g".into(),
-                cpu_limit: "1".into(),
-                timeout_secs: 300,
-                tmpdir: "/tmp".into(),
-                tmpfs_size: "512m".into(),
-            },
-            fly: None,
-            rate_limit: ozzy_server::config::RateLimitConfig {
-                global_max_concurrent: 0,
-                per_user_max_concurrent: 0,
-            },
-            dev_auto_user: None,
-        },
-        "test",
-    )?;
-
-    assert!(!storage.has_remote());
-
-    let hash = "0000000000000000000000000000000000000000000000000000000000000000";
-    let result = storage
-        .presigned_get_url(hash, "txt", Duration::from_secs(3600))
-        .await;
-    assert!(result.is_err(), "Should fail without R2 configured");
-    assert!(
-        result.unwrap_err().to_string().contains("not configured"),
-        "Error should mention R2 not configured"
-    );
-
-    // Drop the unused config result
-    drop(config);
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_store_stream_small_file() -> Result<()> {
     if should_skip_r2_tests() {
         eprintln!("Skipping R2 tests - no credentials configured");
@@ -569,64 +492,6 @@ async fn test_store_stream_hash_matches_buffered() -> Result<()> {
 
     // Cleanup
     storage.delete(&buffered_hash, "txt").await?;
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_store_stream_local_fallback() -> Result<()> {
-    // Test that store_stream works without R2 (local-only mode)
-    let dir = tempfile::tempdir()?;
-    use ozzy_server::config::Config;
-
-    let storage = ContentStorage::from_config_with_prefix(
-        &Config {
-            bind_address: "0.0.0.0:3000".into(),
-            database_url: "postgres://localhost/test".into(),
-            db_max_connections: 5,
-            github_client_id: "test".into(),
-            github_client_secret: "test".into(),
-            base_url: "http://localhost:3000".into(),
-            cache_dir: dir.path().to_str().unwrap().into(),
-            r2: None,
-            max_upload_size_bytes: 100_000_000,
-            cors_origins: "*".into(),
-            allowed_logins: vec![],
-            secrets_encryption_key: None,
-            github_app: None,
-            compute: ozzy_server::config::ComputeConfig {
-                enabled: false,
-                docker_runtime: None,
-                memory_limit: "2g".into(),
-                cpu_limit: "1".into(),
-                timeout_secs: 300,
-                tmpdir: "/tmp".into(),
-                tmpfs_size: "512m".into(),
-            },
-            fly: None,
-            rate_limit: ozzy_server::config::RateLimitConfig {
-                global_max_concurrent: 0,
-                per_user_max_concurrent: 0,
-            },
-            dev_auto_user: None,
-        },
-        "test",
-    )?;
-
-    let content = b"local-only streaming test content";
-    let expected_hash = ozzy_core::hash::blake3_hash(content);
-
-    let stream = futures::stream::once(async {
-        Ok::<_, std::io::Error>(bytes::Bytes::from_static(content))
-    });
-    let (hash, size) = storage.store_stream(Box::pin(stream), "txt").await?;
-
-    assert_eq!(hash, expected_hash);
-    assert_eq!(size, content.len() as u64);
-
-    // Verify content is retrievable locally
-    let retrieved = storage.get(&hash, "txt").await?;
-    assert_eq!(&retrieved[..], content);
 
     Ok(())
 }
