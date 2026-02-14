@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use base64::Engine as _;
 use uuid::Uuid;
 
 use crate::AppState;
@@ -396,18 +397,6 @@ async fn execute_node(
         );
     };
 
-    let runner_ext = if transform_def.source.is_some() {
-        let rt = crate::runners::detect_runner_type(transform_def.source.as_deref().unwrap_or(""))
-            .unwrap_or(crate::runners::RunnerType::Python);
-        match rt {
-            crate::runners::RunnerType::Python => "py",
-            crate::runners::RunnerType::R => "R",
-            crate::runners::RunnerType::Command => "sh",
-        }
-    } else {
-        "sh"
-    };
-
     let runner_type = if transform_def.source.is_some() {
         crate::runners::detect_runner_type(transform_def.source.as_deref().unwrap_or(""))
             .unwrap_or(crate::runners::RunnerType::Python)
@@ -417,7 +406,7 @@ async fn execute_node(
 
     let init_script = crate::runners::init::generate_init(runner_type);
 
-    // Build compute inputs (for manifest only — no local file hydration)
+    // Build compute inputs (for manifest only)
     let mut compute_inputs: Vec<crate::compute::InputSpec> = Vec::new();
     for (input_name, hash) in &input_hashes {
         let content_type = resolve_input_content_type(
@@ -431,14 +420,13 @@ async fn execute_node(
         .await;
         compute_inputs.push(crate::compute::InputSpec {
             name: input_name.clone(),
-            local_path: std::path::PathBuf::new(), // unused — inputs are downloaded via presigned URLs
             content_type,
             is_collection: false,
         });
     }
 
-    let input_manifest = crate::compute::docker::build_input_manifest(&compute_inputs);
-    let param_env_vars = crate::compute::docker::build_param_env_vars(&node_params);
+    let input_manifest = crate::compute::build_input_manifest(&compute_inputs);
+    let param_env_vars = crate::compute::build_param_env_vars(&node_params);
 
     let mut env_vars: HashMap<String, String> = HashMap::new();
     env_vars.insert(
@@ -550,23 +538,41 @@ async fn execute_node(
         secrets_cleanup_key = Some(prepared.r2_key);
     }
 
+    // Base64-encode init + runner scripts into env vars
+    let init_b64 = base64::engine::general_purpose::STANDARD.encode(&init_script);
+    env_vars.insert("OZZY_INIT_SCRIPT_B64".to_string(), init_b64);
+
+    let runner_b64 = base64::engine::general_purpose::STANDARD.encode(&runner_script);
+    env_vars.insert("OZZY_RUNNER_SCRIPT_B64".to_string(), runner_b64);
+
+    // Determinism env vars
+    env_vars.insert("PYTHONHASHSEED".to_string(), "0".to_string());
+    env_vars.insert("OMP_NUM_THREADS".to_string(), "1".to_string());
+    env_vars.insert("MKL_NUM_THREADS".to_string(), "1".to_string());
+    env_vars.insert("OPENBLAS_NUM_THREADS".to_string(), "1".to_string());
+    env_vars.insert("NUMEXPR_NUM_THREADS".to_string(), "1".to_string());
+    env_vars.insert("VECLIB_MAXIMUM_THREADS".to_string(), "1".to_string());
+
+    // Generate presigned PUT URL for output upload
+    let output_temp_key = format!("compute-output/{}.tar.gz", uuid::Uuid::new_v4());
+    let put_ttl = std::time::Duration::from_secs(state.config.compute.timeout_secs + 300);
+    let output_upload_url = state
+        .storage
+        .presigned_put_url_for_compute(&output_temp_key, put_ttl)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to generate output upload URL: {}", e))?;
+    env_vars.insert("OZZY_OUTPUT_UPLOAD_URL".to_string(), output_upload_url);
+
     // Execute via compute backend
     let compute_request = crate::compute::ComputeRequest {
         image: env_image_ref,
-        runner_script,
-        runner_ext: runner_ext.to_string(),
-        init_script,
-        inputs: compute_inputs,
         env_vars,
         timeout_secs: state.config.compute.timeout_secs,
         memory_limit: Some(state.config.compute.memory_limit.clone()),
         cpu_limit: Some(state.config.compute.cpu_limit.clone()),
-        network: transform_def.network,
-        runtime: state.config.compute.docker_runtime.clone(),
-        source_dir: source_dir.map(|p| p.to_path_buf()),
     };
 
-    // Execute compute and read output, ensuring secrets cleanup on all paths
+    // Execute compute and download output from R2, ensuring cleanup on all paths
     let compute_result: Result<(Vec<u8>, String, u64), anyhow::Error> = async {
         let result = backend
             .run(&compute_request)
@@ -574,21 +580,39 @@ async fn execute_node(
             .map_err(|e| anyhow::anyhow!("Compute execution failed: {}", e))?;
 
         if !result.success() {
-            let logs = result.logs.clone();
-            let exit_code = result.exit_code;
-            result.cleanup().await;
+            let _ = state.storage.delete_by_key(&output_temp_key).await;
             anyhow::bail!(
                 "Transform '{}' failed (exit {}): {}",
                 node_def.transform,
-                exit_code,
-                logs
+                result.exit_code,
+                result.logs
             );
         }
 
         let compute_duration_ms = result.duration_ms;
-        let read_result: Result<(Vec<u8>, String), anyhow::Error> = async {
+
+        // Download output tarball from R2 and extract to temp dir
+        let workspace = std::path::PathBuf::from(&state.config.compute.tmpdir)
+            .join(format!("output-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&workspace).await?;
+        let output_dir = workspace.join("output");
+        tokio::fs::create_dir_all(&output_dir).await?;
+
+        let download_result: Result<(Vec<u8>, String), anyhow::Error> = async {
+            let tarball_bytes = state.storage.get_by_key(&output_temp_key).await?;
+
+            let cursor = std::io::Cursor::new(&tarball_bytes);
+            let gz = flate2::read::GzDecoder::new(cursor);
+            let mut archive = tar::Archive::new(gz);
+            archive.set_preserve_permissions(false);
+            archive.set_unpack_xattrs(false);
+            archive.set_overwrite(false);
+            archive
+                .unpack(&output_dir)
+                .map_err(|e| anyhow::anyhow!("Failed to extract output tarball: {}", e))?;
+
             let output_files =
-                super::super::api::v1::fetch::list_output_files_anyhow(&result.output_dir).await?;
+                super::super::api::v1::fetch::list_output_files_anyhow(&output_dir).await?;
             let primary_output = super::super::api::v1::fetch::find_primary_output(&output_files)
                 .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -602,8 +626,12 @@ async fn execute_node(
             Ok((bytes, content_type))
         }
         .await;
-        result.cleanup().await;
-        let (bytes, ct) = read_result?;
+
+        // Clean up workspace and R2 temp key
+        let _ = tokio::fs::remove_dir_all(&workspace).await;
+        let _ = state.storage.delete_by_key(&output_temp_key).await;
+
+        let (bytes, ct) = download_result?;
         Ok((bytes, ct, compute_duration_ms))
     }
     .await;

@@ -1,16 +1,9 @@
 //! Fly Machines compute backend — runs transforms on Fly.io Firecracker VMs.
 //!
-//! The Fly backend:
-//! 1. Generates a presigned PUT URL for the output (temp key on R2)
-//! 2. Creates a Fly Machine with env vars including the output upload URL
-//! 3. Waits for the machine to stop (transform complete)
-//! 4. Downloads the output tarball from R2, extracts to a local temp dir
-//! 5. Destroys the machine and cleans up the temp R2 key
-//! 6. Returns ComputeResult with output_dir pointing to extracted files
-//!
-//! This way the orchestrator reads output from output_dir regardless of backend.
+//! The backend only handles machine lifecycle: create, wait for stop, collect
+//! exit code + logs, destroy. All I/O (inputs, output, source, secrets) is
+//! encoded in env_vars by the orchestrator using presigned URLs.
 
-use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -18,39 +11,30 @@ use serde::{Deserialize, Serialize};
 
 use super::types::{ComputeBackend, ComputeRequest, ComputeResult};
 use crate::config::FlyConfig;
-use crate::storage::ContentStorage;
 
 /// Fly Machines compute backend.
 #[derive(Clone)]
 pub struct FlyBackend {
     config: FlyConfig,
     http: reqwest::Client,
-    storage: ContentStorage,
-    tmpdir: String,
 }
 
 impl std::fmt::Debug for FlyBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FlyBackend")
             .field("config", &self.config)
-            .field("tmpdir", &self.tmpdir)
             .finish()
     }
 }
 
 impl FlyBackend {
-    pub fn new(config: FlyConfig, storage: ContentStorage, tmpdir: String) -> Self {
+    pub fn new(config: FlyConfig) -> Self {
         // No client-level timeout — each request sets its own .timeout() to avoid
         // a global 600s cap shadowing longer compute timeouts.
         let http = reqwest::Client::builder()
             .build()
             .expect("Failed to create HTTP client");
-        Self {
-            config,
-            http,
-            storage,
-            tmpdir,
-        }
+        Self { config, http }
     }
 }
 
@@ -60,56 +44,8 @@ impl ComputeBackend for FlyBackend {
         let job_uuid = uuid::Uuid::new_v4();
         let machine_name = format!("ozzy-job-{}", job_uuid);
 
-        // Create temp workspace for extracting output after download
-        let workspace = PathBuf::from(&self.tmpdir).join(job_uuid.to_string());
-        tokio::fs::create_dir_all(&workspace)
-            .await
-            .context("Failed to create Fly workspace directory")?;
-        let output_dir = workspace.join("output");
-        tokio::fs::create_dir_all(&output_dir).await?;
-
-        // Generate a temp R2 key for the output tarball
-        let output_temp_key = format!("fly-output/{}.tar.gz", job_uuid);
-        // TTL = compute timeout + 5 min buffer (not a fixed 4 hours)
-        let put_ttl = std::time::Duration::from_secs(request.timeout_secs + 300);
-        let output_upload_url = self
-            .storage
-            .presigned_put_url(&output_temp_key, put_ttl)
-            .await
-            .context("Failed to generate presigned PUT URL for output")?;
-
-        // Build machine env vars
-        let mut env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-
-        // Determinism env vars
-        env.insert("PYTHONHASHSEED".into(), "0".into());
-        env.insert("OMP_NUM_THREADS".into(), "1".into());
-        env.insert("MKL_NUM_THREADS".into(), "1".into());
-        env.insert("OPENBLAS_NUM_THREADS".into(), "1".into());
-        env.insert("NUMEXPR_NUM_THREADS".into(), "1".into());
-        env.insert("VECLIB_MAXIMUM_THREADS".into(), "1".into());
-
-        // Base64-encode the runner script
-        let runner_b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &request.runner_script,
-        );
-        env.insert("OZZY_RUNNER_SCRIPT_B64".into(), runner_b64);
-
-        // Base64-encode the init script
-        let init_b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &request.init_script,
-        );
-        env.insert("OZZY_INIT_SCRIPT_B64".into(), init_b64);
-
-        // Output upload URL (init script will curl PUT the output tarball here)
-        env.insert("OZZY_OUTPUT_UPLOAD_URL".into(), output_upload_url);
-
-        // User env vars (OZZY_PARAMS, OZZY_INPUT_MANIFEST, OZZY_PARAM_*, secrets, etc.)
-        for (key, value) in &request.env_vars {
-            env.insert(key.clone(), value.clone());
-        }
+        // Build machine env — all env vars come from orchestrator
+        let env: std::collections::HashMap<String, String> = request.env_vars.clone();
 
         let machine_config = CreateMachineRequest {
             name: machine_name.clone(),
@@ -158,8 +94,6 @@ impl ComputeBackend for FlyBackend {
                 .text()
                 .await
                 .unwrap_or_else(|_| "no body".into());
-            // Clean up workspace on failure
-            let _ = tokio::fs::remove_dir_all(&workspace).await;
             anyhow::bail!("Fly Machine creation failed ({}): {}", status, body);
         }
 
@@ -215,8 +149,6 @@ impl ComputeBackend for FlyBackend {
             Err(e) => {
                 tracing::error!("Fly Machine {} wait failed: {}", machine_id, e);
                 let _ = self.destroy_machine(&machine_id).await;
-                let _ = self.cleanup_temp_output(&output_temp_key).await;
-                let _ = tokio::fs::remove_dir_all(&workspace).await;
                 return Err(anyhow::anyhow!("Fly Machine execution failed: {}", e));
             }
         };
@@ -230,37 +162,9 @@ impl ComputeBackend for FlyBackend {
             );
         }
 
-        // If transform failed, don't try to download output
-        if exit_code != 0 {
-            let _ = self.cleanup_temp_output(&output_temp_key).await;
-            return Ok(ComputeResult {
-                output_dir,
-                workspace_dir: workspace,
-                exit_code,
-                logs,
-                duration_ms: start.elapsed().as_millis() as u64,
-            });
-        }
-
-        // Download output tarball from R2 and extract
-        if let Err(e) = self
-            .download_and_extract_output(&output_temp_key, &output_dir)
-            .await
-        {
-            tracing::error!("Failed to download/extract Fly output: {}", e);
-            let _ = self.cleanup_temp_output(&output_temp_key).await;
-            let _ = tokio::fs::remove_dir_all(&workspace).await;
-            return Err(e.context("Failed to download/extract Fly Machine output"));
-        }
-
-        // Clean up temp tarball from R2
-        let _ = self.cleanup_temp_output(&output_temp_key).await;
-
         let duration_ms = start.elapsed().as_millis() as u64;
 
         Ok(ComputeResult {
-            output_dir,
-            workspace_dir: workspace,
             exit_code,
             logs,
             duration_ms,
@@ -372,41 +276,6 @@ impl FlyBackend {
         resp.json()
             .await
             .context("Failed to parse machine list response")
-    }
-
-    /// Download output tarball from R2 temp key and extract to output_dir.
-    async fn download_and_extract_output(
-        &self,
-        temp_key: &str,
-        output_dir: &std::path::Path,
-    ) -> Result<()> {
-        // Download the tarball bytes from R2 via the storage client
-        let tarball_bytes = self.storage.get_by_key(temp_key).await?;
-
-        // Extract tar.gz to output_dir (with safety settings for untrusted archives)
-        let cursor = std::io::Cursor::new(&tarball_bytes);
-        let gz = flate2::read::GzDecoder::new(cursor);
-        let mut archive = tar::Archive::new(gz);
-        archive.set_preserve_permissions(false);
-        archive.set_unpack_xattrs(false);
-        archive.set_overwrite(false);
-
-        archive
-            .unpack(output_dir)
-            .context("Failed to extract Fly output tarball")?;
-
-        tracing::debug!(
-            "Extracted Fly output ({} bytes) to {}",
-            tarball_bytes.len(),
-            output_dir.display()
-        );
-
-        Ok(())
-    }
-
-    /// Clean up temp output tarball from R2 (best-effort).
-    async fn cleanup_temp_output(&self, temp_key: &str) -> Result<()> {
-        self.storage.delete_by_key(temp_key).await
     }
 
     /// Find and destroy orphaned Fly machines.

@@ -12,7 +12,10 @@ pub mod rate_limit;
 pub mod secrets;
 pub mod types;
 
-pub use types::{ComputeBackend, ComputeRequest, ComputeResult, InputSpec};
+pub use types::{
+    ComputeBackend, ComputeRequest, ComputeResult, InputSpec, build_input_manifest,
+    build_param_env_vars,
+};
 
 /// Backend selector: wraps the active compute backend.
 ///
@@ -34,15 +37,10 @@ impl BackendSelector {
     pub fn from_config(
         compute_config: &crate::config::ComputeConfig,
         fly_config: Option<&crate::config::FlyConfig>,
-        storage: &crate::storage::ContentStorage,
     ) -> Option<Self> {
         // Fly takes priority when configured
         if let Some(fly) = fly_config {
-            return Some(Self::Fly(fly::FlyBackend::new(
-                fly.clone(),
-                storage.clone(),
-                compute_config.tmpdir.clone(),
-            )));
+            return Some(Self::Fly(fly::FlyBackend::new(fly.clone())));
         }
 
         // Fall back to Docker
@@ -50,8 +48,7 @@ impl BackendSelector {
             return None;
         }
         Some(Self::Docker(docker::DockerBackend::new(
-            compute_config.tmpdir.clone(),
-            storage.clone(),
+            compute_config.docker_runtime.clone(),
         )))
     }
 

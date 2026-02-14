@@ -128,7 +128,6 @@ impl TestServer {
         let compute = ozzy_server::compute::BackendSelector::from_config(
             &config.compute,
             None,
-            &storage,
         );
 
         let git = ozzy_server::GitHubProvider::new(None, db.clone());

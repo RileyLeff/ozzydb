@@ -108,7 +108,6 @@ async fn main() -> Result<()> {
     let compute = ozzy_server::compute::BackendSelector::from_config(
         &config.compute,
         config.fly.as_ref(),
-        &storage,
     );
     match &compute {
         Some(ozzy_server::compute::BackendSelector::Fly(_)) => {
