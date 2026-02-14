@@ -12,6 +12,8 @@
 | 2026-02-13 | self | Codex `-o output.txt` flag doesn't produce file when run via Bash pipe | Use stdout redirect (`> output.txt`) instead of `-o` flag for Codex output |
 | 2026-02-13 | self | `tokio::time::timeout` on `cmd.output()` doesn't kill child process | Use `cmd.spawn()` + named container + `docker kill` for Docker timeout handling |
 | 2026-02-13 | self | `wait_with_output()` takes ownership, can't call `child.kill()` after timeout | Assign Docker container `--name` and use `docker kill {name}` on timeout instead |
+| 2026-02-14 | self | Python f-string braces in Rust format!() macro cause compile error | Use string concatenation with `chr()` for Python code inside Rust `format!()` raw strings |
+| 2026-02-14 | self | Accessed `compute` after moving it into `AppState` | Access via `state.compute.as_ref()` instead of the moved variable |
 
 ## User Preferences
 - Wants autonomous iteration: "i want you to run the process, not me!"

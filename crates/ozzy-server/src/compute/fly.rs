@@ -94,6 +94,7 @@ impl FlyBackend {
             .post(&create_url)
             .bearer_auth(&self.config.api_token)
             .json(&machine_config)
+            .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
             .context("Failed to create Fly Machine")?;
@@ -219,6 +220,7 @@ impl FlyBackend {
             .http
             .get(&url)
             .bearer_auth(&self.config.api_token)
+            .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
             .context("Failed to get Fly Machine state")?;
@@ -249,6 +251,7 @@ impl FlyBackend {
             .http
             .delete(&url)
             .bearer_auth(&self.config.api_token)
+            .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
             .context("Failed to destroy Fly Machine")?;
@@ -273,6 +276,7 @@ impl FlyBackend {
             .http
             .get(&url)
             .bearer_auth(&self.config.api_token)
+            .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
             .context("Failed to list Fly Machines")?;

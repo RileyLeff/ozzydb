@@ -30,18 +30,21 @@ pub struct PreparedSecrets {
 pub async fn prepare_secrets(
     storage: &ContentStorage,
     job_id: Uuid,
+    node_name: &str,
     secrets: &std::collections::HashMap<String, String>,
     timeout_secs: u64,
 ) -> Result<PreparedSecrets> {
     let blob = serde_json::to_vec(secrets)?;
-    let r2_key = format!("secrets/{}.json", job_id);
+    let r2_key = format!("secrets/{}/{}.json", job_id, node_name);
 
     // Upload the blob to R2
     storage.store_by_key(&r2_key, &blob).await?;
 
     // Generate a presigned GET URL (timeout + 5 min buffer)
     let ttl = std::time::Duration::from_secs(timeout_secs + 300);
-    let url = storage.presigned_get_url_by_key(&r2_key, ttl).await?;
+    let url = storage
+        .presigned_get_url_by_key_for_compute(&r2_key, ttl)
+        .await?;
 
     Ok(PreparedSecrets { url, r2_key })
 }

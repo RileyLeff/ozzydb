@@ -42,14 +42,12 @@ impl ComputeRegistry {
     ) -> Self {
         let mut providers: HashMap<String, Arc<dyn ComputeBackend>> = HashMap::new();
 
-        // Register Docker provider
+        // Register Docker provider (from_env_optional returns None when disabled)
         if let Some(docker) = docker_config {
-            if docker.enabled {
-                providers.insert(
-                    "docker".to_string(),
-                    Arc::new(docker::DockerBackend::new(docker.clone())),
-                );
-            }
+            providers.insert(
+                "docker".to_string(),
+                Arc::new(docker::DockerBackend::new(docker.clone())),
+            );
         }
 
         // Register Fly provider

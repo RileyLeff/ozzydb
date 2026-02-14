@@ -163,24 +163,34 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
             }));
         }
 
-        // Await all nodes in this wave
+        // Await all nodes in this wave. On first error, collect remaining
+        // handles and drain them to prevent orphan tasks.
         let mut wave_error: Option<anyhow::Error> = None;
+        let mut remaining_handles = Vec::new();
         for handle in handles {
-            match handle.await {
-                Ok((node_name, Ok(output))) => {
-                    node_outputs.insert(node_name, output);
-                }
-                Ok((node_name, Err(e))) => {
-                    wave_error = Some(anyhow::anyhow!("Node '{}' failed: {}", node_name, e));
-                    break;
-                }
-                Err(e) => {
-                    wave_error = Some(anyhow::anyhow!("Node execution task panicked: {}", e));
-                    break;
+            if wave_error.is_some() {
+                remaining_handles.push(handle);
+            } else {
+                match handle.await {
+                    Ok((node_name, Ok(output))) => {
+                        node_outputs.insert(node_name, output);
+                    }
+                    Ok((node_name, Err(e))) => {
+                        wave_error =
+                            Some(anyhow::anyhow!("Node '{}' failed: {}", node_name, e));
+                    }
+                    Err(e) => {
+                        wave_error =
+                            Some(anyhow::anyhow!("Node execution task panicked: {}", e));
+                    }
                 }
             }
         }
         if let Some(e) = wave_error {
+            // Await remaining handles to prevent orphan compute tasks
+            for handle in remaining_handles {
+                let _ = handle.await;
+            }
             // Clean up source tarball before propagating error
             if let Some(ref key) = source_cleanup_key {
                 let _ = state.storage.delete_by_key(key).await;
@@ -527,6 +537,7 @@ async fn execute_node(
         let prepared = super::secrets::prepare_secrets(
             &state.storage,
             job_id,
+            node_name,
             &decrypted_secrets,
             state.config.compute.timeout_secs,
         )
@@ -551,7 +562,7 @@ async fn execute_node(
     env_vars.insert("VECLIB_MAXIMUM_THREADS".to_string(), "1".to_string());
 
     // Generate presigned PUT URL for output upload
-    let output_temp_key = format!("compute-output/{}.tar.gz", uuid::Uuid::new_v4());
+    let output_temp_key = format!("compute-output/{}/{}.tar.gz", job_id, node_name);
     let put_ttl = std::time::Duration::from_secs(state.config.compute.timeout_secs + 300);
     let output_upload_url = state
         .storage
