@@ -40,8 +40,9 @@ impl std::fmt::Debug for FlyBackend {
 
 impl FlyBackend {
     pub fn new(config: FlyConfig, storage: ContentStorage, tmpdir: String) -> Self {
+        // No client-level timeout — each request sets its own .timeout() to avoid
+        // a global 600s cap shadowing longer compute timeouts.
         let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600))
             .build()
             .expect("Failed to create HTTP client");
         Self {

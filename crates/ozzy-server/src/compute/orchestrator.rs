@@ -137,15 +137,6 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
                 .map(|(a, b)| (a.to_string(), b.to_string()))
                 .collect();
 
-            // Gather input hashes from previous waves' outputs
-            let mut input_hashes_snapshot: Vec<(String, String)> = Vec::new();
-            for (input_name, source) in &edge_map_for_node {
-                if let Some(output) = node_outputs.get(source.as_str()) {
-                    input_hashes_snapshot.push((input_name.clone(), output.output_hash.clone()));
-                }
-                // Data/collection sources are resolved inside the task
-            }
-
             let source_dir_path = source_dir.as_ref().map(|d| d.path().to_path_buf());
             let node_outputs_snapshot: HashMap<String, NodeOutput> = node_outputs.clone();
             let source_download_url_clone = source_download_url.clone();
