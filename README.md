@@ -84,7 +84,7 @@ When someone fetches `acme/sensor-qc/calibrated`, OzzyDB:
 
 1. Resolves the endpoint DAG from the latest commit
 2. Checks the materialized cache (hash of inputs + transform + params + platform)
-3. On cache miss: spins up a sandboxed container, mounts the data, runs the transform chain
+3. On cache miss: creates an async job, spins up sandboxed containers (parallel where possible), runs the transform chain
 4. Stores the output content-addressed, returns it
 
 ## Architecture
@@ -99,7 +99,7 @@ clients/
 frontend/          Web UI (SvelteKit 5)
 ```
 
-**~20k lines of Rust**, ~4.7k lines of Svelte, ~1.5k lines of Python.
+**~18k lines of Rust**, ~5k lines of Svelte, ~1.5k lines of Python.
 
 ## Key design decisions
 
@@ -110,13 +110,25 @@ frontend/          Web UI (SvelteKit 5)
 - **Sandboxed compute.** Transforms run in Docker containers with `--network=none` and gVisor isolation. No internet access, no side effects.
 - **Declarative pipelines.** `ozzy.toml` in your git repo defines the DAG. Push to register, fetch to execute.
 
+## Local development
+
+Spin up the full stack locally with Docker Compose:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d
+# Check logs for the auto-generated auth token
+docker compose -f docker-compose.dev.yml logs server | grep "Auth token"
+```
+
+This starts PostgreSQL, MinIO (S3-compatible storage), and the ozzy-server with a pre-created admin user. No GitHub OAuth needed for local dev.
+
 ## Self-hosting
 
-OzzyDB is designed to be self-hostable. The server runs as a Docker Compose stack:
+OzzyDB is designed to be self-hostable. The production stack runs as Docker Compose:
 
 ```bash
 cd crates/ozzy-server/docker
-cp .env.example .env.prod
+cp .env.prod.example .env.prod
 # Edit .env.prod with your values (Postgres password, GitHub OAuth app, etc.)
 docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 ```
@@ -125,8 +137,9 @@ Requirements:
 - Docker with Docker Compose
 - A GitHub OAuth App (for authentication)
 - PostgreSQL 17 (included in the Compose stack)
-- Optional: Cloudflare R2 bucket (for scalable storage; local filesystem works too)
+- Optional: Cloudflare R2 bucket (for scalable storage; MinIO works for dev)
 - Optional: gVisor (runsc) for sandboxed compute
+- Optional: Fly Machines for remote compute
 
 ## License
 
