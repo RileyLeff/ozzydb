@@ -443,11 +443,16 @@ async fn execute_node(
                     secret_name
                 );
             }
-            if let Some(secret) = state.db.get_secret(project_id, secret_name).await? {
-                let decrypted =
-                    super::super::api::v1::fetch::decrypt_secret(&secret.encrypted_value, enc_key)?;
-                env_vars.insert(secret_name.clone(), decrypted);
-            }
+            let secret = state
+                .db
+                .get_secret(project_id, secret_name)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Required secret '{}' not found", secret_name)
+                })?;
+            let decrypted =
+                super::super::api::v1::fetch::decrypt_secret(&secret.encrypted_value, enc_key)?;
+            env_vars.insert(secret_name.clone(), decrypted);
         }
     }
 
@@ -738,9 +743,17 @@ async fn resolve_secrets_hash(
     }
     let mut pairs: Vec<(String, String)> = Vec::new();
     for secret_name in &transform_def.secrets {
-        if let Some(secret) = state.db.get_secret(project_id, secret_name).await? {
-            pairs.push((secret_name.clone(), secret.version_id.to_string()));
-        }
+        let secret = state
+            .db
+            .get_secret(project_id, secret_name)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Transform declares secret '{}' but it is not set for this project",
+                    secret_name
+                )
+            })?;
+        pairs.push((secret_name.clone(), secret.version_id.to_string()));
     }
     let refs: Vec<(&str, &str)> = pairs
         .iter()
