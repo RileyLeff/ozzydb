@@ -7,6 +7,7 @@ mod commits;
 mod data;
 mod endpoints;
 mod fetch;
+mod jobs;
 mod projects;
 mod push;
 mod secrets;
@@ -28,5 +29,6 @@ pub fn router() -> Router<AppState> {
         .nest("/endpoints", endpoints::router())
         .nest("/webhooks", webhooks::router())
         .nest("/fetch", fetch::router())
+        .nest("/jobs", jobs::router())
         .nest("/commits", commits::router())
 }

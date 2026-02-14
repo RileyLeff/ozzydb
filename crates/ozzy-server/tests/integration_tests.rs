@@ -1095,3 +1095,233 @@ fn test_secret_empty_value() {
         assert_eq!(resp.status(), 400);
     });
 }
+
+// ========================================================================
+// Job API Tests
+// ========================================================================
+
+/// Helper: create user + project + commit + job.
+async fn setup_job_test(
+    s: &TestServer,
+    suffix: &str,
+) -> (String, String, String, uuid::Uuid, uuid::Uuid) {
+    let github_id = rand::random::<i64>() & i64::MAX;
+    let username = format!("jobuser_{}", suffix);
+    let slug = format!("jobproj_{}", suffix);
+    let user = s
+        .db
+        .upsert_user_from_github(github_id, &username, None, None)
+        .await
+        .unwrap();
+
+    let project = s
+        .db
+        .get_or_create_project(user.id, &slug, "private")
+        .await
+        .unwrap();
+
+    let (plaintext, token_hash) = ozzy_server::auth::tokens::generate_api_token();
+    s.db
+        .create_token(user.id, "test-token", &token_hash, "account", None, None)
+        .await
+        .unwrap();
+
+    let commit = s
+        .db
+        .insert_commit(
+            project.id,
+            "github",
+            &format!("{}/{}", username, slug),
+            &format!("abc{}", suffix),
+            "toml_hash_placeholder",
+            user.id,
+            Some("test commit"),
+        )
+        .await
+        .unwrap();
+
+    let node_status = serde_json::json!({"step1": "queued"});
+    let job = s
+        .db
+        .create_job(
+            project.id,
+            "my_endpoint",
+            commit.id,
+            &serde_json::json!({}),
+            "params_hash_placeholder",
+            &node_status,
+            Some(user.id),
+        )
+        .await
+        .unwrap();
+
+    (username, slug, plaintext, commit.id, job.id)
+}
+
+/// GET /v1/jobs/{id} returns job status.
+#[test]
+#[ignore] // Requires Docker
+fn test_job_status_endpoint() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (_owner, _slug, token, _commit_id, job_id) =
+            setup_job_test(s, &format!("status_{}", rand::random::<u32>())).await;
+
+        let resp = s
+            .client
+            .get(format!("{}/api/v1/jobs/{}", s.base_url, job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["id"], job_id.to_string());
+        assert_eq!(body["status"], "queued");
+        assert_eq!(body["endpoint_name"], "my_endpoint");
+        assert_eq!(body["node_status"]["step1"], "queued");
+    });
+}
+
+/// GET /v1/jobs/{id} returns 404 for nonexistent job.
+#[test]
+#[ignore] // Requires Docker
+fn test_job_status_not_found() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (_, token) = s.create_test_user(&format!("jobnotfound_{}", rand::random::<u32>())).await;
+        let fake_id = uuid::Uuid::new_v4();
+
+        let resp = s
+            .client
+            .get(format!("{}/api/v1/jobs/{}", s.base_url, fake_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    });
+}
+
+/// GET /v1/jobs/{id}/output returns 409 when job is not done.
+#[test]
+#[ignore] // Requires Docker
+fn test_job_output_not_ready() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (_owner, _slug, token, _commit_id, job_id) =
+            setup_job_test(s, &format!("notready_{}", rand::random::<u32>())).await;
+
+        let resp = s
+            .client
+            .get(format!("{}/api/v1/jobs/{}/output", s.base_url, job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 409);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["message"].as_str().unwrap().contains("not complete"));
+    });
+}
+
+/// GET /v1/jobs/{id}/output returns 409 with error message when job failed.
+#[test]
+#[ignore] // Requires Docker
+fn test_job_output_failed() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (_owner, _slug, token, _commit_id, job_id) =
+            setup_job_test(s, &format!("failed_{}", rand::random::<u32>())).await;
+
+        // Simulate failure
+        s.db.set_job_error(job_id, "transform crashed").await.unwrap();
+
+        let resp = s
+            .client
+            .get(format!("{}/api/v1/jobs/{}/output", s.base_url, job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 409);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["message"].as_str().unwrap().contains("failed"));
+    });
+}
+
+/// Job status reflects transitions: queued → running → done.
+#[test]
+#[ignore] // Requires Docker
+fn test_job_status_transitions() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (_owner, _slug, token, _commit_id, job_id) =
+            setup_job_test(s, &format!("transitions_{}", rand::random::<u32>())).await;
+
+        // Initially queued
+        let resp = s
+            .client
+            .get(format!("{}/api/v1/jobs/{}", s.base_url, job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "queued");
+        assert!(body.get("started_at").is_none() || body["started_at"].is_null());
+
+        // Transition to running
+        s.db.update_job_status(job_id, "running").await.unwrap();
+        let resp = s
+            .client
+            .get(format!("{}/api/v1/jobs/{}", s.base_url, job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "running");
+        assert!(body["started_at"].is_string());
+
+        // Transition to done
+        s.db.update_job_status(job_id, "done").await.unwrap();
+        let resp = s
+            .client
+            .get(format!("{}/api/v1/jobs/{}", s.base_url, job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "done");
+        assert!(body["completed_at"].is_string());
+    });
+}
+
+/// Private project job requires auth.
+#[test]
+#[ignore] // Requires Docker
+fn test_job_status_requires_auth_for_private_project() {
+    let s = &*TEST_SERVER;
+    TEST_RT.block_on(async {
+        let (_owner, _slug, _token, _commit_id, job_id) =
+            setup_job_test(s, &format!("auth_{}", rand::random::<u32>())).await;
+
+        // No auth
+        let resp = s
+            .client
+            .get(format!("{}/api/v1/jobs/{}", s.base_url, job_id))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status() == 401 || resp.status() == 403,
+            "Expected 401/403 for private project without auth, got {}",
+            resp.status()
+        );
+    });
+}
