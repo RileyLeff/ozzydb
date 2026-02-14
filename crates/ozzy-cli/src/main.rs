@@ -246,8 +246,8 @@ enum EndpointCommands {
         /// Endpoint name
         name: String,
 
-        /// Output format
-        #[arg(long, default_value = "ascii")]
+        /// Output format (ascii, mermaid, json, svg)
+        #[arg(long, default_value = "ascii", value_parser = ["ascii", "mermaid", "json", "svg"])]
         format: String,
 
         /// Ref to inspect (defaults to current branch)

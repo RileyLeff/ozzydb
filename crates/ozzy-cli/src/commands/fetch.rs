@@ -52,6 +52,12 @@ pub async fn run(
     shared::validate_name(project, "project")?;
     shared::validate_name(ep_name, "endpoint")?;
 
+    if let Some(r) = git_ref {
+        if r.is_empty() {
+            bail!("Empty ref in '{}'. Omit '@' or provide a ref name.", endpoint);
+        }
+    }
+
     // Load credentials (optional — public projects don't require auth)
     let creds = load_credentials()?;
 
@@ -264,18 +270,25 @@ async fn download_output(
     Ok(())
 }
 
-/// Write output bytes to file or stdout.
+/// Write output bytes to file or stdout, verifying BLAKE3 hash if provided.
 fn write_output(bytes: &[u8], file_output: Option<&str>, hash: Option<&str>) -> Result<()> {
+    if let Some(expected) = hash {
+        let actual = blake3::hash(bytes).to_hex().to_string();
+        if actual != expected {
+            bail!(
+                "Hash mismatch: expected {}, got {}. Output may be corrupted.",
+                expected,
+                actual
+            );
+        }
+    }
+
     if let Some(path) = file_output {
         std::fs::write(path, bytes).context("Failed to write output file")?;
         eprintln!("Wrote {} bytes to {}", bytes.len(), path);
     } else {
         use std::io::Write;
         std::io::stdout().write_all(bytes)?;
-    }
-
-    if let Some(h) = hash {
-        eprintln!("Hash: {}", h);
     }
 
     Ok(())
