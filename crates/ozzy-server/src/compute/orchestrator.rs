@@ -65,10 +65,34 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
         serde_json::from_value(commit_state.environments.clone())?;
 
     let resolved_params: serde_json::Value = job.params.clone();
+    // Safety: source_dir TempDir lives for the duration of run_job_inner. Spawned tasks
+    // receive PathBuf clones, not TempDir refs. All tasks are awaited per-wave before
+    // the function returns, so the TempDir outlives all tasks.
     let source_dir = super::super::api::v1::fetch::retrieve_source_code(state, &commit).await;
     let edge_map = super::super::api::v1::fetch::build_edge_map(endpoint_def);
     let platform = ozzy_core::platform::PlatformFingerprint::detect();
     let platform_hash = platform.hash();
+
+    let is_fly = state.compute.as_ref().map(|c| c.is_fly()).unwrap_or(false);
+
+    // For Fly mode: upload source code tarball to R2 for download by compute machines.
+    // This is done once per job (not per-node) since all nodes share the same commit's source.
+    let mut source_cleanup_key: Option<String> = None;
+    let source_download_url: Option<String> = if is_fly {
+        if let Some(ref sd) = source_dir {
+            let tar_bytes = create_source_tarball(sd.path())?;
+            let key = format!("fly-source/{}.tar.gz", job_id);
+            state.storage.store_by_key(&key, &tar_bytes).await?;
+            let ttl = std::time::Duration::from_secs(state.config.compute.timeout_secs + 300);
+            let url = state.storage.presigned_get_url_by_key(&key, ttl).await?;
+            source_cleanup_key = Some(key);
+            Some(url)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Compute execution waves (groups of nodes that can run in parallel)
     let waves = compute_waves(endpoint_def)?;
@@ -124,6 +148,7 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
 
             let source_dir_path = source_dir.as_ref().map(|d| d.path().to_path_buf());
             let node_outputs_snapshot: HashMap<String, NodeOutput> = node_outputs.clone();
+            let source_download_url_clone = source_download_url.clone();
 
             handles.push(tokio::spawn(async move {
                 let result = execute_node(
@@ -142,6 +167,7 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
                     &edge_map_for_node,
                     &node_outputs_snapshot,
                     source_dir_path.as_deref(),
+                    source_download_url_clone.as_deref(),
                 )
                 .await;
                 (node_name, result)
@@ -149,20 +175,34 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
         }
 
         // Await all nodes in this wave
+        let mut wave_error: Option<anyhow::Error> = None;
         for handle in handles {
-            let (node_name, result) = handle
-                .await
-                .map_err(|e| anyhow::anyhow!("Node execution task panicked: {}", e))?;
-
-            match result {
-                Ok(output) => {
+            match handle.await {
+                Ok((node_name, Ok(output))) => {
                     node_outputs.insert(node_name, output);
                 }
+                Ok((node_name, Err(e))) => {
+                    wave_error = Some(anyhow::anyhow!("Node '{}' failed: {}", node_name, e));
+                    break;
+                }
                 Err(e) => {
-                    return Err(anyhow::anyhow!("Node '{}' failed: {}", node_name, e));
+                    wave_error = Some(anyhow::anyhow!("Node execution task panicked: {}", e));
+                    break;
                 }
             }
         }
+        if let Some(e) = wave_error {
+            // Clean up source tarball before propagating error
+            if let Some(ref key) = source_cleanup_key {
+                let _ = state.storage.delete_by_key(key).await;
+            }
+            return Err(e);
+        }
+    }
+
+    // Clean up Fly source tarball from R2 (best-effort, success path)
+    if let Some(ref key) = source_cleanup_key {
+        let _ = state.storage.delete_by_key(key).await;
     }
 
     // Set job output from terminal node
@@ -201,6 +241,7 @@ async fn execute_node(
     edges_for_node: &[(String, String)],
     node_outputs: &HashMap<String, NodeOutput>,
     source_dir: Option<&std::path::Path>,
+    source_download_url: Option<&str>,
 ) -> Result<NodeOutput, anyhow::Error> {
     state
         .db
@@ -386,11 +427,7 @@ async fn execute_node(
         crate::runners::RunnerType::Command
     };
 
-    let is_fly = state
-        .compute
-        .as_ref()
-        .map(|c| c.is_fly())
-        .unwrap_or(false);
+    let is_fly = state.compute.as_ref().map(|c| c.is_fly()).unwrap_or(false);
     let init_script = if is_fly {
         crate::runners::init::generate_fly_init(runner_type)
     } else {
@@ -400,7 +437,15 @@ async fn execute_node(
     // Build compute inputs by hydrating files from storage
     let mut compute_inputs: Vec<crate::compute::InputSpec> = Vec::new();
     for (input_name, hash) in &input_hashes {
-        let content_type = resolve_input_content_type(input_name, hash, state, project_id, edges_for_node, node_outputs).await;
+        let content_type = resolve_input_content_type(
+            input_name,
+            hash,
+            state,
+            project_id,
+            edges_for_node,
+            node_outputs,
+        )
+        .await;
         let ext = super::super::api::v1::fetch::content_type_to_extension(&content_type);
 
         if !is_fly {
@@ -454,7 +499,11 @@ async fn execute_node(
                 .unwrap_or_else(|| "bin".to_string());
             let url = state
                 .storage
-                .presigned_get_url(hash, &ext, std::time::Duration::from_secs(state.config.compute.timeout_secs + 300))
+                .presigned_get_url(
+                    hash,
+                    &ext,
+                    std::time::Duration::from_secs(state.config.compute.timeout_secs + 300),
+                )
                 .await?;
             // Dest path must match manifest format: /workspace/inputs/{name}
             let dest_path = format!("/workspace/inputs/{}", input_name);
@@ -470,6 +519,11 @@ async fn execute_node(
                 serde_json::to_string(&downloads).unwrap_or_default(),
             );
         }
+    }
+
+    // For Fly: add source code download URL (if source was uploaded by run_job_inner)
+    if let Some(url) = source_download_url {
+        env_vars.insert("OZZY_SOURCE_DOWNLOAD".to_string(), url.to_string());
     }
 
     // Inject secrets
@@ -517,9 +571,7 @@ async fn execute_node(
                 .db
                 .get_secret(project_id, secret_name)
                 .await?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Required secret '{}' not found", secret_name)
-                })?;
+                .ok_or_else(|| anyhow::anyhow!("Required secret '{}' not found", secret_name))?;
             let decrypted =
                 super::super::api::v1::fetch::decrypt_secret(&secret.encrypted_value, enc_key)?;
             decrypted_secrets.insert(secret_name.clone(), decrypted);
@@ -543,6 +595,17 @@ async fn execute_node(
             }
         }
     }
+
+    // Collect input file paths for cleanup before moving compute_inputs into the request
+    let docker_input_paths: Vec<std::path::PathBuf> = if !is_fly {
+        compute_inputs
+            .iter()
+            .filter(|i| !i.local_path.as_os_str().is_empty())
+            .map(|i| i.local_path.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Execute via compute backend
     let compute_request = crate::compute::ComputeRequest {
@@ -585,11 +648,11 @@ async fn execute_node(
                 super::super::api::v1::fetch::list_output_files_anyhow(&result.output_dir).await?;
             let primary_output = super::super::api::v1::fetch::find_primary_output(&output_files)
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Transform '{}' produced no output files",
-                        node_def.transform
-                    )
-                })?;
+                anyhow::anyhow!(
+                    "Transform '{}' produced no output files",
+                    node_def.transform
+                )
+            })?;
             let content_type =
                 super::super::api::v1::fetch::infer_output_content_type(primary_output);
             let bytes = tokio::fs::read(primary_output).await?;
@@ -605,6 +668,11 @@ async fn execute_node(
     // Always clean up secrets blob (best-effort), regardless of compute outcome
     if let Some(ref key) = secrets_cleanup_key {
         let _ = super::secrets::cleanup_secrets(&state.storage, key).await;
+    }
+
+    // Clean up Docker input temp files (Fly doesn't have local input files)
+    for path in &docker_input_paths {
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     let (output_bytes, output_content_type, compute_duration_ms) = compute_result?;
@@ -731,6 +799,20 @@ pub fn compute_waves(
     }
 
     Ok(waves)
+}
+
+/// Create a gzipped tarball of a directory's contents for Fly source delivery.
+fn create_source_tarball(source_dir: &std::path::Path) -> Result<Vec<u8>, anyhow::Error> {
+    use std::io::Write;
+
+    let mut tar_builder = tar::Builder::new(Vec::new());
+    tar_builder.follow_symlinks(false);
+    tar_builder.append_dir_all(".", source_dir)?;
+    let tar_bytes = tar_builder.into_inner()?;
+
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&tar_bytes)?;
+    Ok(gz.finish()?)
 }
 
 /// Resolve an edge source to a content hash.

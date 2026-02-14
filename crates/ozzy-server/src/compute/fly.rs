@@ -186,7 +186,10 @@ impl ComputeBackend for FlyBackend {
                 let state = self.get_machine_state(&machine_id).await;
                 match state {
                     Ok(ms) => {
-                        let code = ms.exit_code.unwrap_or(-1);
+                        let code = ms
+                            .exit_code
+                            .or_else(|| extract_exit_code_from_events(&ms.events))
+                            .unwrap_or(-1);
                         let events_log = ms
                             .events
                             .iter()
@@ -312,7 +315,10 @@ impl FlyBackend {
         }
 
         // Log raw response for debugging exit_code location in Fly API
-        let body = resp.text().await.context("Failed to read machine state body")?;
+        let body = resp
+            .text()
+            .await
+            .context("Failed to read machine state body")?;
         tracing::debug!("Fly Machine {} state response: {}", machine_id, body);
         serde_json::from_str(&body).context("Failed to parse machine state response")
     }
@@ -518,6 +524,19 @@ struct MachineEvent {
     timestamp: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    request: Option<EventRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventRequest {
+    #[serde(default)]
+    exit_event: Option<ExitEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExitEvent {
+    exit_code: Option<i32>,
 }
 
 /// Machine entry from list endpoint (minimal fields).
@@ -527,6 +546,21 @@ pub struct MachineListEntry {
     pub name: Option<String>,
     pub state: Option<String>,
     pub created_at: Option<String>,
+}
+
+/// Extract exit code from machine events as a fallback.
+///
+/// Looks for the last event of type "exit" and returns its `exit_event.exit_code`.
+/// This handles Fly API responses where exit_code may not be a top-level field but
+/// is nested inside the events array.
+fn extract_exit_code_from_events(events: &[MachineEvent]) -> Option<i32> {
+    events
+        .iter()
+        .rev()
+        .find(|e| e.event_type.as_deref() == Some("exit"))
+        .and_then(|e| e.request.as_ref())
+        .and_then(|r| r.exit_event.as_ref())
+        .and_then(|ee| ee.exit_code)
 }
 
 #[cfg(test)]
@@ -594,6 +628,36 @@ mod tests {
     }
 
     #[test]
+    fn test_machine_state_exit_code_from_events() {
+        // When exit_code is not top-level, extract from events
+        let json = r#"{
+            "id": "abc123",
+            "state": "stopped",
+            "events": [
+                {"type": "start", "timestamp": "2026-01-01T00:00:00Z"},
+                {"type": "exit", "timestamp": "2026-01-01T00:01:00Z", "request": {"exit_event": {"exit_code": 0}}}
+            ]
+        }"#;
+
+        let state: MachineState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.exit_code, None);
+        assert_eq!(extract_exit_code_from_events(&state.events), Some(0));
+    }
+
+    #[test]
+    fn test_machine_state_exit_code_from_events_nonzero() {
+        let json = r#"{
+            "events": [
+                {"type": "start", "timestamp": "2026-01-01T00:00:00Z"},
+                {"type": "exit", "timestamp": "2026-01-01T00:01:00Z", "request": {"exit_event": {"exit_code": 137}}}
+            ]
+        }"#;
+
+        let state: MachineState = serde_json::from_str(json).unwrap();
+        assert_eq!(extract_exit_code_from_events(&state.events), Some(137));
+    }
+
+    #[test]
     fn test_machine_state_no_exit_code() {
         let json = r#"{
             "id": "abc123",
@@ -622,8 +686,7 @@ mod tests {
             created_at: Some(old.to_rfc3339()),
         };
         assert!(m1.name.as_deref().unwrap().starts_with("ozzy-job-"));
-        let ts1: chrono::DateTime<chrono::Utc> =
-            m1.created_at.as_deref().unwrap().parse().unwrap();
+        let ts1: chrono::DateTime<chrono::Utc> = m1.created_at.as_deref().unwrap().parse().unwrap();
         assert!(ts1 < cutoff, "Old machine should be before cutoff");
 
         // Recent ozzy-job machine → not an orphan
@@ -633,8 +696,7 @@ mod tests {
             state: Some("running".into()),
             created_at: Some(recent.to_rfc3339()),
         };
-        let ts2: chrono::DateTime<chrono::Utc> =
-            m2.created_at.as_deref().unwrap().parse().unwrap();
+        let ts2: chrono::DateTime<chrono::Utc> = m2.created_at.as_deref().unwrap().parse().unwrap();
         assert!(ts2 >= cutoff, "Recent machine should be after cutoff");
 
         // Non-ozzy machine → skipped

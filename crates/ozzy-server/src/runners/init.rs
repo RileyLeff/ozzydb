@@ -48,6 +48,9 @@ echo "OzzyDB init: transform completed successfully"
 ///
 /// In this mode, inputs must be downloaded from presigned URLs and the runner
 /// script is base64-encoded in an env var.
+///
+/// **Requires:** `python3` (for secrets + input downloads) and `curl` (for
+/// source code download + output upload) in the environment image.
 pub fn generate_fly_init(runner_type: RunnerType) -> String {
     let runner_ext = match runner_type {
         RunnerType::Python => "py",
@@ -91,12 +94,24 @@ fi
 echo "$OZZY_RUNNER_SCRIPT_B64" | base64 -d > /workspace/runner.{runner_ext}
 chmod +x /workspace/runner.{runner_ext}
 
+# Download source code from R2 (if any — source-based transforms need /workspace/source/)
+if [ -n "$OZZY_SOURCE_DOWNLOAD" ]; then
+    mkdir -p /workspace/source
+    curl -sS -o /tmp/source.tar.gz "$OZZY_SOURCE_DOWNLOAD" || {{
+        echo "ERROR: Failed to download source code" >&2
+        exit 1
+    }}
+    tar xzf /tmp/source.tar.gz -C /workspace/source
+    rm -f /tmp/source.tar.gz
+fi
+
 # Save output upload URL for later, then unset infrastructure env vars
 echo "$OZZY_OUTPUT_UPLOAD_URL" > /tmp/ozzy_upload_url
 unset OZZY_RUNNER_SCRIPT_B64
 unset OZZY_INIT_SCRIPT_B64
 unset OZZY_SECRETS_URL
 unset OZZY_OUTPUT_UPLOAD_URL
+unset OZZY_SOURCE_DOWNLOAD
 
 # Download inputs from presigned URLs (if any)
 mkdir -p /workspace/inputs
@@ -215,6 +230,18 @@ mod tests {
         assert!(script.contains("unset OZZY_INIT_SCRIPT_B64"));
         assert!(script.contains("unset OZZY_SECRETS_URL"));
         assert!(script.contains("unset OZZY_OUTPUT_UPLOAD_URL"));
+    }
+
+    #[test]
+    fn test_fly_init_downloads_source() {
+        let script = generate_fly_init(RunnerType::Python);
+        assert!(script.contains("OZZY_SOURCE_DOWNLOAD"));
+        assert!(script.contains("/workspace/source"));
+        assert!(script.contains("source.tar.gz"));
+        // Source download should use curl (not python3)
+        assert!(script.contains("curl -sS -o /tmp/source.tar.gz"));
+        // Source download env var should be unset after use
+        assert!(script.contains("unset OZZY_SOURCE_DOWNLOAD"));
     }
 
     #[test]
