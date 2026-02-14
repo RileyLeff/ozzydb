@@ -400,16 +400,11 @@ async fn compute_materialized_hash(
         })?;
 
     let (_env_image, env_hash, lockfile_hash) =
-        resolve_environment_image(state, env_def, &commit.git_repo, &commit.git_commit_sha)
-            .await?;
+        resolve_environment_image(state, env_def, &commit.git_repo, &commit.git_commit_sha).await?;
 
     // Compute source_hash
-    let (source_hash, function_name) = compute_source_hash(
-        transform_def,
-        node_def,
-        commit,
-        source_dir,
-    )?;
+    let (source_hash, function_name) =
+        compute_source_hash(transform_def, node_def, commit, source_dir)?;
 
     let params_schema_hash = compute_params_schema_hash(transform_def);
 
@@ -478,7 +473,10 @@ fn compute_source_hash(
         };
         Ok((hash, func.to_owned()))
     } else if let Some(command) = &transform_def.command {
-        Ok((ozzy_core::hash::blake3_hash(command.as_bytes()), "command".to_owned()))
+        Ok((
+            ozzy_core::hash::blake3_hash(command.as_bytes()),
+            "command".to_owned(),
+        ))
     } else {
         Err(ApiError::Internal(anyhow::anyhow!(
             "Transform '{}' has neither source nor command",
@@ -488,7 +486,9 @@ fn compute_source_hash(
 }
 
 /// Compute params schema hash for a transform.
-pub(crate) fn compute_params_schema_hash(transform_def: &ozzy_core::toml_spec::TransformDef) -> String {
+pub(crate) fn compute_params_schema_hash(
+    transform_def: &ozzy_core::toml_spec::TransformDef,
+) -> String {
     if transform_def.params.is_empty() {
         ozzy_core::hash::blake3_hash(b"")
     } else {
@@ -913,9 +913,9 @@ async fn resolve_environment_image_inner(
     git_repo: &str,
     git_commit_sha: &str,
 ) -> Result<(Option<crate::db::EnvironmentImage>, String, String), anyhow::Error> {
-    let tier = env_def.tier().ok_or_else(|| {
-        anyhow::anyhow!("Environment has invalid tier configuration")
-    })?;
+    let tier = env_def
+        .tier()
+        .ok_or_else(|| anyhow::anyhow!("Environment has invalid tier configuration"))?;
 
     match &tier {
         ozzy_core::toml_spec::EnvironmentTier::Prebuilt { image } => {
@@ -939,9 +939,7 @@ async fn resolve_environment_image_inner(
                 .git
                 .get_file(git_repo, git_commit_sha, lockfile)
                 .await
-                .map_err(|e| {
-                    anyhow::anyhow!("Failed to fetch lockfile '{}': {}", lockfile, e)
-                })?;
+                .map_err(|e| anyhow::anyhow!("Failed to fetch lockfile '{}': {}", lockfile, e))?;
             let lockfile_hash = ozzy_core::hash::blake3_hash(&lockfile_bytes);
             let content = crate::environments::hash::EnvironmentContent {
                 lockfile_content: Some(String::from_utf8_lossy(&lockfile_bytes).to_string()),
@@ -960,9 +958,7 @@ async fn resolve_environment_image_inner(
                     anyhow::anyhow!("Failed to fetch Dockerfile '{}': {}", dockerfile, e)
                 })?;
             let content = crate::environments::hash::EnvironmentContent {
-                dockerfile_content: Some(
-                    String::from_utf8_lossy(&dockerfile_bytes).to_string(),
-                ),
+                dockerfile_content: Some(String::from_utf8_lossy(&dockerfile_bytes).to_string()),
                 ..Default::default()
             };
             let env_hash = crate::environments::hash::compute_env_hash(&tier, &content);
@@ -1012,7 +1008,6 @@ async fn resolve_secrets_hash(
         .await
         .map_err(ApiError::Internal)
 }
-
 
 async fn resolve_secrets_hash_inner(
     state: &AppState,

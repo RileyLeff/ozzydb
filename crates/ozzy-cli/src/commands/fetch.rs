@@ -27,7 +27,7 @@ struct JobStatus {
 }
 
 /// Execute `ozzy fetch <owner/project/endpoint[@ref]>`.
-pub async fn run(endpoint: &str, output: Option<&str>, params: &[String]) -> Result<()> {
+pub async fn run(endpoint: &str, output: Option<&str>, params: &[String], timeout_secs: u64) -> Result<()> {
     // Parse reference: owner/project/endpoint[@ref]
     let (path, git_ref) = match endpoint.split_once('@') {
         Some((p, r)) => (p, Some(r)),
@@ -122,10 +122,20 @@ pub async fn run(endpoint: &str, output: Option<&str>, params: &[String]) -> Res
     let job_id = &fetch_resp.job_id;
     let poll_url = format!("{}/api/v1/jobs/{}", registry_url, job_id);
     let poll_interval = std::time::Duration::from_secs(2);
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let poll_start = std::time::Instant::now();
     let mut last_node_status = String::new();
 
     loop {
         tokio::time::sleep(poll_interval).await;
+
+        if poll_start.elapsed() > timeout {
+            bail!(
+                "Job {} did not complete within {}s",
+                job_id,
+                timeout_secs
+            );
+        }
 
         let mut request = client.get(&poll_url);
         if let Some(t) = &token {
@@ -166,7 +176,7 @@ pub async fn run(endpoint: &str, output: Option<&str>, params: &[String]) -> Res
                 .await?;
                 return Ok(());
             }
-            "error" => {
+            "failed" => {
                 eprintln!();
                 let msg = job
                     .error_message

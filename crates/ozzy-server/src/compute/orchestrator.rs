@@ -507,8 +507,11 @@ async fn execute_node(
     let output_byte_size = output_bytes.len() as i64;
     let output_ext = super::super::api::v1::fetch::content_type_to_extension(&output_content_type);
 
-    // Store output
-    state.storage.store(&output_bytes, &output_ext).await?;
+    // Store output (use store_with_hash to avoid redundant blake3 computation)
+    state
+        .storage
+        .store_with_hash(&output_hash, &output_bytes, &output_ext)
+        .await?;
     let output_r2_key = state.storage.storage_key(&output_hash, &output_ext)?;
 
     // Insert materialized cache record
@@ -599,13 +602,14 @@ pub fn compute_waves(
     let mut assigned: HashSet<&str> = HashSet::new();
 
     loop {
-        let wave: Vec<String> = deps
+        let mut wave: Vec<String> = deps
             .iter()
             .filter(|(name, node_deps)| {
                 !assigned.contains(**name) && node_deps.iter().all(|d| assigned.contains(d))
             })
             .map(|(name, _)| name.to_string())
             .collect();
+        wave.sort();
 
         if wave.is_empty() {
             if assigned.len() < node_names.len() {
@@ -722,6 +726,8 @@ fn compute_source_hash(
 }
 
 /// Resolve secrets hash for a transform.
+///
+/// Uses `ozzy_core::hash::secrets_hash()` to match the fetch.rs cache-hit fast path.
 async fn resolve_secrets_hash(
     state: &AppState,
     project_id: Uuid,
@@ -730,19 +736,17 @@ async fn resolve_secrets_hash(
     if transform_def.secrets.is_empty() {
         return Ok(None);
     }
-    let mut secret_hashes = Vec::new();
+    let mut pairs: Vec<(String, String)> = Vec::new();
     for secret_name in &transform_def.secrets {
         if let Some(secret) = state.db.get_secret(project_id, secret_name).await? {
-            secret_hashes.push(format!("{}:{}", secret_name, secret.version_id));
+            pairs.push((secret_name.clone(), secret.version_id.to_string()));
         }
     }
-    if secret_hashes.is_empty() {
-        return Ok(None);
-    }
-    secret_hashes.sort();
-    Ok(Some(ozzy_core::hash::blake3_hash(
-        secret_hashes.join(",").as_bytes(),
-    )))
+    let refs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.as_str()))
+        .collect();
+    Ok(ozzy_core::hash::secrets_hash(&refs))
 }
 
 #[cfg(test)]

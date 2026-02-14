@@ -300,7 +300,7 @@ class TestFetch:
         )
         poll_resp = _make_response(
             json_data={
-                "status": "error",
+                "status": "failed",
                 "node_status": {"step1": "running"},
                 "output_hash": None,
                 "error_message": "Transform crashed",

@@ -1953,11 +1953,7 @@ impl Database {
     }
 
     /// List jobs for a project, ordered by most recent first.
-    pub async fn list_jobs(
-        &self,
-        project_id: Uuid,
-        limit: i64,
-    ) -> Result<Vec<Job>> {
+    pub async fn list_jobs(&self, project_id: Uuid, limit: i64) -> Result<Vec<Job>> {
         let jobs = sqlx::query_as::<_, Job>(
             "SELECT * FROM jobs WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2",
         )
@@ -1970,11 +1966,10 @@ impl Database {
 
     /// Delete expired jobs.
     pub async fn cleanup_expired_jobs(&self) -> Result<u64> {
-        let result = sqlx::query(
-            "DELETE FROM jobs WHERE expires_at IS NOT NULL AND expires_at < now()",
-        )
-        .execute(&self.pool)
-        .await?;
+        let result =
+            sqlx::query("DELETE FROM jobs WHERE expires_at IS NOT NULL AND expires_at < now()")
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected())
     }
 

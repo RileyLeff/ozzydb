@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import warnings
@@ -108,7 +109,6 @@ def fetch(
     # Cache hit — download immediately
     if status == "done" and output_url:
         if verbose:
-            import sys
             print("Cache hit", file=sys.stderr)
         return _download_job_output(
             c, job_id, output_url, output_hash, as_pandas=as_pandas
@@ -127,7 +127,6 @@ def fetch(
         job_status = job.get("status", "unknown")
 
         if verbose:
-            import sys
             node_status = job.get("node_status", {})
             parts = []
             for name in sorted(node_status):
@@ -144,7 +143,7 @@ def fetch(
                 c, job_id, job_output_url, job.get("output_hash"),
                 as_pandas=as_pandas,
             )
-        elif job_status == "error":
+        elif job_status == "failed":
             if verbose:
                 print("", file=sys.stderr)
             msg = job.get("error_message", "unknown error")

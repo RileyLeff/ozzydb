@@ -1672,6 +1672,5 @@ async fn test_provider_images() -> Result<()> {
     assert_eq!(docker.image_ref, "python:3.13-slim");
     assert_eq!(fly.image_ref, "registry.fly.io/ozzy/abc123");
 
-    Ok(()
-)
+    Ok(())
 }

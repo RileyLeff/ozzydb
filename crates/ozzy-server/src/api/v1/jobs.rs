@@ -136,33 +136,22 @@ async fn get_job_output(
         .as_deref()
         .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("Done job has no output_hash")))?;
 
-    // Look up the materialized cache entry to get the R2 key
-    let cached = state
-        .db
-        .get_materialized_cache(output_hash)
-        .await?
-        .ok_or_else(|| {
-            ApiError::Internal(anyhow::anyhow!(
-                "Materialized cache entry not found for hash {}",
-                output_hash
-            ))
-        })?;
+    let content_type = job
+        .output_content_type
+        .as_deref()
+        .unwrap_or("application/octet-stream");
 
-    // Try presigned URL redirect, fall back to proxying bytes
-    let mat_storage =
-        crate::storage::ContentStorage::from_config_with_prefix(&state.config, "materialized")?;
+    let ext = extension_for_content_type(content_type);
 
-    if mat_storage.has_remote() {
-        let url = mat_storage
+    // Serve output from content-addressed storage (where the orchestrator stored it)
+    if state.storage.has_remote() {
+        let url = state
+            .storage
             .presigned_get_url_with_filename(
                 output_hash,
-                extension_for_content_type(&cached.output_content_type),
+                ext,
                 std::time::Duration::from_secs(3600),
-                Some(&format!(
-                    "{}.{}",
-                    job.endpoint_name,
-                    extension_for_content_type(&cached.output_content_type)
-                )),
+                Some(&format!("{}.{}", job.endpoint_name, ext)),
             )
             .await?;
 
@@ -171,20 +160,17 @@ async fn get_job_output(
             [
                 ("Location", url.as_str()),
                 ("X-OzzyDB-Content-Hash", output_hash),
-                (
-                    "X-OzzyDB-Content-Type",
-                    cached.output_content_type.as_str(),
-                ),
+                ("X-OzzyDB-Content-Type", content_type),
             ],
         )
             .into_response())
     } else {
         // Local fallback: proxy the bytes
-        let bytes = mat_storage.get(output_hash, "").await?;
+        let bytes = state.storage.get(output_hash, ext).await?;
         Ok((
             StatusCode::OK,
             [
-                ("Content-Type", cached.output_content_type.as_str()),
+                ("Content-Type", content_type),
                 ("X-OzzyDB-Content-Hash", output_hash),
             ],
             bytes,
@@ -209,10 +195,16 @@ mod tests {
 
     #[test]
     fn test_extension_for_content_type() {
-        assert_eq!(extension_for_content_type("application/vnd.apache.parquet"), "parquet");
+        assert_eq!(
+            extension_for_content_type("application/vnd.apache.parquet"),
+            "parquet"
+        );
         assert_eq!(extension_for_content_type("text/csv"), "csv");
         assert_eq!(extension_for_content_type("application/json"), "json");
-        assert_eq!(extension_for_content_type("application/octet-stream"), "bin");
+        assert_eq!(
+            extension_for_content_type("application/octet-stream"),
+            "bin"
+        );
         assert_eq!(extension_for_content_type("text/plain"), "bin");
     }
 }

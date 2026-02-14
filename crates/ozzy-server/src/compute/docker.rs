@@ -266,15 +266,24 @@ pub fn build_input_manifest(inputs: &[super::types::InputSpec]) -> serde_json::V
 }
 
 /// Build the per-param env vars (OZZY_PARAM_*).
+///
+/// Keys are sanitized to `[a-zA-Z0-9_]` — any non-matching characters are stripped.
 pub fn build_param_env_vars(params: &serde_json::Value) -> Vec<(String, String)> {
     let mut vars = Vec::new();
     if let Some(obj) = params.as_object() {
         for (key, value) in obj {
+            let sanitized: String = key
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if sanitized.is_empty() {
+                continue;
+            }
             let str_value = match value {
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            vars.push((format!("OZZY_PARAM_{}", key), str_value));
+            vars.push((format!("OZZY_PARAM_{}", sanitized), str_value));
         }
     }
     vars

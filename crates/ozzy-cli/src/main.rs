@@ -72,6 +72,10 @@ enum Commands {
         /// Endpoint parameters (key=value, can be repeated)
         #[arg(short, long = "param")]
         params: Vec<String>,
+
+        /// Timeout in seconds for job completion (default: 600)
+        #[arg(long, default_value = "600")]
+        timeout: u64,
     },
 
     /// Push current commit to registry
@@ -426,8 +430,9 @@ async fn main() -> Result<()> {
             endpoint,
             output,
             params,
+            timeout,
         } => {
-            commands::fetch::run(&endpoint, output.as_deref(), &params).await?;
+            commands::fetch::run(&endpoint, output.as_deref(), &params, timeout).await?;
         }
         Commands::Cache { command } => match command {
             CacheCommands::Ls => {
