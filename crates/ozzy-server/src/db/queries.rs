@@ -2065,16 +2065,18 @@ impl Database {
         Ok(jobs)
     }
 
-    /// Cancel a job by setting its status to 'failed' with an error message.
+    /// Cancel a queued job by setting its status to 'failed' with an error message.
+    /// Only cancels jobs in 'queued' state — running jobs cannot be stopped without
+    /// terminating the underlying compute (Fly machine or Docker container).
     pub async fn cancel_job(&self, job_id: Uuid) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE jobs SET status = 'failed', error_message = 'Cancelled by admin', completed_at = now()
-             WHERE id = $1 AND status IN ('queued', 'running')",
+             WHERE id = $1 AND status = 'queued'",
         )
         .bind(job_id)
-        .fetch_optional(&self.pool)
+        .execute(&self.pool)
         .await?;
-        Ok(result.is_some())
+        Ok(result.rows_affected() > 0)
     }
 
     /// List all users with pagination.

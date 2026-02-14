@@ -147,7 +147,7 @@
 		{#if activeTab === 'jobs'}
 			<div class="panel">
 				<div class="toolbar">
-					<select bind:value={jobStatusFilter} onchange={loadJobs}>
+					<select bind:value={jobStatusFilter}>
 						<option value="">All statuses</option>
 						<option value="queued">Queued</option>
 						<option value="running">Running</option>
@@ -200,7 +200,7 @@
 											{/if}
 										</td>
 										<td>
-											{#if job.status === 'queued' || job.status === 'running'}
+											{#if job.status === 'queued'}
 												<button
 													class="btn-cancel"
 													disabled={cancellingJob === job.id}

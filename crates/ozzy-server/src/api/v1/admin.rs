@@ -88,7 +88,20 @@ async fn list_jobs(
     State(state): State<AppState>,
     Query(query): Query<ListJobsQuery>,
 ) -> Result<Json<Vec<AdminJobResponse>>, ApiError> {
-    let limit = query.limit.unwrap_or(50).min(200);
+    let limit = query.limit.unwrap_or(50).max(1).min(200);
+
+    // Validate status filter if provided
+    if let Some(ref status) = query.status {
+        match status.as_str() {
+            "queued" | "running" | "done" | "failed" => {}
+            _ => {
+                return Err(ApiError::BadRequest(format!(
+                    "Unknown job status: {status}"
+                )));
+            }
+        }
+    }
+
     let jobs = state
         .db
         .list_jobs_global(query.status.as_deref(), limit)
@@ -146,7 +159,7 @@ async fn list_users(
     State(state): State<AppState>,
     Query(query): Query<ListUsersQuery>,
 ) -> Result<Json<Vec<AdminUserResponse>>, ApiError> {
-    let limit = query.limit.unwrap_or(50).min(200);
+    let limit = query.limit.unwrap_or(50).max(1).min(200);
     let offset = query.offset.unwrap_or(0).max(0);
     let users = state
         .db
@@ -180,16 +193,25 @@ mod tests {
             status: None,
             limit: None,
         };
-        assert_eq!(q.limit.unwrap_or(50).min(200), 50);
+        assert_eq!(q.limit.unwrap_or(50).max(1).min(200), 50);
     }
 
     #[test]
-    fn test_list_jobs_query_clamp() {
+    fn test_list_jobs_query_clamp_upper() {
         let q = ListJobsQuery {
             status: Some("running".to_string()),
             limit: Some(500),
         };
-        assert_eq!(q.limit.unwrap_or(50).min(200), 200);
+        assert_eq!(q.limit.unwrap_or(50).max(1).min(200), 200);
+    }
+
+    #[test]
+    fn test_list_jobs_query_clamp_negative() {
+        let q = ListJobsQuery {
+            status: None,
+            limit: Some(-1),
+        };
+        assert_eq!(q.limit.unwrap_or(50).max(1).min(200), 1);
     }
 
     #[test]
@@ -198,7 +220,7 @@ mod tests {
             limit: None,
             offset: None,
         };
-        assert_eq!(q.limit.unwrap_or(50).min(200), 50);
+        assert_eq!(q.limit.unwrap_or(50).max(1).min(200), 50);
         assert_eq!(q.offset.unwrap_or(0).max(0), 0);
     }
 
@@ -209,5 +231,14 @@ mod tests {
             offset: Some(-5),
         };
         assert_eq!(q.offset.unwrap_or(0).max(0), 0);
+    }
+
+    #[test]
+    fn test_list_users_negative_limit_clamped() {
+        let q = ListUsersQuery {
+            limit: Some(-10),
+            offset: None,
+        };
+        assert_eq!(q.limit.unwrap_or(50).max(1).min(200), 1);
     }
 }
