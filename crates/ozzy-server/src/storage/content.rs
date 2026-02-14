@@ -616,11 +616,27 @@ impl ContentStorage {
     ///
     /// The URL allows the holder to download the content directly from R2/S3
     /// without authentication for the duration of `ttl`.
+    ///
+    /// If `download_filename` is provided, the presigned URL includes a
+    /// `response-content-disposition` override so browsers save the file with
+    /// a human-readable name instead of the content hash.
     pub async fn presigned_get_url(
         &self,
         content_hash: &str,
         extension: &str,
         ttl: Duration,
+    ) -> Result<String> {
+        self.presigned_get_url_with_filename(content_hash, extension, ttl, None)
+            .await
+    }
+
+    /// Like `presigned_get_url` but with an optional download filename override.
+    pub async fn presigned_get_url_with_filename(
+        &self,
+        content_hash: &str,
+        extension: &str,
+        ttl: Duration,
+        download_filename: Option<&str>,
     ) -> Result<String> {
         let client = self.s3_client.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Cannot generate presigned URL: R2/S3 not configured")
@@ -629,10 +645,12 @@ impl ContentStorage {
         let key = self.storage_key(content_hash, extension)?;
 
         let presigning = PresigningConfig::expires_in(ttl).context("Invalid presigning TTL")?;
-        let presigned = client
-            .get_object()
-            .bucket(bucket)
-            .key(&key)
+        let mut request = client.get_object().bucket(bucket).key(&key);
+        if let Some(filename) = download_filename {
+            request = request
+                .response_content_disposition(format!("attachment; filename=\"{}\"", filename));
+        }
+        let presigned = request
             .presigned(presigning)
             .await
             .context("Failed to generate presigned GET URL")?;
@@ -644,7 +662,14 @@ impl ContentStorage {
     ///
     /// The URL allows the holder to upload content directly to R2/S3
     /// without authentication for the duration of `ttl`.
-    pub async fn presigned_put_url(&self, storage_key: &str, ttl: Duration) -> Result<String> {
+    ///
+    /// Note: pub(crate) because the raw key is not validated — callers should
+    /// use `presigned_put_url_for_content()` which validates the hash.
+    pub(crate) async fn presigned_put_url(
+        &self,
+        storage_key: &str,
+        ttl: Duration,
+    ) -> Result<String> {
         let client = self.s3_client.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Cannot generate presigned URL: R2/S3 not configured")
         })?;
@@ -736,7 +761,7 @@ impl ContentStorage {
                 .put_object()
                 .bucket(bucket)
                 .key(&key)
-                .body(buffer.clone().into())
+                .body(Bytes::from(buffer.clone()).into())
                 .send()
                 .await
                 .context("Failed to upload small file to R2")?;
@@ -747,6 +772,7 @@ impl ContentStorage {
         }
 
         // Phase 2: Large file — multipart upload to temp key.
+        // All multipart operations are wrapped so we can abort on any failure.
         let temp_key = format!("_upload/{}.tmp", uuid::Uuid::new_v4());
 
         let create = client
@@ -761,83 +787,114 @@ impl ContentStorage {
             .ok_or_else(|| anyhow::anyhow!("Missing upload_id from CreateMultipartUpload"))?
             .to_string();
 
-        let mut parts: Vec<CompletedPart> = Vec::new();
-        let mut part_number: i32 = 1;
+        // Helper closure to abort multipart upload on error.
+        let abort = |client: &aws_sdk_s3::Client, bucket: &str, key: &str, id: &str| {
+            let client = client.clone();
+            let bucket = bucket.to_string();
+            let key = key.to_string();
+            let id = id.to_string();
+            async move {
+                let _ = client
+                    .abort_multipart_upload()
+                    .bucket(&bucket)
+                    .key(&key)
+                    .upload_id(&id)
+                    .send()
+                    .await;
+            }
+        };
 
-        // Upload buffered data as part 1.
-        let part1 = client
-            .upload_part()
-            .bucket(bucket)
-            .key(&temp_key)
-            .upload_id(&upload_id)
-            .part_number(part_number)
-            .body(buffer.into())
-            .send()
-            .await
-            .context("Failed to upload part 1")?;
-        parts.push(
-            CompletedPart::builder()
+        // Upload all parts, aborting on any failure.
+        let multipart_result: Result<Vec<CompletedPart>> = async {
+            let mut parts: Vec<CompletedPart> = Vec::new();
+            let mut part_number: i32 = 1;
+
+            // Upload buffered data as part 1.
+            let part1 = client
+                .upload_part()
+                .bucket(bucket)
+                .key(&temp_key)
+                .upload_id(&upload_id)
                 .part_number(part_number)
-                .set_e_tag(part1.e_tag().map(|s| s.to_string()))
-                .build(),
-        );
-        part_number += 1;
+                .body(buffer.into())
+                .send()
+                .await
+                .context("Failed to upload part 1")?;
+            parts.push(
+                CompletedPart::builder()
+                    .part_number(part_number)
+                    .set_e_tag(part1.e_tag().map(|s| s.to_string()))
+                    .build(),
+            );
+            part_number += 1;
 
-        // Stream remaining parts.
-        let mut part_buf = Vec::with_capacity(PART_SIZE);
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("Error reading upload stream")?;
-            hasher.update(&chunk);
-            total_size += chunk.len() as u64;
-            part_buf.extend_from_slice(&chunk);
+            // Stream remaining parts.
+            let mut part_buf = Vec::with_capacity(PART_SIZE);
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.context("Error reading upload stream")?;
+                hasher.update(&chunk);
+                total_size += chunk.len() as u64;
+                part_buf.extend_from_slice(&chunk);
 
-            if part_buf.len() >= PART_SIZE {
-                let part_data = std::mem::replace(&mut part_buf, Vec::with_capacity(PART_SIZE));
+                if part_buf.len() >= PART_SIZE {
+                    let part_data = std::mem::replace(&mut part_buf, Vec::with_capacity(PART_SIZE));
+                    let part = client
+                        .upload_part()
+                        .bucket(bucket)
+                        .key(&temp_key)
+                        .upload_id(&upload_id)
+                        .part_number(part_number)
+                        .body(part_data.into())
+                        .send()
+                        .await
+                        .with_context(|| format!("Failed to upload part {}", part_number))?;
+                    parts.push(
+                        CompletedPart::builder()
+                            .part_number(part_number)
+                            .set_e_tag(part.e_tag().map(|s| s.to_string()))
+                            .build(),
+                    );
+                    part_number += 1;
+                }
+            }
+
+            // Flush remaining bytes as final part.
+            if !part_buf.is_empty() {
                 let part = client
                     .upload_part()
                     .bucket(bucket)
                     .key(&temp_key)
                     .upload_id(&upload_id)
                     .part_number(part_number)
-                    .body(part_data.into())
+                    .body(part_buf.into())
                     .send()
                     .await
-                    .with_context(|| format!("Failed to upload part {}", part_number))?;
+                    .with_context(|| format!("Failed to upload final part {}", part_number))?;
                 parts.push(
                     CompletedPart::builder()
                         .part_number(part_number)
                         .set_e_tag(part.e_tag().map(|s| s.to_string()))
                         .build(),
                 );
-                part_number += 1;
             }
-        }
 
-        // Flush remaining bytes as final part.
-        if !part_buf.is_empty() {
-            let part = client
-                .upload_part()
-                .bucket(bucket)
-                .key(&temp_key)
-                .upload_id(&upload_id)
-                .part_number(part_number)
-                .body(part_buf.into())
-                .send()
-                .await
-                .with_context(|| format!("Failed to upload final part {}", part_number))?;
-            parts.push(
-                CompletedPart::builder()
-                    .part_number(part_number)
-                    .set_e_tag(part.e_tag().map(|s| s.to_string()))
-                    .build(),
-            );
+            Ok(parts)
         }
+        .await;
+
+        let parts = match multipart_result {
+            Ok(p) => p,
+            Err(e) => {
+                abort(client, bucket, &temp_key, &upload_id).await;
+                return Err(e);
+            }
+        };
 
         // Complete multipart upload.
         let completed = CompletedMultipartUpload::builder()
             .set_parts(Some(parts))
             .build();
-        client
+        if let Err(e) = client
             .complete_multipart_upload()
             .bucket(bucket)
             .key(&temp_key)
@@ -845,20 +902,32 @@ impl ContentStorage {
             .multipart_upload(completed)
             .send()
             .await
-            .context("Failed to complete multipart upload")?;
+        {
+            abort(client, bucket, &temp_key, &upload_id).await;
+            return Err(e).context("Failed to complete multipart upload");
+        }
 
         // Now we know the hash — copy from temp to content-addressed key.
         let content_hash = hasher.finalize().to_hex().to_string();
         let final_key = self.storage_key(&content_hash, extension)?;
 
-        client
+        if let Err(e) = client
             .copy_object()
             .bucket(bucket)
             .key(&final_key)
-            .copy_source(format!("{}/{}", bucket, temp_key))
+            .copy_source(format!("/{}/{}", bucket, temp_key))
             .send()
             .await
-            .context("Failed to copy temp upload to content-addressed key")?;
+        {
+            // Clean up temp key before returning error.
+            let _ = client
+                .delete_object()
+                .bucket(bucket)
+                .key(&temp_key)
+                .send()
+                .await;
+            return Err(e).context("Failed to copy temp upload to content-addressed key");
+        }
 
         // Delete temp key.
         let _ = client

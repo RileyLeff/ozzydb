@@ -56,7 +56,7 @@ pub struct Config {
     /// Optional R2/S3 storage backend (primary when configured).
     pub r2: Option<R2Config>,
 
-    /// Maximum multipart upload size in bytes (default: 100MB)
+    /// Maximum multipart upload size in bytes (default: 1GB)
     pub max_upload_size_bytes: u64,
 
     /// Allowed CORS origins (comma-separated, or "*" for any)
@@ -148,7 +148,7 @@ impl Config {
                 .unwrap_or_else(|_| "/tmp/ozzydb-content".into()),
             r2: R2Config::from_env_optional(),
             max_upload_size_bytes: std::env::var("MAX_UPLOAD_SIZE_BYTES")
-                .unwrap_or_else(|_| "10737418240".into()) // 10GB default
+                .unwrap_or_else(|_| "1073741824".into()) // 1GB default
                 .parse()
                 .context("MAX_UPLOAD_SIZE_BYTES must be a number")?,
             cors_origins: std::env::var("CORS_ORIGINS").unwrap_or_else(|_| "*".into()),
