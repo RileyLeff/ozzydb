@@ -133,6 +133,15 @@ pub struct R2Config {
 
     /// Region (defaults to "auto" for R2)
     pub region: String,
+
+    /// Alternate endpoint for generating presigned URLs consumed by compute containers.
+    ///
+    /// When set, presigned URLs for compute (input downloads, output uploads) use this
+    /// endpoint instead of `endpoint`. This is needed for local dev where the server
+    /// talks to MinIO at `localhost:9002` but Docker containers must use
+    /// `host.docker.internal:9002`. Not needed for production R2 (public URL works
+    /// from everywhere).
+    pub presign_endpoint: Option<String>,
 }
 
 /// Fly Machines configuration for remote compute.
@@ -311,7 +320,9 @@ impl R2Config {
             secret_access_key: std::env::var("R2_SECRET_ACCESS_KEY")
                 .context("R2_SECRET_ACCESS_KEY environment variable required")?,
             region: std::env::var("R2_REGION").unwrap_or_else(|_| "auto".into()),
+            presign_endpoint: std::env::var("R2_PRESIGN_ENDPOINT")
+                .ok()
+                .filter(|s| !s.is_empty()),
         })
     }
-
 }

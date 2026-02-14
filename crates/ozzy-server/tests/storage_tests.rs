@@ -36,6 +36,7 @@ fn get_test_config() -> Option<R2Config> {
         access_key_id,
         secret_access_key,
         region: env::var("R2_REGION").unwrap_or_else(|_| "auto".into()),
+        presign_endpoint: env::var("R2_PRESIGN_ENDPOINT").ok(),
     })
 }
 

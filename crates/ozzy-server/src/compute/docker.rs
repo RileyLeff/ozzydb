@@ -1,72 +1,76 @@
 //! Docker compute backend — runs transforms in Docker containers.
 //!
-//! Used server-side with optional gVisor sandbox. Inputs are bind-mounted,
-//! the runner script is written to the workspace, and output is collected
-//! from the workspace after execution.
+//! All I/O happens via presigned URLs, just like Fly Machines. The container
+//! downloads inputs, runs the transform, and uploads output. No bind mounts.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use tokio::process::Command;
 
 use super::types::{ComputeBackend, ComputeRequest, ComputeResult};
+use crate::storage::ContentStorage;
 
 /// Docker compute backend: runs transforms in local Docker containers.
-///
-/// Holds the tmpdir path for creating workspaces. All other per-job config
-/// (image, timeout, resource limits, runtime) comes from `ComputeRequest`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DockerBackend {
-    /// Temporary directory for compute workspaces.
+    /// Temporary directory for extracting output after download.
     pub tmpdir: String,
+    /// Storage backend for output download (presigned URLs and retrieval).
+    pub storage: ContentStorage,
+}
+
+impl std::fmt::Debug for DockerBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DockerBackend")
+            .field("tmpdir", &self.tmpdir)
+            .finish()
+    }
 }
 
 impl DockerBackend {
-    pub fn new(tmpdir: String) -> Self {
-        Self { tmpdir }
+    pub fn new(tmpdir: String, storage: ContentStorage) -> Self {
+        Self { tmpdir, storage }
     }
 }
 
 impl ComputeBackend for DockerBackend {
     async fn run(&self, request: &ComputeRequest) -> anyhow::Result<ComputeResult> {
-        run(request, &self.tmpdir).await
+        run(request, &self.tmpdir, &self.storage).await
     }
 }
 
-/// Execute a transform in a Docker container.
+/// Execute a transform in a Docker container using presigned URL I/O.
 ///
-/// 1. Creates a workspace directory in tmpdir
-/// 2. Writes runner + init scripts to the workspace
-/// 3. Copies/symlinks inputs to the workspace
-/// 4. Runs `docker run` with bind mounts, env vars, and resource limits
-/// 5. Collects output from the workspace
-/// 6. Returns the result
-pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult> {
+/// 1. Generates a presigned PUT URL for the output tarball
+/// 2. Runs `docker run` with env vars (no bind mounts)
+/// 3. Container downloads inputs, runs transform, uploads output via init script
+/// 4. After exit, downloads output from R2 and extracts to local temp dir
+/// 5. Returns the result with output_dir pointing to extracted files
+pub async fn run(
+    request: &ComputeRequest,
+    tmpdir: &str,
+    storage: &ContentStorage,
+) -> Result<ComputeResult> {
     let start = Instant::now();
 
-    // Create unique workspace directory
+    // Create workspace for extracting output after download
     let workspace_id = uuid::Uuid::new_v4().to_string();
     let workspace = PathBuf::from(tmpdir).join(&workspace_id);
     tokio::fs::create_dir_all(&workspace)
         .await
         .context("Failed to create workspace directory")?;
-
-    // Workspace cleanup is deferred until after the caller reads output.
-    // See cleanup_workspace() — called via ComputeResult::cleanup().
-
-    // Create workspace subdirectories
-    let inputs_dir = workspace.join("inputs");
     let output_dir = workspace.join("output");
-    let source_dir = workspace.join("source");
+    tokio::fs::create_dir_all(&output_dir).await?;
 
-    // Set up workspace — clean up on any setup failure
-    if let Err(e) =
-        setup_workspace(request, &workspace, &inputs_dir, &output_dir, &source_dir).await
-    {
-        cleanup_workspace(workspace).await;
-        return Err(e);
-    }
+    // Generate a temp R2 key for the output tarball
+    let output_temp_key = format!("docker-output/{}.tar.gz", workspace_id);
+    let put_ttl = std::time::Duration::from_secs(request.timeout_secs + 300);
+    let output_upload_url = storage
+        .presigned_put_url_for_compute(&output_temp_key, put_ttl)
+        .await
+        .context("Failed to generate presigned PUT URL for output")?;
 
     // Build docker run command
     let short_id = workspace_id.get(..8).unwrap_or(&workspace_id);
@@ -87,13 +91,8 @@ pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult
         cmd.args(["--runtime", runtime]);
     }
 
-    // Network isolation
-    if !request.network {
-        cmd.args(["--network", "none"]);
-    }
-
-    // Bind mounts
-    cmd.args(["-v", &format!("{}:/workspace:rw", workspace.display())]);
+    // Network access is always needed for presigned URL I/O.
+    // (--network none is NOT used; sandboxing is handled by gVisor if configured.)
 
     // Determinism env vars (always set)
     cmd.args(["-e", "PYTHONHASHSEED=0"]);
@@ -103,17 +102,40 @@ pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult
     cmd.args(["-e", "NUMEXPR_NUM_THREADS=1"]);
     cmd.args(["-e", "VECLIB_MAXIMUM_THREADS=1"]);
 
-    // User env vars (OZZY_PARAMS, OZZY_INPUT_MANIFEST, OZZY_PARAM_*, secrets)
+    // Base64-encode init script and runner script into env vars
+    let init_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &request.init_script,
+    );
+    cmd.args(["-e", &format!("OZZY_INIT_SCRIPT_B64={}", init_b64)]);
+
+    let runner_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &request.runner_script,
+    );
+    cmd.args(["-e", &format!("OZZY_RUNNER_SCRIPT_B64={}", runner_b64)]);
+
+    // Output upload URL
+    cmd.args([
+        "-e",
+        &format!("OZZY_OUTPUT_UPLOAD_URL={}", output_upload_url),
+    ]);
+
+    // User env vars (OZZY_PARAMS, OZZY_INPUT_MANIFEST, OZZY_PARAM_*,
+    // OZZY_INPUT_DOWNLOADS, OZZY_SOURCE_DOWNLOAD, OZZY_SECRETS_URL, etc.)
     for (key, value) in &request.env_vars {
         cmd.args(["-e", &format!("{}={}", key, value)]);
     }
 
-    // Image and entrypoint
+    // Image and entrypoint: decode init script from env var, run it
     cmd.arg(&request.image);
-    cmd.args(["/bin/sh", "/workspace/init.sh"]);
+    cmd.args([
+        "/bin/sh",
+        "-c",
+        "echo \"$OZZY_INIT_SCRIPT_B64\" | base64 -d > /tmp/init.sh && /bin/sh /tmp/init.sh",
+    ]);
 
-    // Execute with timeout — kill child and clean up workspace on failure.
-    // We use spawn() + wait_with_output() so we can kill the child on timeout.
+    // Execute with timeout
     let child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -130,19 +152,18 @@ pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult
             Ok(output) => output,
             Err(e) => {
                 cleanup_workspace(workspace).await;
+                let _ = storage.delete_by_key(&output_temp_key).await;
                 return Err(e).context("Failed to execute docker run");
             }
         },
         Err(_) => {
-            // Timeout: kill the child process. wait_with_output() was cancelled
-            // by the timeout, but it takes ownership of child. We need to
-            // forcefully stop the container instead.
-            // Reuse container_name from line 51 (same short_id prefix).
+            // Timeout: kill container
             let _ = tokio::process::Command::new("docker")
                 .args(["kill", &container_name])
                 .output()
                 .await;
             cleanup_workspace(workspace).await;
+            let _ = storage.delete_by_key(&output_temp_key).await;
             anyhow::bail!(
                 "Transform execution timed out after {}s",
                 request.timeout_secs
@@ -154,85 +175,69 @@ pub async fn run(request: &ComputeRequest, tmpdir: &str) -> Result<ComputeResult
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let logs = format!("{}{}", stdout, stderr);
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    // If transform failed, don't try to download output
+    if exit_code != 0 {
+        let _ = storage.delete_by_key(&output_temp_key).await;
+        return Ok(ComputeResult {
+            output_dir,
+            workspace_dir: workspace,
+            exit_code,
+            logs,
+            duration_ms,
+        });
+    }
+
+    // Download output tarball from R2 and extract
+    if let Err(e) = download_and_extract_output(storage, &output_temp_key, &output_dir).await {
+        tracing::error!("Failed to download/extract Docker output: {}", e);
+        let _ = storage.delete_by_key(&output_temp_key).await;
+        cleanup_workspace(workspace).await;
+        return Err(e.context("Failed to download/extract Docker container output"));
+    }
+
+    // Clean up temp tarball from R2
+    let _ = storage.delete_by_key(&output_temp_key).await;
 
     Ok(ComputeResult {
         output_dir,
         workspace_dir: workspace,
-        exit_code: output.status.code().unwrap_or(-1),
+        exit_code,
         logs,
         duration_ms,
     })
 }
 
-/// Set up the workspace: create dirs, write scripts, copy inputs/source.
-async fn setup_workspace(
-    request: &ComputeRequest,
-    workspace: &Path,
-    inputs_dir: &Path,
-    output_dir: &Path,
-    source_dir: &Path,
+/// Download output tarball from R2 and extract to output_dir.
+async fn download_and_extract_output(
+    storage: &ContentStorage,
+    temp_key: &str,
+    output_dir: &std::path::Path,
 ) -> Result<()> {
-    tokio::fs::create_dir_all(inputs_dir).await?;
-    tokio::fs::create_dir_all(output_dir).await?;
-    tokio::fs::create_dir_all(source_dir).await?;
+    let tarball_bytes = storage.get_by_key(temp_key).await?;
 
-    // Write runner script
-    let runner_path = workspace.join(format!("runner.{}", request.runner_ext));
-    tokio::fs::write(&runner_path, &request.runner_script).await?;
+    let cursor = std::io::Cursor::new(&tarball_bytes);
+    let gz = flate2::read::GzDecoder::new(cursor);
+    let mut archive = tar::Archive::new(gz);
+    archive.set_preserve_permissions(false);
+    archive.set_unpack_xattrs(false);
+    archive.set_overwrite(false);
 
-    // Write init script
-    let init_path = workspace.join("init.sh");
-    tokio::fs::write(&init_path, &request.init_script).await?;
+    archive
+        .unpack(output_dir)
+        .context("Failed to extract output tarball")?;
 
-    // Link/copy inputs to workspace
-    for input in &request.inputs {
-        let dest = inputs_dir.join(&input.name);
-        if input.is_collection {
-            copy_dir(&input.local_path, &dest).await?;
-        } else {
-            if tokio::fs::hard_link(&input.local_path, &dest)
-                .await
-                .is_err()
-            {
-                tokio::fs::copy(&input.local_path, &dest).await?;
-            }
-        }
-    }
+    tracing::debug!(
+        "Extracted Docker output ({} bytes) to {}",
+        tarball_bytes.len(),
+        output_dir.display()
+    );
 
-    // If source directory is provided, copy it
-    if let Some(src) = &request.source_dir {
-        copy_dir(src, source_dir).await?;
-    }
-
-    Ok(())
-}
-
-/// Recursively copy a directory, skipping symlinks.
-async fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
-    tokio::fs::create_dir_all(dst).await?;
-    let mut entries = tokio::fs::read_dir(src).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let ft = entry.file_type().await?;
-        // Skip symlinks to prevent sandbox data exfiltration
-        if ft.is_symlink() {
-            tracing::warn!("Skipping symlink in copy_dir: {}", entry.path().display());
-            continue;
-        }
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if ft.is_dir() {
-            Box::pin(copy_dir(&src_path, &dst_path)).await?;
-        } else if ft.is_file() {
-            tokio::fs::copy(&src_path, &dst_path).await?;
-        }
-    }
     Ok(())
 }
 
 /// Best-effort async cleanup for workspace directories.
-///
-/// Called explicitly after the caller has finished reading from the workspace.
-/// Using tokio::spawn instead of Drop to avoid racing with output consumption.
 pub async fn cleanup_workspace(path: PathBuf) {
     let _ = tokio::fs::remove_dir_all(&path).await;
 }
@@ -340,7 +345,6 @@ mod tests {
         let vars = build_param_env_vars(&params);
         assert_eq!(vars.len(), 3);
 
-        // Check that all params are present (order may vary)
         let var_map: std::collections::HashMap<_, _> = vars.into_iter().collect();
         assert_eq!(var_map.get("OZZY_PARAM_threshold").unwrap(), "12.5");
         assert_eq!(var_map.get("OZZY_PARAM_format").unwrap(), "csv");
@@ -358,7 +362,6 @@ mod tests {
     fn test_build_param_env_vars_string_not_quoted() {
         let params = serde_json::json!({ "name": "alice" });
         let vars = build_param_env_vars(&params);
-        // String values should not be JSON-quoted
         assert_eq!(vars[0].1, "alice");
     }
 }

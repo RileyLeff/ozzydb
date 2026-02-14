@@ -73,23 +73,20 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
     let platform = ozzy_core::platform::PlatformFingerprint::detect();
     let platform_hash = platform.hash();
 
-    let is_fly = state.compute.as_ref().map(|c| c.is_fly()).unwrap_or(false);
-
-    // For Fly mode: upload source code tarball to R2 for download by compute machines.
-    // This is done once per job (not per-node) since all nodes share the same commit's source.
+    // Upload source code tarball to R2 for download by compute containers.
+    // Done once per job (not per-node) since all nodes share the same commit's source.
     let mut source_cleanup_key: Option<String> = None;
-    let source_download_url: Option<String> = if is_fly {
-        if let Some(ref sd) = source_dir {
-            let tar_bytes = create_source_tarball(sd.path())?;
-            let key = format!("fly-source/{}.tar.gz", job_id);
-            state.storage.store_by_key(&key, &tar_bytes).await?;
-            let ttl = std::time::Duration::from_secs(state.config.compute.timeout_secs + 300);
-            let url = state.storage.presigned_get_url_by_key(&key, ttl).await?;
-            source_cleanup_key = Some(key);
-            Some(url)
-        } else {
-            None
-        }
+    let source_download_url: Option<String> = if let Some(ref sd) = source_dir {
+        let tar_bytes = create_source_tarball(sd.path())?;
+        let key = format!("compute-source/{}.tar.gz", job_id);
+        state.storage.store_by_key(&key, &tar_bytes).await?;
+        let ttl = std::time::Duration::from_secs(state.config.compute.timeout_secs + 300);
+        let url = state
+            .storage
+            .presigned_get_url_by_key_for_compute(&key, ttl)
+            .await?;
+        source_cleanup_key = Some(key);
+        Some(url)
     } else {
         None
     };
@@ -418,14 +415,9 @@ async fn execute_node(
         crate::runners::RunnerType::Command
     };
 
-    let is_fly = state.compute.as_ref().map(|c| c.is_fly()).unwrap_or(false);
-    let init_script = if is_fly {
-        crate::runners::init::generate_fly_init(runner_type)
-    } else {
-        crate::runners::init::generate_docker_init(runner_type)
-    };
+    let init_script = crate::runners::init::generate_init(runner_type);
 
-    // Build compute inputs by hydrating files from storage
+    // Build compute inputs (for manifest only — no local file hydration)
     let mut compute_inputs: Vec<crate::compute::InputSpec> = Vec::new();
     for (input_name, hash) in &input_hashes {
         let content_type = resolve_input_content_type(
@@ -437,29 +429,12 @@ async fn execute_node(
             node_outputs,
         )
         .await;
-        let ext = super::super::api::v1::fetch::content_type_to_extension(&content_type);
-
-        if !is_fly {
-            // Docker: hydrate file from storage to a local temp path for bind-mounting
-            let local_path = std::path::PathBuf::from(&state.config.compute.tmpdir)
-                .join(format!("input-{}-{}.{}", job_id, input_name, ext));
-            let bytes = state.storage.get(hash, &ext).await?;
-            tokio::fs::write(&local_path, &bytes).await?;
-            compute_inputs.push(crate::compute::InputSpec {
-                name: input_name.clone(),
-                local_path,
-                content_type,
-                is_collection: false,
-            });
-        } else {
-            // Fly: no local file needed, but InputSpec is still needed for the manifest
-            compute_inputs.push(crate::compute::InputSpec {
-                name: input_name.clone(),
-                local_path: std::path::PathBuf::new(), // unused for Fly
-                content_type,
-                is_collection: false,
-            });
-        }
+        compute_inputs.push(crate::compute::InputSpec {
+            name: input_name.clone(),
+            local_path: std::path::PathBuf::new(), // unused — inputs are downloaded via presigned URLs
+            content_type,
+            is_collection: false,
+        });
     }
 
     let input_manifest = crate::compute::docker::build_input_manifest(&compute_inputs);
@@ -478,46 +453,42 @@ async fn execute_node(
         env_vars.insert(key, value);
     }
 
-    // For Fly: build presigned download URLs for each input
-    // Reuse already-resolved hashes from input_hashes (no double DB query)
-    if is_fly {
-        let mut downloads: Vec<serde_json::Value> = Vec::new();
-        for (input_name, hash) in &input_hashes {
-            let ext = compute_inputs
-                .iter()
-                .find(|i| &i.name == input_name)
-                .map(|i| super::super::api::v1::fetch::content_type_to_extension(&i.content_type))
-                .unwrap_or_else(|| "bin".to_string());
-            let url = state
-                .storage
-                .presigned_get_url(
-                    hash,
-                    &ext,
-                    std::time::Duration::from_secs(state.config.compute.timeout_secs + 300),
-                )
-                .await?;
-            // Dest path must match manifest format: /workspace/inputs/{name}
-            let dest_path = format!("/workspace/inputs/{}", input_name);
-            downloads.push(serde_json::json!({
-                "name": input_name,
-                "url": url,
-                "path": dest_path,
-            }));
-        }
-        if !downloads.is_empty() {
-            env_vars.insert(
-                "OZZY_INPUT_DOWNLOADS".to_string(),
-                serde_json::to_string(&downloads).unwrap_or_default(),
-            );
-        }
+    // Build presigned download URLs for each input (all backends use presigned URLs)
+    let mut downloads: Vec<serde_json::Value> = Vec::new();
+    for (input_name, hash) in &input_hashes {
+        let ext = compute_inputs
+            .iter()
+            .find(|i| &i.name == input_name)
+            .map(|i| super::super::api::v1::fetch::content_type_to_extension(&i.content_type))
+            .unwrap_or_else(|| "bin".to_string());
+        let url = state
+            .storage
+            .presigned_get_url_for_compute(
+                hash,
+                &ext,
+                std::time::Duration::from_secs(state.config.compute.timeout_secs + 300),
+            )
+            .await?;
+        let dest_path = format!("/workspace/inputs/{}", input_name);
+        downloads.push(serde_json::json!({
+            "name": input_name,
+            "url": url,
+            "path": dest_path,
+        }));
+    }
+    if !downloads.is_empty() {
+        env_vars.insert(
+            "OZZY_INPUT_DOWNLOADS".to_string(),
+            serde_json::to_string(&downloads).unwrap_or_default(),
+        );
     }
 
-    // For Fly: add source code download URL (if source was uploaded by run_job_inner)
+    // Add source code download URL (if source was uploaded by run_job_inner)
     if let Some(url) = source_download_url {
         env_vars.insert("OZZY_SOURCE_DOWNLOAD".to_string(), url.to_string());
     }
 
-    // Inject secrets
+    // Inject secrets (always via R2 presigned URL for all backends)
     const RESERVED_SECRET_NAMES: &[&str] = &[
         "PATH",
         "HOME",
@@ -543,7 +514,6 @@ async fn execute_node(
                 )
             })?;
 
-        // Decrypt all secrets
         let mut decrypted_secrets: HashMap<String, String> = HashMap::new();
         for secret_name in &transform_def.secrets {
             if secret_name.starts_with("OZZY_") {
@@ -568,35 +538,17 @@ async fn execute_node(
             decrypted_secrets.insert(secret_name.clone(), decrypted);
         }
 
-        if is_fly {
-            // Fly: upload secrets to R2, pass presigned URL as env var
-            let prepared = super::secrets::prepare_secrets(
-                &state.storage,
-                job_id,
-                &decrypted_secrets,
-                state.config.compute.timeout_secs,
-            )
-            .await?;
-            env_vars.insert("OZZY_SECRETS_URL".to_string(), prepared.url);
-            secrets_cleanup_key = Some(prepared.r2_key);
-        } else {
-            // Docker: inject as raw env vars (container is local)
-            for (name, value) in decrypted_secrets {
-                env_vars.insert(name, value);
-            }
-        }
+        // Upload secrets to R2, pass presigned URL as env var
+        let prepared = super::secrets::prepare_secrets(
+            &state.storage,
+            job_id,
+            &decrypted_secrets,
+            state.config.compute.timeout_secs,
+        )
+        .await?;
+        env_vars.insert("OZZY_SECRETS_URL".to_string(), prepared.url);
+        secrets_cleanup_key = Some(prepared.r2_key);
     }
-
-    // Collect input file paths for cleanup before moving compute_inputs into the request
-    let docker_input_paths: Vec<std::path::PathBuf> = if !is_fly {
-        compute_inputs
-            .iter()
-            .filter(|i| !i.local_path.as_os_str().is_empty())
-            .map(|i| i.local_path.clone())
-            .collect()
-    } else {
-        Vec::new()
-    };
 
     // Execute via compute backend
     let compute_request = crate::compute::ComputeRequest {
@@ -659,11 +611,6 @@ async fn execute_node(
     // Always clean up secrets blob (best-effort), regardless of compute outcome
     if let Some(ref key) = secrets_cleanup_key {
         let _ = super::secrets::cleanup_secrets(&state.storage, key).await;
-    }
-
-    // Clean up Docker input temp files (Fly doesn't have local input files)
-    for path in &docker_input_paths {
-        let _ = tokio::fs::remove_file(path).await;
     }
 
     let (output_bytes, output_content_type, compute_duration_ms) = compute_result?;

@@ -20,6 +20,7 @@ fn get_r2_config() -> Option<ozzy_server::config::R2Config> {
         access_key_id: env::var("R2_ACCESS_KEY_ID").ok()?,
         secret_access_key: env::var("R2_SECRET_ACCESS_KEY").ok()?,
         region: env::var("R2_REGION").unwrap_or_else(|_| "auto".into()),
+        presign_endpoint: env::var("R2_PRESIGN_ENDPOINT").ok(),
     })
 }
 

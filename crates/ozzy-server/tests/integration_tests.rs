@@ -41,6 +41,7 @@ fn test_r2_config() -> ozzy_server::config::R2Config {
         secret_access_key: std::env::var("TEST_R2_SECRET_ACCESS_KEY")
             .unwrap_or_else(|_| "minioadmin".into()),
         region: "us-east-1".into(),
+        presign_endpoint: std::env::var("TEST_R2_PRESIGN_ENDPOINT").ok(),
     }
 }
 

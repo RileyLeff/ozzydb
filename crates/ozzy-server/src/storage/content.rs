@@ -30,6 +30,11 @@ pub struct ContentStorage {
     remote_store: Arc<dyn ObjectStore>,
     /// AWS SDK S3 client for presigned URL generation.
     s3_client: aws_sdk_s3::Client,
+    /// Optional S3 client for generating presigned URLs consumed by compute containers.
+    /// When set, `presigned_*_for_compute()` methods use this client instead of `s3_client`.
+    /// This allows generating URLs with a different hostname (e.g., `host.docker.internal`
+    /// instead of `localhost`) so Docker containers can reach MinIO in local dev.
+    compute_s3_client: Option<aws_sdk_s3::Client>,
     /// Bucket name for presigned URL generation.
     bucket: String,
     prefix: String,
@@ -101,6 +106,7 @@ impl ContentStorage {
     fn new_inner(
         remote_store: Arc<dyn ObjectStore>,
         s3_client: aws_sdk_s3::Client,
+        compute_s3_client: Option<aws_sdk_s3::Client>,
         bucket: String,
         prefix: impl Into<String>,
         verify_content_hash: bool,
@@ -108,19 +114,47 @@ impl ContentStorage {
         Self {
             remote_store,
             s3_client,
+            compute_s3_client,
             bucket,
             prefix: prefix.into(),
             verify_content_hash,
         }
     }
 
+    /// Build an optional S3 client for compute-facing presigned URLs.
+    fn build_compute_s3_client(config: &R2Config) -> Option<aws_sdk_s3::Client> {
+        let presign_endpoint = config.presign_endpoint.as_deref()?;
+        Some(Self::build_s3_client_with_endpoint(config, presign_endpoint))
+    }
+
+    /// Build an S3 client using a specific endpoint URL (for presign_endpoint support).
+    fn build_s3_client_with_endpoint(config: &R2Config, endpoint: &str) -> aws_sdk_s3::Client {
+        let credentials = Credentials::new(
+            &config.access_key_id,
+            &config.secret_access_key,
+            None,
+            None,
+            "ozzydb-r2",
+        );
+        let s3_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .endpoint_url(endpoint)
+            .region(aws_sdk_s3::config::Region::new(config.region.clone()))
+            .credentials_provider(credentials)
+            .force_path_style(true)
+            .build();
+        aws_sdk_s3::Client::from_conf(s3_config)
+    }
+
     /// Create storage from server config (content-addressed, verifies hashes on read).
     pub fn from_config(config: &Config) -> Result<Self> {
         let remote_store = Self::build_remote_store(&config.r2)?;
         let s3_client = Self::build_s3_client(&config.r2);
+        let compute_s3_client = Self::build_compute_s3_client(&config.r2);
         Ok(Self::new_inner(
             remote_store,
             s3_client,
+            compute_s3_client,
             config.r2.bucket.clone(),
             "content",
             true, // content-addressed: verify hash on read
@@ -134,9 +168,11 @@ impl ContentStorage {
     pub fn from_config_with_prefix(config: &Config, prefix: &str) -> Result<Self> {
         let remote_store = Self::build_remote_store(&config.r2)?;
         let s3_client = Self::build_s3_client(&config.r2);
+        let compute_s3_client = Self::build_compute_s3_client(&config.r2);
         Ok(Self::new_inner(
             remote_store,
             s3_client,
+            compute_s3_client,
             config.r2.bucket.clone(),
             prefix,
             false, // key-addressed: skip hash verification
@@ -147,9 +183,11 @@ impl ContentStorage {
     pub fn new(config: &R2Config) -> Result<Self> {
         let remote_store = Self::build_remote_store(config)?;
         let s3_client = Self::build_s3_client(config);
+        let compute_s3_client = Self::build_compute_s3_client(config);
         Ok(Self::new_inner(
             remote_store,
             s3_client,
+            compute_s3_client,
             config.bucket.clone(),
             "content",
             true,
@@ -160,9 +198,11 @@ impl ContentStorage {
     pub fn with_prefix(config: &R2Config, prefix: impl Into<String>) -> Result<Self> {
         let remote_store = Self::build_remote_store(config)?;
         let s3_client = Self::build_s3_client(config);
+        let compute_s3_client = Self::build_compute_s3_client(config);
         Ok(Self::new_inner(
             remote_store,
             s3_client,
+            compute_s3_client,
             config.bucket.clone(),
             prefix,
             true,
@@ -469,6 +509,73 @@ impl ContentStorage {
             .presigned(presigning)
             .await
             .context("Failed to generate presigned GET URL")?;
+        Ok(presigned.uri().to_string())
+    }
+
+    // ── Compute-facing presigned URLs ─────────────────────────────
+    //
+    // These use `compute_s3_client` (if configured via R2_PRESIGN_ENDPOINT)
+    // to generate presigned URLs reachable from inside compute containers.
+    // Falls back to the regular `s3_client` when no alternate endpoint is set.
+
+    /// S3 client to use for compute-facing presigned URLs.
+    fn compute_client(&self) -> &aws_sdk_s3::Client {
+        self.compute_s3_client.as_ref().unwrap_or(&self.s3_client)
+    }
+
+    /// Presigned GET URL for content, accessible from compute containers.
+    pub async fn presigned_get_url_for_compute(
+        &self,
+        content_hash: &str,
+        extension: &str,
+        ttl: Duration,
+    ) -> Result<String> {
+        let key = self.storage_key(content_hash, extension)?;
+        let presigning = PresigningConfig::expires_in(ttl).context("Invalid presigning TTL")?;
+        let presigned = self
+            .compute_client()
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .presigned(presigning)
+            .await
+            .context("Failed to generate compute presigned GET URL")?;
+        Ok(presigned.uri().to_string())
+    }
+
+    /// Presigned PUT URL for a raw key, accessible from compute containers.
+    pub(crate) async fn presigned_put_url_for_compute(
+        &self,
+        storage_key: &str,
+        ttl: Duration,
+    ) -> Result<String> {
+        let presigning = PresigningConfig::expires_in(ttl).context("Invalid presigning TTL")?;
+        let presigned = self
+            .compute_client()
+            .put_object()
+            .bucket(&self.bucket)
+            .key(storage_key)
+            .presigned(presigning)
+            .await
+            .context("Failed to generate compute presigned PUT URL")?;
+        Ok(presigned.uri().to_string())
+    }
+
+    /// Presigned GET URL for a raw key, accessible from compute containers.
+    pub async fn presigned_get_url_by_key_for_compute(
+        &self,
+        key: &str,
+        ttl: Duration,
+    ) -> Result<String> {
+        let presigning = PresigningConfig::expires_in(ttl).context("Invalid presigning TTL")?;
+        let presigned = self
+            .compute_client()
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .presigned(presigning)
+            .await
+            .context("Failed to generate compute presigned GET URL")?;
         Ok(presigned.uri().to_string())
     }
 

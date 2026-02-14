@@ -39,6 +39,9 @@ fn test_r2_config() -> ozzy_server::config::R2Config {
         secret_access_key: std::env::var("TEST_R2_SECRET_ACCESS_KEY")
             .unwrap_or_else(|_| "minioadmin".into()),
         region: "us-east-1".into(),
+        presign_endpoint: std::env::var("TEST_R2_PRESIGN_ENDPOINT")
+            .ok()
+            .or_else(|| Some("http://host.docker.internal:9002".into())),
     }
 }
 
@@ -122,8 +125,11 @@ impl TestServer {
         let storage =
             ContentStorage::from_config(&config).expect("Failed to create content storage");
 
-        let compute =
-            ozzy_server::compute::BackendSelector::from_config(&config.compute, None, None);
+        let compute = ozzy_server::compute::BackendSelector::from_config(
+            &config.compute,
+            None,
+            &storage,
+        );
 
         let git = ozzy_server::GitHubProvider::new(None, db.clone());
         let state = AppState {
@@ -375,7 +381,6 @@ async fn fetch_and_wait(
         return FetchResult {
             status,
             body,
-            content_type: String::new(),
             cache_hit: false,
         };
     }
@@ -413,7 +418,6 @@ async fn fetch_and_wait(
                     return FetchResult {
                         status: 500,
                         body: format!("Job failed: {}", err),
-                        content_type: String::new(),
                         cache_hit: false,
                     };
                 }
