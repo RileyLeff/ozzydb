@@ -1,0 +1,565 @@
+//! Fly Machines compute backend — runs transforms on Fly.io Firecracker VMs.
+//!
+//! The Fly backend:
+//! 1. Generates a presigned PUT URL for the output (temp key on R2)
+//! 2. Creates a Fly Machine with env vars including the output upload URL
+//! 3. Waits for the machine to stop (transform complete)
+//! 4. Downloads the output tarball from R2, extracts to a local temp dir
+//! 5. Destroys the machine and cleans up the temp R2 key
+//! 6. Returns ComputeResult with output_dir pointing to extracted files
+//!
+//! This way the orchestrator reads output from output_dir regardless of backend.
+
+use std::path::PathBuf;
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+use super::types::{ComputeBackend, ComputeRequest, ComputeResult};
+use crate::config::FlyConfig;
+use crate::storage::ContentStorage;
+
+/// Fly Machines compute backend.
+#[derive(Clone)]
+pub struct FlyBackend {
+    config: FlyConfig,
+    http: reqwest::Client,
+    storage: ContentStorage,
+    tmpdir: String,
+}
+
+impl std::fmt::Debug for FlyBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlyBackend")
+            .field("config", &self.config)
+            .field("tmpdir", &self.tmpdir)
+            .finish()
+    }
+}
+
+impl FlyBackend {
+    pub fn new(config: FlyConfig, storage: ContentStorage, tmpdir: String) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(600))
+            .build()
+            .expect("Failed to create HTTP client");
+        Self {
+            config,
+            http,
+            storage,
+            tmpdir,
+        }
+    }
+}
+
+impl ComputeBackend for FlyBackend {
+    async fn run(&self, request: &ComputeRequest) -> Result<ComputeResult> {
+        let start = Instant::now();
+        let job_uuid = uuid::Uuid::new_v4();
+        let machine_name = format!("ozzy-job-{}", job_uuid);
+
+        // Create temp workspace for extracting output after download
+        let workspace = PathBuf::from(&self.tmpdir).join(job_uuid.to_string());
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .context("Failed to create Fly workspace directory")?;
+        let output_dir = workspace.join("output");
+        tokio::fs::create_dir_all(&output_dir).await?;
+
+        // Generate a temp R2 key for the output tarball
+        let output_temp_key = format!("fly-output/{}.tar.gz", job_uuid);
+        let output_upload_url = self
+            .storage
+            .presigned_put_url(&output_temp_key, std::time::Duration::from_secs(14400))
+            .await
+            .context("Failed to generate presigned PUT URL for output")?;
+
+        // Build machine env vars
+        let mut env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+        // Determinism env vars
+        env.insert("PYTHONHASHSEED".into(), "0".into());
+        env.insert("OMP_NUM_THREADS".into(), "1".into());
+        env.insert("MKL_NUM_THREADS".into(), "1".into());
+        env.insert("OPENBLAS_NUM_THREADS".into(), "1".into());
+        env.insert("NUMEXPR_NUM_THREADS".into(), "1".into());
+        env.insert("VECLIB_MAXIMUM_THREADS".into(), "1".into());
+
+        // Base64-encode the runner script
+        let runner_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &request.runner_script,
+        );
+        env.insert("OZZY_RUNNER_SCRIPT_B64".into(), runner_b64);
+
+        // Base64-encode the init script
+        let init_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &request.init_script,
+        );
+        env.insert("OZZY_INIT_SCRIPT_B64".into(), init_b64);
+
+        // Output upload URL (init script will curl PUT the output tarball here)
+        env.insert("OZZY_OUTPUT_UPLOAD_URL".into(), output_upload_url);
+
+        // User env vars (OZZY_PARAMS, OZZY_INPUT_MANIFEST, OZZY_PARAM_*, secrets, etc.)
+        for (key, value) in &request.env_vars {
+            env.insert(key.clone(), value.clone());
+        }
+
+        let machine_config = CreateMachineRequest {
+            name: machine_name.clone(),
+            region: self.config.region.clone(),
+            config: MachineConfig {
+                image: request.image.clone(),
+                auto_destroy: true,
+                env,
+                guest: GuestConfig {
+                    cpu_kind: self.config.cpu_kind.clone(),
+                    cpus: self.config.cpus,
+                    memory_mb: self.config.memory_mb,
+                },
+                restart: RestartConfig {
+                    policy: "no".into(),
+                },
+                // Decode init.sh from env and execute it
+                init: InitConfig {
+                    cmd: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        "echo \"$OZZY_INIT_SCRIPT_B64\" | base64 -d > /tmp/init.sh && /bin/sh /tmp/init.sh".into(),
+                    ],
+                },
+            },
+        };
+
+        // Create machine
+        let create_url = format!(
+            "{}/v1/apps/{}/machines",
+            self.config.api_url, self.config.app_name
+        );
+
+        let create_resp = self
+            .http
+            .post(&create_url)
+            .bearer_auth(&self.config.api_token)
+            .json(&machine_config)
+            .send()
+            .await
+            .context("Failed to create Fly Machine")?;
+
+        if !create_resp.status().is_success() {
+            let status = create_resp.status();
+            let body = create_resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "no body".into());
+            // Clean up workspace on failure
+            let _ = tokio::fs::remove_dir_all(&workspace).await;
+            anyhow::bail!("Fly Machine creation failed ({}): {}", status, body);
+        }
+
+        let machine: CreateMachineResponse = create_resp
+            .json()
+            .await
+            .context("Failed to parse Fly Machine creation response")?;
+        let machine_id = machine.id;
+
+        tracing::info!(
+            "Fly Machine created: {} (id: {}, region: {})",
+            machine_name,
+            machine_id,
+            machine.region.as_deref().unwrap_or("unknown"),
+        );
+
+        // Wait for machine to stop
+        let wait_result = self
+            .wait_for_machine(&machine_id, request.timeout_secs)
+            .await;
+
+        // Get machine state for exit code
+        let (exit_code, logs) = match &wait_result {
+            Ok(()) => {
+                let state = self.get_machine_state(&machine_id).await;
+                match state {
+                    Ok(ms) => {
+                        let code = ms.exit_code.unwrap_or(-1);
+                        let events_log = ms
+                            .events
+                            .iter()
+                            .map(|e| {
+                                format!(
+                                    "[{}] {} {}",
+                                    e.timestamp.as_deref().unwrap_or("?"),
+                                    e.event_type.as_deref().unwrap_or("?"),
+                                    e.message.as_deref().unwrap_or("")
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        (code, events_log)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to get machine state for {}: {}", machine_id, e);
+                        (0, String::new())
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Fly Machine {} wait failed: {}", machine_id, e);
+                let _ = self.destroy_machine(&machine_id).await;
+                let _ = self.cleanup_temp_output(&output_temp_key).await;
+                let _ = tokio::fs::remove_dir_all(&workspace).await;
+                return Err(anyhow::anyhow!("Fly Machine execution failed: {}", e));
+            }
+        };
+
+        // Destroy machine (best-effort)
+        if let Err(e) = self.destroy_machine(&machine_id).await {
+            tracing::warn!(
+                "Failed to destroy Fly Machine {} (auto_destroy will clean up): {}",
+                machine_id,
+                e
+            );
+        }
+
+        // If transform failed, don't try to download output
+        if exit_code != 0 {
+            let _ = self.cleanup_temp_output(&output_temp_key).await;
+            return Ok(ComputeResult {
+                output_dir,
+                workspace_dir: workspace,
+                exit_code,
+                logs,
+                duration_ms: start.elapsed().as_millis() as u64,
+            });
+        }
+
+        // Download output tarball from R2 and extract
+        if let Err(e) = self
+            .download_and_extract_output(&output_temp_key, &output_dir)
+            .await
+        {
+            tracing::error!("Failed to download/extract Fly output: {}", e);
+            let _ = self.cleanup_temp_output(&output_temp_key).await;
+            let _ = tokio::fs::remove_dir_all(&workspace).await;
+            return Err(e.context("Failed to download/extract Fly Machine output"));
+        }
+
+        // Clean up temp tarball from R2
+        let _ = self.cleanup_temp_output(&output_temp_key).await;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        Ok(ComputeResult {
+            output_dir,
+            workspace_dir: workspace,
+            exit_code,
+            logs,
+            duration_ms,
+        })
+    }
+}
+
+impl FlyBackend {
+    /// Wait for a machine to reach "stopped" state.
+    async fn wait_for_machine(&self, machine_id: &str, timeout_secs: u64) -> Result<()> {
+        let wait_url = format!(
+            "{}/v1/apps/{}/machines/{}/wait?state=stopped&timeout={}",
+            self.config.api_url, self.config.app_name, machine_id, timeout_secs
+        );
+
+        let resp = self
+            .http
+            .get(&wait_url)
+            .bearer_auth(&self.config.api_token)
+            .timeout(std::time::Duration::from_secs(timeout_secs + 30))
+            .send()
+            .await
+            .context("Fly Machine wait request failed")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_else(|_| "no body".into());
+            anyhow::bail!("Fly Machine wait failed ({}): {}", status, body);
+        }
+
+        Ok(())
+    }
+
+    /// Get machine state (for exit code after stopping).
+    async fn get_machine_state(&self, machine_id: &str) -> Result<MachineState> {
+        let url = format!(
+            "{}/v1/apps/{}/machines/{}",
+            self.config.api_url, self.config.app_name, machine_id
+        );
+
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.config.api_token)
+            .send()
+            .await
+            .context("Failed to get Fly Machine state")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_else(|_| "no body".into());
+            anyhow::bail!("Failed to get machine state ({}): {}", status, body);
+        }
+
+        resp.json()
+            .await
+            .context("Failed to parse machine state response")
+    }
+
+    /// Destroy a machine (force=true to skip grace period).
+    pub async fn destroy_machine(&self, machine_id: &str) -> Result<()> {
+        let url = format!(
+            "{}/v1/apps/{}/machines/{}?force=true",
+            self.config.api_url, self.config.app_name, machine_id
+        );
+
+        let resp = self
+            .http
+            .delete(&url)
+            .bearer_auth(&self.config.api_token)
+            .send()
+            .await
+            .context("Failed to destroy Fly Machine")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_else(|_| "no body".into());
+            anyhow::bail!("Failed to destroy machine ({}): {}", status, body);
+        }
+
+        Ok(())
+    }
+
+    /// List all machines in the app.
+    pub async fn list_machines(&self) -> Result<Vec<MachineListEntry>> {
+        let url = format!(
+            "{}/v1/apps/{}/machines",
+            self.config.api_url, self.config.app_name
+        );
+
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.config.api_token)
+            .send()
+            .await
+            .context("Failed to list Fly Machines")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_else(|_| "no body".into());
+            anyhow::bail!("Failed to list machines ({}): {}", status, body);
+        }
+
+        resp.json()
+            .await
+            .context("Failed to parse machine list response")
+    }
+
+    /// Download output tarball from R2 temp key and extract to output_dir.
+    async fn download_and_extract_output(
+        &self,
+        temp_key: &str,
+        output_dir: &std::path::Path,
+    ) -> Result<()> {
+        // Download the tarball bytes from R2 via the storage client
+        let tarball_bytes = self.storage.get_by_key(temp_key).await?;
+
+        // Extract tar.gz to output_dir
+        let cursor = std::io::Cursor::new(&tarball_bytes);
+        let gz = flate2::read::GzDecoder::new(cursor);
+        let mut archive = tar::Archive::new(gz);
+
+        archive
+            .unpack(output_dir)
+            .context("Failed to extract Fly output tarball")?;
+
+        tracing::debug!(
+            "Extracted Fly output ({} bytes) to {}",
+            tarball_bytes.len(),
+            output_dir.display()
+        );
+
+        Ok(())
+    }
+
+    /// Clean up temp output tarball from R2 (best-effort).
+    async fn cleanup_temp_output(&self, temp_key: &str) -> Result<()> {
+        self.storage.delete_by_key(temp_key).await
+    }
+}
+
+// ── Fly Machines API types ──────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct CreateMachineRequest {
+    name: String,
+    region: String,
+    config: MachineConfig,
+}
+
+#[derive(Debug, Serialize)]
+struct MachineConfig {
+    image: String,
+    auto_destroy: bool,
+    env: std::collections::HashMap<String, String>,
+    guest: GuestConfig,
+    restart: RestartConfig,
+    init: InitConfig,
+}
+
+#[derive(Debug, Serialize)]
+struct GuestConfig {
+    cpu_kind: String,
+    cpus: u32,
+    memory_mb: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct RestartConfig {
+    policy: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InitConfig {
+    cmd: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateMachineResponse {
+    id: String,
+    #[allow(dead_code)]
+    name: Option<String>,
+    region: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MachineState {
+    #[serde(default)]
+    events: Vec<MachineEvent>,
+    #[serde(default, deserialize_with = "deserialize_exit_code")]
+    exit_code: Option<i32>,
+}
+
+fn deserialize_exit_code<'de, D>(deserializer: D) -> std::result::Result<Option<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i32>::deserialize(deserializer).or(Ok(None))
+}
+
+#[derive(Debug, Deserialize)]
+struct MachineEvent {
+    #[serde(rename = "type")]
+    event_type: Option<String>,
+    timestamp: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// Machine entry from list endpoint (minimal fields).
+#[derive(Debug, Deserialize)]
+pub struct MachineListEntry {
+    pub id: String,
+    pub name: Option<String>,
+    pub state: Option<String>,
+    pub created_at: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_machine_request_serialization() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("PYTHONHASHSEED".into(), "0".into());
+        env.insert("OZZY_PARAMS".into(), "{}".into());
+
+        let req = CreateMachineRequest {
+            name: "ozzy-job-test".into(),
+            region: "fra".into(),
+            config: MachineConfig {
+                image: "registry.fly.io/ozzydb-compute:abc123".into(),
+                auto_destroy: true,
+                env,
+                guest: GuestConfig {
+                    cpu_kind: "shared".into(),
+                    cpus: 1,
+                    memory_mb: 512,
+                },
+                restart: RestartConfig {
+                    policy: "no".into(),
+                },
+                init: InitConfig {
+                    cmd: vec!["/bin/sh".into(), "-c".into(), "echo test".into()],
+                },
+            },
+        };
+
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["name"], "ozzy-job-test");
+        assert_eq!(json["region"], "fra");
+        assert_eq!(
+            json["config"]["image"],
+            "registry.fly.io/ozzydb-compute:abc123"
+        );
+        assert_eq!(json["config"]["auto_destroy"], true);
+        assert_eq!(json["config"]["guest"]["cpu_kind"], "shared");
+        assert_eq!(json["config"]["guest"]["cpus"], 1);
+        assert_eq!(json["config"]["guest"]["memory_mb"], 512);
+        assert_eq!(json["config"]["restart"]["policy"], "no");
+        assert_eq!(json["config"]["init"]["cmd"][0], "/bin/sh");
+    }
+
+    #[test]
+    fn test_machine_state_deserialization() {
+        let json = r#"{
+            "id": "abc123",
+            "state": "stopped",
+            "events": [
+                {"type": "start", "timestamp": "2026-01-01T00:00:00Z"},
+                {"type": "exit", "timestamp": "2026-01-01T00:01:00Z", "message": "exit code: 0"}
+            ],
+            "exit_code": 0
+        }"#;
+
+        let state: MachineState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.exit_code, Some(0));
+        assert_eq!(state.events.len(), 2);
+        assert_eq!(state.events[0].event_type.as_deref(), Some("start"));
+    }
+
+    #[test]
+    fn test_machine_state_no_exit_code() {
+        let json = r#"{
+            "id": "abc123",
+            "state": "running",
+            "events": []
+        }"#;
+
+        let state: MachineState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.exit_code, None);
+    }
+
+    #[test]
+    fn test_machine_list_entry_deserialization() {
+        let json = r#"[
+            {"id": "m1", "name": "ozzy-job-abc", "state": "stopped", "created_at": "2026-01-01T00:00:00Z"},
+            {"id": "m2", "name": "ozzy-job-def", "state": "running", "created_at": "2026-01-01T00:01:00Z"}
+        ]"#;
+
+        let machines: Vec<MachineListEntry> = serde_json::from_str(json).unwrap();
+        assert_eq!(machines.len(), 2);
+        assert_eq!(machines[0].id, "m1");
+        assert_eq!(machines[0].state.as_deref(), Some("stopped"));
+    }
+}

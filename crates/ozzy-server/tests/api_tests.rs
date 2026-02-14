@@ -51,6 +51,11 @@ async fn build_test_app() -> Option<Router> {
             tmpdir: "/tmp/ozzy-test".to_string(),
             tmpfs_size: "512m".to_string(),
         },
+        fly: None,
+        rate_limit: ozzy_server::config::RateLimitConfig {
+            global_max_concurrent: 0,
+            per_user_max_concurrent: 0,
+        },
     };
 
     let storage = ContentStorage::from_config(&config).ok()?;

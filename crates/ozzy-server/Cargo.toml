@@ -79,6 +79,10 @@ urlencoding.workspace = true
 # Temp files
 tempfile.workspace = true
 
+# Tar/gzip for Fly output extraction
+tar.workspace = true
+flate2.workspace = true
+
 [dev-dependencies]
 # Testing
 tempfile.workspace = true

@@ -386,7 +386,16 @@ async fn execute_node(
         crate::runners::RunnerType::Command
     };
 
-    let init_script = crate::runners::init::generate_docker_init(runner_type);
+    let is_fly = state
+        .compute
+        .as_ref()
+        .map(|c| c.is_fly())
+        .unwrap_or(false);
+    let init_script = if is_fly {
+        crate::runners::init::generate_fly_init(runner_type)
+    } else {
+        crate::runners::init::generate_docker_init(runner_type)
+    };
 
     // Build input manifest and env vars
     let compute_inputs: Vec<crate::compute::InputSpec> = Vec::new();

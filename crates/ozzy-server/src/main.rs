@@ -75,14 +75,28 @@ async fn main() -> Result<()> {
     let git = GitHubProvider::new(git_app_config, db.clone());
 
     // Initialize compute backend
-    let compute = ozzy_server::compute::BackendSelector::from_config(&config.compute);
-    if compute.is_some() {
-        tracing::info!(
-            "Compute enabled (Docker backend, tmpdir: {})",
-            config.compute.tmpdir
-        );
-    } else {
-        tracing::info!("Compute disabled");
+    let compute = ozzy_server::compute::BackendSelector::from_config(
+        &config.compute,
+        config.fly.as_ref(),
+        Some(&storage),
+    );
+    match &compute {
+        Some(ozzy_server::compute::BackendSelector::Fly(_)) => {
+            tracing::info!(
+                "Compute enabled (Fly backend, app: {}, region: {})",
+                config.fly.as_ref().unwrap().app_name,
+                config.fly.as_ref().unwrap().region,
+            );
+        }
+        Some(ozzy_server::compute::BackendSelector::Docker(_)) => {
+            tracing::info!(
+                "Compute enabled (Docker backend, tmpdir: {})",
+                config.compute.tmpdir
+            );
+        }
+        None => {
+            tracing::info!("Compute disabled");
+        }
     }
 
     // Build application state

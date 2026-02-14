@@ -77,6 +77,12 @@ pub struct Config {
 
     /// Compute configuration for environment building and transform execution.
     pub compute: ComputeConfig,
+
+    /// Fly Machines configuration (optional). When set, compute dispatches to Fly.
+    pub fly: Option<FlyConfig>,
+
+    /// Rate limiting configuration for compute jobs.
+    pub rate_limit: RateLimitConfig,
 }
 
 /// Compute configuration for Docker-based environment building and execution.
@@ -128,6 +134,34 @@ pub struct R2Config {
     pub region: String,
 }
 
+/// Fly Machines configuration for remote compute.
+#[derive(Debug, Clone)]
+pub struct FlyConfig {
+    /// Fly API token (Bearer token for Machines API).
+    pub api_token: String,
+    /// Fly app name where machines are created.
+    pub app_name: String,
+    /// Fly Machines API base URL.
+    pub api_url: String,
+    /// Default region for machine creation (e.g., "fra").
+    pub region: String,
+    /// Default CPU kind (e.g., "shared").
+    pub cpu_kind: String,
+    /// Default CPU count.
+    pub cpus: u32,
+    /// Default memory in MB.
+    pub memory_mb: u32,
+}
+
+/// Rate limiting configuration for compute jobs.
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    /// Maximum concurrent jobs across all users (0 = unlimited).
+    pub global_max_concurrent: u32,
+    /// Maximum concurrent jobs per user (0 = unlimited).
+    pub per_user_max_concurrent: u32,
+}
+
 impl Config {
     /// Load configuration from environment variables.
     pub fn from_env() -> Result<Self> {
@@ -161,6 +195,8 @@ impl Config {
             secrets_encryption_key: parse_hex_key("SECRETS_ENCRYPTION_KEY", 32)?,
             github_app: GitHubAppConfig::from_env_optional(),
             compute: ComputeConfig::from_env(),
+            fly: FlyConfig::from_env_optional(),
+            rate_limit: RateLimitConfig::from_env(),
         })
     }
 }
@@ -211,6 +247,52 @@ impl GitHubAppConfig {
             private_key,
             webhook_secret,
         })
+    }
+}
+
+impl FlyConfig {
+    /// Load optional Fly configuration from environment variables.
+    /// Returns None when FLY_API_TOKEN is not set.
+    pub fn from_env_optional() -> Option<Self> {
+        let api_token = std::env::var("FLY_API_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())?;
+        let app_name = std::env::var("FLY_APP_NAME")
+            .ok()
+            .filter(|s| !s.is_empty())?;
+
+        Some(Self {
+            api_token,
+            app_name,
+            api_url: std::env::var("FLY_API_URL")
+                .unwrap_or_else(|_| "https://api.machines.dev".into()),
+            region: std::env::var("FLY_REGION").unwrap_or_else(|_| "fra".into()),
+            cpu_kind: std::env::var("FLY_CPU_KIND").unwrap_or_else(|_| "shared".into()),
+            cpus: std::env::var("FLY_CPUS")
+                .unwrap_or_else(|_| "1".into())
+                .parse()
+                .unwrap_or(1),
+            memory_mb: std::env::var("FLY_MEMORY_MB")
+                .unwrap_or_else(|_| "512".into())
+                .parse()
+                .unwrap_or(512),
+        })
+    }
+}
+
+impl RateLimitConfig {
+    /// Load rate limit configuration from environment variables.
+    pub fn from_env() -> Self {
+        Self {
+            global_max_concurrent: std::env::var("RATE_LIMIT_GLOBAL_MAX")
+                .unwrap_or_else(|_| "20".into())
+                .parse()
+                .unwrap_or(20),
+            per_user_max_concurrent: std::env::var("RATE_LIMIT_PER_USER_MAX")
+                .unwrap_or_else(|_| "5".into())
+                .parse()
+                .unwrap_or(5),
+        }
     }
 }
 

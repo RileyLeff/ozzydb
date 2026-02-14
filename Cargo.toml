@@ -89,6 +89,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 
 # Tar archives
 tar = "0.4"
+flate2 = "1"
 
 # Random number generation
 rand = "0.9"

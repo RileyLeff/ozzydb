@@ -445,6 +445,11 @@ async fn test_presigned_url_without_remote_fails() -> Result<()> {
                 tmpdir: "/tmp".into(),
                 tmpfs_size: "512m".into(),
             },
+            fly: None,
+            rate_limit: ozzy_server::config::RateLimitConfig {
+                global_max_concurrent: 0,
+                per_user_max_concurrent: 0,
+            },
         },
         "test",
     )?;
@@ -596,6 +601,11 @@ async fn test_store_stream_local_fallback() -> Result<()> {
                 timeout_secs: 300,
                 tmpdir: "/tmp".into(),
                 tmpfs_size: "512m".into(),
+            },
+            fly: None,
+            rate_limit: ozzy_server::config::RateLimitConfig {
+                global_max_concurrent: 0,
+                per_user_max_concurrent: 0,
             },
         },
         "test",

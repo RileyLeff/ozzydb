@@ -1973,6 +1973,27 @@ impl Database {
         Ok(result.rows_affected())
     }
 
+    /// Count active (queued or running) jobs for a specific user.
+    pub async fn count_active_jobs_for_user(&self, user_id: Uuid) -> Result<i64> {
+        let row = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM jobs WHERE created_by = $1 AND status IN ('queued', 'running')",
+        )
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Count active (queued or running) jobs globally across all users.
+    pub async fn count_active_jobs_global(&self) -> Result<i64> {
+        let row = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM jobs WHERE status IN ('queued', 'running')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
     // ========================================================================
     // Environment Provider Images
     // ========================================================================

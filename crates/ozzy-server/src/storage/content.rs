@@ -700,6 +700,43 @@ impl ContentStorage {
         self.presigned_put_url(&key, ttl).await
     }
 
+    /// Get content by raw R2/S3 key (not content-addressed).
+    ///
+    /// Used for temporary objects like Fly output tarballs that don't follow
+    /// the `{prefix}/{hash[0:2]}/{hash[2:4]}/{hash}.{ext}` layout.
+    pub async fn get_by_key(&self, key: &str) -> Result<Bytes> {
+        let remote = self
+            .remote_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Cannot get_by_key: R2/S3 not configured"))?;
+        let path = ObjectPath::from(key);
+        let result = remote
+            .get(&path)
+            .await
+            .with_context(|| format!("Failed to get object by key: {}", key))?;
+        let bytes = result
+            .bytes()
+            .await
+            .with_context(|| format!("Failed to read object bytes: {}", key))?;
+        Ok(bytes)
+    }
+
+    /// Delete an object by raw R2/S3 key (not content-addressed).
+    ///
+    /// Used for cleaning up temporary objects like Fly output tarballs.
+    pub async fn delete_by_key(&self, key: &str) -> Result<()> {
+        let remote = self
+            .remote_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Cannot delete_by_key: R2/S3 not configured"))?;
+        let path = ObjectPath::from(key);
+        remote
+            .delete(&path)
+            .await
+            .with_context(|| format!("Failed to delete object by key: {}", key))?;
+        Ok(())
+    }
+
     /// Store content from a stream, hashing on the fly.
     ///
     /// Returns `(content_hash, byte_size)`. For files ≤5MB, uses a single PutObject.
