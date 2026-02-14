@@ -1,7 +1,7 @@
 # v3 Workflow State
 
-## Current Phase: Phase 5 — Cleanup + Local Dev Stack
-## Current Step: Exhaustive review
+## Current Phase: Phase 7 — Deployment & Integration
+## Current Step: Step 7.1 (Docker Compose config updates)
 
 ## Completed Steps
 
@@ -188,7 +188,7 @@
 - Review fix commit: `cba927c`
 - Models: Claude Opus only (~389k tokens, exceeds Codex/Gemini limits)
 
-### Phase 5: Cleanup + Local Dev Stack (IN PROGRESS)
+### Phase 5: Cleanup + Local Dev Stack (COMPLETE)
 
 #### Step 5.1: Delete dead code
 - Deleted `crates/ozzy-cli/src/commands/run.rs` (~1572 lines)
@@ -213,8 +213,18 @@
 - Updated CLAUDE.md: v2→v3 references, CLI command list, local dev section
 - Commit: `12ffd17`
 
-#### Phase 5 Exhaustive Review (IN PROGRESS)
+#### Phase 5 Exhaustive Review: 4 rounds, converged (2 consecutive clean)
+- Round 1: 6 fixes (stale ozzy run refs, --lang flag, v3 error msg, Justfile, dev compose improvements)
+- Round 2: 7 fixes (docs schema rewrite, DEV_AUTO_USER admin promotion, Fly env vars, services-up, init template, dead clone, test Config fields)
+- Review fix commits: `edf04b4`, `5c63964`
+- Rounds 3-4: CLEAN
+- Models: Claude Opus only (~375k tokens, exceeds Codex/Gemini limits)
+
+### Phase 6: Polish (SKIPPED — stretch goals, not blocking deployment)
+
+### Phase 7: Deployment & Integration (IN PROGRESS)
 
 ## What's Next
-- Phase 5 exhaustive review convergence
-- Phase 6 (Polish - stretch goals)
+- Step 7.1: Docker Compose config updates (add missing env vars)
+- Step 7.2: End-to-end tests (compute pipeline E2E with Docker)
+- Step 7.3: Deploy to production
