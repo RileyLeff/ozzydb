@@ -479,6 +479,7 @@ struct EventRequest {
 #[derive(Debug, Deserialize)]
 struct ExitEvent {
     exit_code: Option<i32>,
+    guest_exit_code: Option<i32>,
 }
 
 /// Machine entry from list endpoint (minimal fields).
@@ -492,9 +493,9 @@ pub struct MachineListEntry {
 
 /// Extract exit code from machine events as a fallback.
 ///
-/// Looks for the last event of type "exit" and returns its `exit_event.exit_code`.
-/// This handles Fly API responses where exit_code may not be a top-level field but
-/// is nested inside the events array.
+/// Looks for the last event of type "exit" and returns its exit code.
+/// Prefers `guest_exit_code` (the actual init process exit) over `exit_code`
+/// (the Fly machine-level exit, which can differ from the guest's).
 fn extract_exit_code_from_events(events: &[MachineEvent]) -> Option<i32> {
     events
         .iter()
@@ -502,7 +503,7 @@ fn extract_exit_code_from_events(events: &[MachineEvent]) -> Option<i32> {
         .find(|e| e.event_type.as_deref() == Some("exit"))
         .and_then(|e| e.request.as_ref())
         .and_then(|r| r.exit_event.as_ref())
-        .and_then(|ee| ee.exit_code)
+        .and_then(|ee| ee.guest_exit_code.or(ee.exit_code))
 }
 
 #[cfg(test)]
@@ -597,6 +598,21 @@ mod tests {
 
         let state: MachineState = serde_json::from_str(json).unwrap();
         assert_eq!(extract_exit_code_from_events(&state.events), Some(137));
+    }
+
+    #[test]
+    fn test_guest_exit_code_preferred_over_machine_exit_code() {
+        // Fly returns guest_exit_code=0 (process succeeded) but exit_code=2 (machine-level)
+        // We should prefer guest_exit_code
+        let json = r#"{
+            "events": [
+                {"type": "start", "timestamp": 1771113249144},
+                {"type": "exit", "timestamp": 1771113250634, "request": {"exit_event": {"exit_code": 2, "guest_exit_code": 0}}}
+            ]
+        }"#;
+
+        let state: MachineState = serde_json::from_str(json).unwrap();
+        assert_eq!(extract_exit_code_from_events(&state.events), Some(0));
     }
 
     #[test]
