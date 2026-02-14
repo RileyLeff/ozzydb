@@ -10,12 +10,14 @@ use anyhow::Result;
 /// waits for completion, and returns exit code + logs. All I/O (inputs,
 /// output, source code, secrets) is handled via presigned URLs encoded
 /// in env_vars by the orchestrator.
-pub trait ComputeBackend: Send + Sync {
+///
+/// Object-safe: uses boxed futures to support `dyn ComputeBackend` in the registry.
+pub trait ComputeBackend: Send + Sync + std::any::Any {
     /// Execute a transform in a container and return the result.
-    fn run(
-        &self,
-        request: &ComputeRequest,
-    ) -> impl std::future::Future<Output = Result<ComputeResult>> + Send;
+    fn run<'a>(
+        &'a self,
+        request: &'a ComputeRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ComputeResult>> + Send + 'a>>;
 }
 
 /// A request to execute a transform in a container.

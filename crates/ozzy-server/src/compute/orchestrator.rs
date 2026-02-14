@@ -343,11 +343,8 @@ async fn execute_node(
         });
     }
 
-    // Execute uncached node
-    let backend = state
-        .compute
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Compute is not enabled on this server"))?;
+    // Resolve compute backend for this node
+    let backend = state.compute.resolve(node_def.machine.as_deref())?;
 
     let env_image_ref = env_image
         .as_ref()

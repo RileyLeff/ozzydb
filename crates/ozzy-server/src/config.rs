@@ -103,6 +103,9 @@ pub struct ComputeConfig {
     pub tmpdir: String,
     /// tmpfs size for compute containers (e.g., "512m").
     pub tmpfs_size: String,
+    /// Default compute provider name (e.g., "fly", "docker").
+    /// If not set, auto-selects: fly > docker.
+    pub default_provider: Option<String>,
 }
 
 /// GitHub App configuration for repository access.
@@ -233,6 +236,9 @@ impl ComputeConfig {
                 .or_else(|_| std::env::var("TMPDIR"))
                 .unwrap_or_else(|_| "/tmp/ozzy".into()),
             tmpfs_size: std::env::var("COMPUTE_TMPFS_SIZE").unwrap_or_else(|_| "512m".into()),
+            default_provider: std::env::var("COMPUTE_DEFAULT_PROVIDER")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 }

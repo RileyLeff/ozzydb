@@ -112,6 +112,7 @@ impl TestServer {
                 timeout_secs: 300,
                 tmpdir: "/tmp/ozzy-test".to_string(),
                 tmpfs_size: "512m".to_string(),
+                default_provider: None,
             },
             fly: None,
             rate_limit: ozzy_server::config::RateLimitConfig {
@@ -125,12 +126,14 @@ impl TestServer {
             ContentStorage::from_config(&config).expect("Failed to create content storage");
 
         let git = ozzy_server::GitHubProvider::new(None, db.clone());
+        let compute =
+            ozzy_server::compute::ComputeRegistry::from_config(&config.compute, config.fly.as_ref());
         let state = AppState {
             config: Arc::new(config),
             db: db.clone(),
             storage,
             git,
-            compute: None,
+            compute,
         };
 
         let app = axum::Router::new().merge(api::router()).with_state(state);

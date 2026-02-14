@@ -113,6 +113,7 @@ impl TestServer {
                 timeout_secs: 120,
                 tmpdir: tmpdir.path().to_string_lossy().to_string(),
                 tmpfs_size: "512m".to_string(),
+            default_provider: None,
             },
             fly: None,
             rate_limit: ozzy_server::config::RateLimitConfig {
@@ -125,7 +126,7 @@ impl TestServer {
         let storage =
             ContentStorage::from_config(&config).expect("Failed to create content storage");
 
-        let compute = ozzy_server::compute::BackendSelector::from_config(
+        let compute = ozzy_server::compute::ComputeRegistry::from_config(
             &config.compute,
             None,
         );

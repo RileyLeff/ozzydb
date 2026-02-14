@@ -104,28 +104,19 @@ async fn main() -> Result<()> {
     }
     let git = GitHubProvider::new(git_app_config, db.clone());
 
-    // Initialize compute backend
-    let compute = ozzy_server::compute::BackendSelector::from_config(
+    // Initialize compute registry
+    let compute = ozzy_server::compute::ComputeRegistry::from_config(
         &config.compute,
         config.fly.as_ref(),
     );
-    match &compute {
-        Some(ozzy_server::compute::BackendSelector::Fly(_)) => {
-            tracing::info!(
-                "Compute enabled (Fly backend, app: {}, region: {})",
-                config.fly.as_ref().unwrap().app_name,
-                config.fly.as_ref().unwrap().region,
-            );
-        }
-        Some(ozzy_server::compute::BackendSelector::Docker(_)) => {
-            tracing::info!(
-                "Compute enabled (Docker backend, tmpdir: {})",
-                config.compute.tmpdir
-            );
-        }
-        None => {
-            tracing::info!("Compute disabled");
-        }
+    if compute.is_enabled() {
+        tracing::info!(
+            "Compute providers: {} (default: {})",
+            compute.provider_names().join(", "),
+            compute.default_provider().unwrap_or("none"),
+        );
+    } else {
+        tracing::info!("Compute disabled (no providers configured)");
     }
 
     // Build application state
@@ -138,7 +129,7 @@ async fn main() -> Result<()> {
     };
 
     // Spawn periodic orphan cleanup for Fly backend
-    if let Some(fly) = state.compute.as_ref().and_then(|c| c.as_fly()) {
+    if let Some(fly) = state.compute.fly_backend() {
         let fly_clone = fly.clone();
         // Derive max_age from compute timeout: 2x timeout + 10 min buffer
         // This ensures we never destroy a machine that's still within its allowed execution window

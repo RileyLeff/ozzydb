@@ -39,7 +39,17 @@ impl FlyBackend {
 }
 
 impl ComputeBackend for FlyBackend {
-    async fn run(&self, request: &ComputeRequest) -> Result<ComputeResult> {
+    fn run<'a>(
+        &'a self,
+        request: &'a ComputeRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ComputeResult>> + Send + 'a>>
+    {
+        Box::pin(self.run_inner(request))
+    }
+}
+
+impl FlyBackend {
+    async fn run_inner(&self, request: &ComputeRequest) -> Result<ComputeResult> {
         let start = Instant::now();
         let job_uuid = uuid::Uuid::new_v4();
         let machine_name = format!("ozzy-job-{}", job_uuid);

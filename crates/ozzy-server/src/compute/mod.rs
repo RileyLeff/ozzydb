@@ -1,8 +1,8 @@
 //! Compute backend — pluggable execution engine for transform containers.
 //!
 //! The `ComputeBackend` trait allows swapping Docker (local) for Fly Machines
-//! (cloud) or other providers. `BackendSelector` picks the right backend
-//! based on server configuration.
+//! (cloud) or other providers. `ComputeRegistry` holds all active providers
+//! and resolves machine names to backends.
 
 pub mod docker;
 pub mod environments;
@@ -17,57 +17,121 @@ pub use types::{
     build_param_env_vars,
 };
 
-/// Backend selector: wraps the active compute backend.
+use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Registry of active compute providers.
 ///
-/// Constructed from server configuration — returns `None` when compute is disabled.
-/// Stored in `AppState` as `Option<BackendSelector>`.
-///
-/// Selection priority: Fly (if configured + R2 available) > Docker (if compute enabled).
+/// Holds named providers (e.g., "docker", "fly") and an optional default.
+/// The orchestrator calls `resolve(machine)` to get the backend for each node.
 #[derive(Clone)]
-pub enum BackendSelector {
-    Docker(docker::DockerBackend),
-    Fly(fly::FlyBackend),
+pub struct ComputeRegistry {
+    providers: HashMap<String, Arc<dyn ComputeBackend>>,
+    default_provider: Option<String>,
 }
 
-impl BackendSelector {
-    /// Create a backend from server configuration.
+impl ComputeRegistry {
+    /// Create a registry from server configuration.
     ///
-    /// Priority: Fly (if FLY_API_TOKEN + FLY_APP_NAME set) > Docker (if COMPUTE_ENABLED=true).
-    /// Returns `None` when no compute backend is available.
+    /// Registers all enabled providers. If no providers are configured,
+    /// the registry is empty (compute is effectively disabled).
     pub fn from_config(
         compute_config: &crate::config::ComputeConfig,
         fly_config: Option<&crate::config::FlyConfig>,
-    ) -> Option<Self> {
-        // Fly takes priority when configured
+    ) -> Self {
+        let mut providers: HashMap<String, Arc<dyn ComputeBackend>> = HashMap::new();
+
+        // Register Docker provider
+        if compute_config.enabled {
+            providers.insert(
+                "docker".to_string(),
+                Arc::new(docker::DockerBackend::new(
+                    compute_config.docker_runtime.clone(),
+                )),
+            );
+        }
+
+        // Register Fly provider
         if let Some(fly) = fly_config {
-            return Some(Self::Fly(fly::FlyBackend::new(fly.clone())));
+            providers.insert(
+                "fly".to_string(),
+                Arc::new(fly::FlyBackend::new(fly.clone())),
+            );
         }
 
-        // Fall back to Docker
-        if !compute_config.enabled {
-            return None;
+        // Determine default: explicit config > fly (if available) > docker (if available)
+        let default_provider = compute_config
+            .default_provider
+            .clone()
+            .or_else(|| {
+                if providers.contains_key("fly") {
+                    Some("fly".to_string())
+                } else if providers.contains_key("docker") {
+                    Some("docker".to_string())
+                } else {
+                    None
+                }
+            })
+            .filter(|name| providers.contains_key(name));
+
+        Self {
+            providers,
+            default_provider,
         }
-        Some(Self::Docker(docker::DockerBackend::new(
-            compute_config.docker_runtime.clone(),
-        )))
     }
 
-    /// Execute a transform via the active backend.
-    pub async fn run(&self, request: &ComputeRequest) -> anyhow::Result<ComputeResult> {
-        match self {
-            Self::Docker(backend) => {
-                <docker::DockerBackend as ComputeBackend>::run(backend, request).await
+    /// Resolve a machine name to a compute backend.
+    ///
+    /// - `Some(name)`: look up the named provider
+    /// - `None`: use the default provider
+    ///
+    /// Returns an error if the provider isn't registered or no default is set.
+    pub fn resolve(&self, machine: Option<&str>) -> anyhow::Result<Arc<dyn ComputeBackend>> {
+        match machine {
+            Some(name) => self.providers.get(name).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Compute provider '{}' is not available on this server. Available: {}",
+                    name,
+                    self.provider_names().join(", ")
+                )
+            }),
+            None => {
+                let default = self.default_provider.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("No compute providers are configured on this server")
+                })?;
+                self.providers.get(default).cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Default compute provider '{}' is not registered",
+                        default
+                    )
+                })
             }
-            Self::Fly(backend) => <fly::FlyBackend as ComputeBackend>::run(backend, request).await,
         }
     }
 
-    /// Get the Fly backend (for orphan cleanup, etc.).
-    pub fn as_fly(&self) -> Option<&fly::FlyBackend> {
-        match self {
-            Self::Fly(backend) => Some(backend),
-            _ => None,
-        }
+    /// List active provider names.
+    pub fn provider_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.providers.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Get the default provider name (if any).
+    pub fn default_provider(&self) -> Option<&str> {
+        self.default_provider.as_deref()
+    }
+
+    /// Whether any compute providers are registered.
+    pub fn is_enabled(&self) -> bool {
+        !self.providers.is_empty()
+    }
+
+    /// Get the Fly backend (for orphan cleanup task).
+    pub fn fly_backend(&self) -> Option<&fly::FlyBackend> {
+        self.providers.get("fly").and_then(|b| {
+            // Downcast Arc<dyn ComputeBackend> to &FlyBackend
+            (b.as_ref() as &dyn std::any::Any).downcast_ref::<fly::FlyBackend>()
+        })
     }
 }
 
@@ -75,33 +139,45 @@ impl BackendSelector {
 mod tests {
     use crate::config::ComputeConfig;
 
-    #[test]
-    fn test_backend_selector_disabled() {
-        let config = ComputeConfig {
-            enabled: false,
+    use super::*;
+
+    fn test_compute_config(enabled: bool) -> ComputeConfig {
+        ComputeConfig {
+            enabled,
             docker_runtime: None,
             memory_limit: "2g".to_string(),
             cpu_limit: "1".to_string(),
             timeout_secs: 300,
             tmpdir: "/tmp/ozzy".to_string(),
             tmpfs_size: "512m".to_string(),
-        };
-        // Can't test without a real storage instance; just verify the config logic
-        assert!(!config.enabled);
+            default_provider: None,
+        }
     }
 
     #[test]
-    fn test_backend_selector_config_enabled() {
-        let config = ComputeConfig {
-            enabled: true,
-            docker_runtime: Some("runsc".to_string()),
-            memory_limit: "4g".to_string(),
-            cpu_limit: "2".to_string(),
-            timeout_secs: 600,
-            tmpdir: "/opt/ozzy/tmp".to_string(),
-            tmpfs_size: "1g".to_string(),
-        };
-        assert!(config.enabled);
-        assert_eq!(config.docker_runtime.as_deref(), Some("runsc"));
+    fn test_registry_disabled() {
+        let config = test_compute_config(false);
+        let registry = ComputeRegistry::from_config(&config, None);
+        assert!(!registry.is_enabled());
+        assert!(registry.resolve(None).is_err());
+    }
+
+    #[test]
+    fn test_registry_docker_enabled() {
+        let config = test_compute_config(true);
+        let registry = ComputeRegistry::from_config(&config, None);
+        assert!(registry.is_enabled());
+        assert_eq!(registry.default_provider(), Some("docker"));
+        assert!(registry.resolve(None).is_ok());
+        assert!(registry.resolve(Some("docker")).is_ok());
+        assert!(registry.resolve(Some("fly")).is_err());
+    }
+
+    #[test]
+    fn test_registry_unknown_provider() {
+        let config = test_compute_config(true);
+        let registry = ComputeRegistry::from_config(&config, None);
+        let err = registry.resolve(Some("gpu")).err().expect("should be an error");
+        assert!(err.to_string().contains("not available"));
     }
 }
