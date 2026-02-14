@@ -100,6 +100,25 @@ impl ProjectRef {
     }
 }
 
+/// Validate that a name is safe for use in URL path segments.
+/// Must match `[a-zA-Z0-9_-]+` (server enforces the same pattern).
+pub fn validate_name(name: &str, kind: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("{} name cannot be empty", kind);
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        bail!(
+            "Invalid {} name '{}': must contain only letters, digits, underscores, and hyphens",
+            kind,
+            name
+        );
+    }
+    Ok(())
+}
+
 /// Extract error message from a non-success response.
 pub async fn extract_error(resp: reqwest::Response) -> String {
     let status = resp.status();
@@ -155,6 +174,21 @@ pub fn current_git_branch() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validate_name_accepts_valid() {
+        assert!(validate_name("my-dataset_v2", "data atom").is_ok());
+        assert!(validate_name("ABC123", "test").is_ok());
+    }
+
+    #[test]
+    fn test_validate_name_rejects_invalid() {
+        assert!(validate_name("", "test").is_err());
+        assert!(validate_name("has/slash", "test").is_err());
+        assert!(validate_name("has space", "test").is_err());
+        assert!(validate_name("has?query", "test").is_err());
+        assert!(validate_name("has#hash", "test").is_err());
+    }
 
     #[test]
     fn test_project_ref_project_path() {

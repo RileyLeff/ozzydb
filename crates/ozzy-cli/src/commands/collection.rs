@@ -63,6 +63,7 @@ struct FlattenedAtom {
 
 /// Create a new collection.
 pub async fn create(name: &str) -> Result<()> {
+    shared::validate_name(name, "collection")?;
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
     let registry_url = shared::registry_url(&creds);
@@ -95,6 +96,7 @@ pub async fn create(name: &str) -> Result<()> {
 ///
 /// Members are specified as "type:name" (e.g., "data:readings", "collection:train-set").
 pub async fn add(name: &str, members: &[String]) -> Result<()> {
+    shared::validate_name(name, "collection")?;
     if members.is_empty() {
         bail!("No members specified. Usage: ozzy collection add <name> data:x [collection:y ...]");
     }
@@ -152,6 +154,7 @@ pub async fn add(name: &str, members: &[String]) -> Result<()> {
 ///
 /// Members are specified as "type:name" (e.g., "data:readings").
 pub async fn rm(name: &str, members: &[String]) -> Result<()> {
+    shared::validate_name(name, "collection")?;
     if members.is_empty() {
         bail!("No members specified. Usage: ozzy collection rm <name> data:x [collection:y ...]");
     }
@@ -201,6 +204,9 @@ pub async fn rm(name: &str, members: &[String]) -> Result<()> {
 
 /// List collections or show a specific collection's members.
 pub async fn ls(name: Option<&str>) -> Result<()> {
+    if let Some(n) = name {
+        shared::validate_name(n, "collection")?;
+    }
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
     let registry_url = shared::registry_url(&creds);
@@ -292,7 +298,7 @@ pub async fn ls(name: Option<&str>) -> Result<()> {
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "-".to_string()),
                 if c.yanked { "yes" } else { "" },
-                &c.created_at[..10],
+                c.created_at.get(..10).unwrap_or(&c.created_at),
             );
         }
     }
@@ -302,6 +308,7 @@ pub async fn ls(name: Option<&str>) -> Result<()> {
 
 /// Show collection version history.
 pub async fn log(name: &str) -> Result<()> {
+    shared::validate_name(name, "collection")?;
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
     let registry_url = shared::registry_url(&creds);
@@ -338,7 +345,7 @@ pub async fn log(name: &str) -> Result<()> {
             e.version_number,
             e.hash.get(..12).unwrap_or(&e.hash),
             e.created_by,
-            &e.created_at[..10],
+            e.created_at.get(..10).unwrap_or(&e.created_at),
         );
     }
 
@@ -347,6 +354,7 @@ pub async fn log(name: &str) -> Result<()> {
 
 /// Show all leaf-level data atoms in a collection (recursive flatten).
 pub async fn flatten(name: &str) -> Result<()> {
+    shared::validate_name(name, "collection")?;
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
     let registry_url = shared::registry_url(&creds);

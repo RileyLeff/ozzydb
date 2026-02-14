@@ -58,7 +58,6 @@ pub async fn upload(
     name: Option<&str>,
     description: Option<&str>,
     tags: Option<&str>,
-    _meta: Option<&str>,
     collection: Option<&str>,
 ) -> Result<()> {
     if files.is_empty() {
@@ -179,7 +178,7 @@ pub async fn ls() -> Result<()> {
             atom.hash.get(..12).unwrap_or(&atom.hash),
             format_bytes(atom.byte_size),
             if atom.yanked { "yes" } else { "" },
-            &atom.created_at[..10],
+            atom.created_at.get(..10).unwrap_or(&atom.created_at),
         );
     }
 
@@ -188,6 +187,7 @@ pub async fn ls() -> Result<()> {
 
 /// Show data atom details.
 pub async fn show(name: &str) -> Result<()> {
+    shared::validate_name(name, "data atom")?;
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
     let registry_url = shared::registry_url(&creds);
@@ -242,6 +242,7 @@ pub async fn describe(
     set_description: Option<&str>,
     history: bool,
 ) -> Result<()> {
+    shared::validate_name(name, "data atom")?;
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
     let registry_url = shared::registry_url(&creds);
@@ -280,7 +281,7 @@ pub async fn describe(
                 entry.field,
                 entry.value.to_string().chars().take(18).collect::<String>(),
                 entry.set_by,
-                &entry.created_at[..10],
+                entry.created_at.get(..10).unwrap_or(&entry.created_at),
             );
         }
         return Ok(());
@@ -316,6 +317,7 @@ pub async fn describe(
 
 /// Yank a data atom.
 pub async fn yank(name: &str, reason: &str) -> Result<()> {
+    shared::validate_name(name, "data atom")?;
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
     let registry_url = shared::registry_url(&creds);
@@ -344,6 +346,7 @@ pub async fn yank(name: &str, reason: &str) -> Result<()> {
 
 /// Download a data atom.
 pub async fn download(name: &str, output: Option<&str>) -> Result<()> {
+    shared::validate_name(name, "data atom")?;
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
     let registry_url = shared::registry_url(&creds);

@@ -143,7 +143,7 @@ async fn fetch_endpoint(
                 output_url: existing
                     .output_hash
                     .as_ref()
-                    .map(|_| format!("/v1/jobs/{}/output", existing.id)),
+                    .map(|_| format!("/api/v1/jobs/{}/output", existing.id)),
                 output_hash: existing.output_hash,
             }),
         )
@@ -224,7 +224,7 @@ async fn fetch_endpoint(
             Json(FetchResponse {
                 job_id: job.id,
                 status: "done".to_string(),
-                output_url: Some(format!("/v1/jobs/{}/output", job.id)),
+                output_url: Some(format!("/api/v1/jobs/{}/output", job.id)),
                 output_hash: Some(output.output_hash.clone()),
             }),
         )

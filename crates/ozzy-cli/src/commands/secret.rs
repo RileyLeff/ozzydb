@@ -27,6 +27,7 @@ struct SecretListItem {
 
 /// Set (upsert) a secret. Prompts for the value on stdin.
 pub async fn set(name: &str) -> Result<()> {
+    shared::validate_name(name, "secret")?;
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
     let registry_url = shared::registry_url(&creds);
@@ -107,8 +108,8 @@ pub async fn ls() -> Result<()> {
         println!(
             "{:<24} {:<22} {}",
             s.name,
-            &s.created_at[..10],
-            &s.updated_at[..10],
+            s.created_at.get(..10).unwrap_or(&s.created_at),
+            s.updated_at.get(..10).unwrap_or(&s.updated_at),
         );
     }
 
@@ -117,6 +118,7 @@ pub async fn ls() -> Result<()> {
 
 /// Delete a secret.
 pub async fn rm(name: &str) -> Result<()> {
+    shared::validate_name(name, "secret")?;
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
     let registry_url = shared::registry_url(&creds);

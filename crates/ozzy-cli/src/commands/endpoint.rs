@@ -43,12 +43,18 @@ struct ParamDetail {
     type_: String,
     description: Option<String>,
     default: Option<serde_json::Value>,
+    min: Option<f64>,
+    max: Option<f64>,
+    #[serde(rename = "enum")]
+    enum_values: Option<Vec<serde_json::Value>>,
     binds: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct NodeDetail {
     transform: String,
+    #[allow(dead_code)]
+    params: Option<HashMap<String, serde_json::Value>>,
     machine: Option<String>,
 }
 
@@ -119,6 +125,7 @@ pub async fn ls(ref_name: Option<&str>) -> Result<()> {
 
 /// Show endpoint details.
 pub async fn show(name: &str, ref_name: Option<&str>) -> Result<()> {
+    shared::validate_name(name, "endpoint")?;
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
     let registry_url = shared::registry_url(&creds);
@@ -166,6 +173,19 @@ pub async fn show(name: &str, ref_name: Option<&str>) -> Result<()> {
             if let Some(desc) = &p.description {
                 println!("    {}", desc);
             }
+            if p.min.is_some() || p.max.is_some() {
+                let range = match (p.min, p.max) {
+                    (Some(lo), Some(hi)) => format!("[{}, {}]", lo, hi),
+                    (Some(lo), None) => format!("[{}, ...)", lo),
+                    (None, Some(hi)) => format!("(..., {}]", hi),
+                    (None, None) => unreachable!(),
+                };
+                println!("    range: {}", range);
+            }
+            if let Some(vals) = &p.enum_values {
+                let strs: Vec<String> = vals.iter().map(|v| v.to_string()).collect();
+                println!("    allowed: {}", strs.join(", "));
+            }
             if !p.binds.is_empty() {
                 println!("    binds to: {}", p.binds);
             }
@@ -194,6 +214,7 @@ pub async fn show(name: &str, ref_name: Option<&str>) -> Result<()> {
 
 /// Show endpoint DAG visualization.
 pub async fn dag(name: &str, format: &str, ref_name: Option<&str>) -> Result<()> {
+    shared::validate_name(name, "endpoint")?;
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
     let registry_url = shared::registry_url(&creds);

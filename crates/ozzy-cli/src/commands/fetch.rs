@@ -163,7 +163,7 @@ pub async fn run(
         match job.status.as_str() {
             "done" => {
                 eprintln!("\r\x1b[KDone");
-                let output_url = format!("/v1/jobs/{}/output", job_id);
+                let output_url = format!("/api/v1/jobs/{}/output", job_id);
                 download_output(
                     &client,
                     &registry_url,
@@ -233,8 +233,9 @@ async fn download_output(
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| anyhow::anyhow!("Redirect response missing Location header"))?;
 
-        // Follow redirect (no auth header for presigned URLs)
-        let bytes = client
+        // Follow redirect (no auth header, separate client with redirect policy)
+        let dl_client = reqwest::Client::new();
+        let bytes = dl_client
             .get(location)
             .send()
             .await

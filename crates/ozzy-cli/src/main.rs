@@ -114,10 +114,6 @@ enum DataCommands {
         #[arg(long)]
         tags: Option<String>,
 
-        /// Metadata sidecar TOML file
-        #[arg(long)]
-        meta: Option<String>,
-
         /// Add to collection after upload
         #[arg(long)]
         collection: Option<String>,
@@ -415,7 +411,6 @@ async fn main() -> Result<()> {
                 name,
                 description,
                 tags,
-                meta,
                 collection,
             } => {
                 commands::data::upload(
@@ -423,7 +418,6 @@ async fn main() -> Result<()> {
                     name.as_deref(),
                     description.as_deref(),
                     tags.as_deref(),
-                    meta.as_deref(),
                     collection.as_deref(),
                 )
                 .await?;
