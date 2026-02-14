@@ -238,8 +238,12 @@
   public no auth, endpoint inspection, commit API
 - Commit: `12b329b`
 
-#### Phase 7 Exhaustive Review (IN PROGRESS)
+#### Phase 7 Exhaustive Review: 4 rounds, converged (2 consecutive clean)
+- Round 1: 3 fixes (COMPUTE_TMPDIR docs, RATE_LIMIT docs, dead MAX_TAR_SIZE_BYTES removal)
+- Round 2: 1 fix (RATE_LIMIT passthrough in docker-compose.prod.yml)
+- Rounds 3-4: CLEAN
+- Review fix commits: `5cb0bbd`, `6a5a1d2`
+- Models: Claude Opus only (~376k tokens, exceeds Codex/Gemini limits)
 
 ## What's Next
-- Phase 7 exhaustive review convergence (need 2 consecutive clean rounds)
-- Step 7.3: Deploy to production (manual procedure)
+- Step 7.3: Deploy to production (manual procedure — requires SSH to VPS)
