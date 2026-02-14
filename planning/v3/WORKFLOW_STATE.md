@@ -1,7 +1,7 @@
 # v3 Workflow State
 
 ## Current Phase: Phase 5 — Cleanup + Local Dev Stack
-## Current Step: Starting Phase 5
+## Current Step: Exhaustive review
 
 ## Completed Steps
 
@@ -188,5 +188,33 @@
 - Review fix commit: `cba927c`
 - Models: Claude Opus only (~389k tokens, exceeds Codex/Gemini limits)
 
+### Phase 5: Cleanup + Local Dev Stack (IN PROGRESS)
+
+#### Step 5.1: Delete dead code
+- Deleted `crates/ozzy-cli/src/commands/run.rs` (~1572 lines)
+- Removed Run variant from main.rs CLI enum + dispatch
+- Removed Python client `run()` function + 3 tests + integration test ref
+- Updated docs/getting_started.md (removed ozzy run references, renumbered steps)
+- Updated docker.rs comment (removed ozzy run mention)
+- Removed dead imports (shutil, subprocess from client.py)
+- Skipped: generate_docker_init() and Docker bind mount logic (still used by server)
+- Commit: `e243d61`
+
+#### Step 5.2: Local dev Docker Compose
+- Created `docker-compose.dev.yml` at repo root (PostgreSQL + MinIO + ozzy-server)
+- Added DEV_AUTO_USER env var to config.rs (auto-creates admin user + token on startup)
+- MinIO replaces R2 for local development (S3-compatible)
+- Bind mount tmpdir for Docker compute containers
+- Step 5.3 (ozzy dev CLI sugar) skipped as optional
+- Commit: `22fe565`
+
+#### Step 5.4: Documentation updates
+- Updated README.md: line counts, async jobs, local dev section, self-hosting
+- Updated CLAUDE.md: v2→v3 references, CLI command list, local dev section
+- Commit: `12ffd17`
+
+#### Phase 5 Exhaustive Review (IN PROGRESS)
+
 ## What's Next
-- Phase 5 (Cleanup + Local Dev Stack)
+- Phase 5 exhaustive review convergence
+- Phase 6 (Polish - stretch goals)
