@@ -45,6 +45,7 @@ pub struct UserInfo {
     pub username: String,
     pub email: Option<String>,
     pub avatar_url: Option<String>,
+    pub is_admin: bool,
 }
 
 #[derive(Deserialize)]
@@ -202,6 +203,7 @@ async fn github_poll(
             username: user.username,
             email: user.email,
             avatar_url: user.avatar_url,
+            is_admin: user.is_admin,
         }),
         pending: false,
     }))
@@ -351,6 +353,7 @@ async fn get_me(AccountAuthUser { user, .. }: AccountAuthUser) -> Json<UserInfo>
         username: user.username,
         email: user.email,
         avatar_url: user.avatar_url,
+        is_admin: user.is_admin,
     })
 }
 

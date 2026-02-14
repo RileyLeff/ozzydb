@@ -70,6 +70,16 @@
 							>
 								Your projects
 							</a>
+							{#if auth.user?.is_admin}
+								<a
+									href="/admin"
+									class="dropdown-item"
+									role="menuitem"
+									onclick={closeDropdown}
+								>
+									Admin
+								</a>
+							{/if}
 							<div class="dropdown-divider"></div>
 							<button class="dropdown-item dropdown-item-danger" role="menuitem" onclick={handleLogout}>
 								Sign out

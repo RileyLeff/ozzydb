@@ -5,6 +5,38 @@ export interface UserInfo {
 	username: string;
 	email: string | null;
 	avatar_url: string | null;
+	is_admin: boolean;
+}
+
+// ── Admin ─────────────────────────────────────────────────────
+
+export interface AdminJob {
+	id: string;
+	project_id: string;
+	endpoint_name: string;
+	commit_id: string;
+	status: string;
+	error_message: string | null;
+	created_by: string | null;
+	created_at: string;
+	started_at: string | null;
+	completed_at: string | null;
+}
+
+export interface AdminRateLimits {
+	global_max_concurrent: number;
+	per_user_max_concurrent: number;
+	active_jobs_global: number;
+}
+
+export interface AdminUser {
+	id: string;
+	username: string;
+	display_name: string | null;
+	email: string | null;
+	avatar_url: string | null;
+	is_admin: boolean;
+	created_at: string;
 }
 
 export interface DeviceCodeResponse {

@@ -1,5 +1,8 @@
 import { auth } from './auth.svelte';
 import type {
+	AdminJob,
+	AdminRateLimits,
+	AdminUser,
 	AuthResponse,
 	CollectionDetail,
 	CollectionInfo,
@@ -220,6 +223,27 @@ export function setSecret(owner: string, project: string, name: string, value: s
 
 export function deleteSecret(owner: string, project: string, name: string) {
 	return request<void>(`/secrets/${owner}/${project}/${name}`, { method: 'DELETE' });
+}
+
+// ── Admin ────────────────────────────────────────────────────
+
+export function adminListJobs(status?: string, limit: number = 50) {
+	const params = new URLSearchParams();
+	if (status) params.set('status', status);
+	params.set('limit', String(limit));
+	return request<AdminJob[]>(`/admin/jobs?${params}`);
+}
+
+export function adminCancelJob(jobId: string) {
+	return request<{ cancelled: boolean }>(`/admin/jobs/${jobId}/cancel`, { method: 'POST' });
+}
+
+export function adminGetRateLimits() {
+	return request<AdminRateLimits>('/admin/rate-limits');
+}
+
+export function adminListUsers(limit: number = 50, offset: number = 0) {
+	return request<AdminUser[]>(`/admin/users?limit=${limit}&offset=${offset}`);
 }
 
 export { ApiError };
