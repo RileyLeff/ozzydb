@@ -61,6 +61,11 @@ async-trait = "0.1"
 bytes = "1"
 futures = "0.3"
 
+# AWS SDK (presigned URLs for R2/S3)
+aws-sdk-s3 = "1"
+aws-config = "1"
+aws-credential-types = "1"
+
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 

@@ -7,6 +7,8 @@
 //! Layout: {prefix}/{hash[0:2]}/{hash[2:4]}/{hash}.{ext}
 
 use anyhow::{Context, Result};
+use aws_credential_types::Credentials;
+use aws_sdk_s3::presigning::PresigningConfig;
 use bytes::Bytes;
 use futures::Stream;
 use object_store::ObjectStore;
@@ -16,6 +18,7 @@ use ozzy_core::hash;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::config::{Config, R2Config};
 
@@ -27,6 +30,11 @@ use crate::config::{Config, R2Config};
 pub struct ContentStorage {
     cache_dir: PathBuf,
     remote_store: Option<Arc<dyn ObjectStore>>,
+    /// AWS SDK S3 client for presigned URL generation.
+    /// Built from the same R2Config as remote_store.
+    s3_client: Option<aws_sdk_s3::Client>,
+    /// Bucket name for presigned URL generation.
+    bucket: Option<String>,
     prefix: String,
     /// When true, `get()` and `get_stream()` verify that the content hash matches
     /// the requested key. This is correct for content-addressed storage (where the
@@ -54,16 +62,43 @@ impl ContentStorage {
     }
 
     fn build_remote_store(config: &R2Config) -> Result<Arc<dyn ObjectStore>> {
-        let store = AmazonS3Builder::new()
+        let mut builder = AmazonS3Builder::new()
             .with_endpoint(&config.endpoint)
             .with_bucket_name(&config.bucket)
             .with_access_key_id(&config.access_key_id)
             .with_secret_access_key(&config.secret_access_key)
             .with_region(&config.region)
-            .with_virtual_hosted_style_request(false)
+            .with_virtual_hosted_style_request(false);
+
+        // Allow HTTP for local dev (MinIO). R2 endpoints are always HTTPS.
+        if config.endpoint.starts_with("http://") {
+            builder = builder.with_allow_http(true);
+        }
+
+        let store = builder
             .build()
             .context("Failed to create R2 storage client")?;
         Ok(Arc::new(store))
+    }
+
+    /// Build an AWS SDK S3 client for presigned URL generation.
+    /// Uses path-style addressing (required for R2 and MinIO).
+    fn build_s3_client(config: &R2Config) -> aws_sdk_s3::Client {
+        let credentials = Credentials::new(
+            &config.access_key_id,
+            &config.secret_access_key,
+            None, // session token
+            None, // expiry
+            "ozzydb-r2",
+        );
+        let s3_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .endpoint_url(&config.endpoint)
+            .region(aws_sdk_s3::config::Region::new(config.region.clone()))
+            .credentials_provider(credentials)
+            .force_path_style(true)
+            .build();
+        aws_sdk_s3::Client::from_conf(s3_config)
     }
 
     fn default_cache_dir() -> PathBuf {
@@ -73,6 +108,8 @@ impl ContentStorage {
     fn new_with_cache_and_remote(
         cache_dir: PathBuf,
         remote_store: Option<Arc<dyn ObjectStore>>,
+        s3_client: Option<aws_sdk_s3::Client>,
+        bucket: Option<String>,
         prefix: impl Into<String>,
         verify_content_hash: bool,
     ) -> Result<Self> {
@@ -80,6 +117,8 @@ impl ContentStorage {
         Ok(Self {
             cache_dir,
             remote_store,
+            s3_client,
+            bucket,
             prefix: prefix.into(),
             verify_content_hash,
         })
@@ -95,9 +134,13 @@ impl ContentStorage {
             .as_ref()
             .map(Self::build_remote_store)
             .transpose()?;
+        let s3_client = config.r2.as_ref().map(Self::build_s3_client);
+        let bucket = config.r2.as_ref().map(|r| r.bucket.clone());
         Self::new_with_cache_and_remote(
             PathBuf::from(&config.cache_dir),
             remote_store,
+            s3_client,
+            bucket,
             "content",
             true, // content-addressed: verify hash on read
         )
@@ -113,9 +156,13 @@ impl ContentStorage {
             .as_ref()
             .map(Self::build_remote_store)
             .transpose()?;
+        let s3_client = config.r2.as_ref().map(Self::build_s3_client);
+        let bucket = config.r2.as_ref().map(|r| r.bucket.clone());
         Self::new_with_cache_and_remote(
             PathBuf::from(&config.cache_dir),
             remote_store,
+            s3_client,
+            bucket,
             prefix,
             false, // key-addressed: skip hash verification
         )
@@ -124,13 +171,31 @@ impl ContentStorage {
     /// Create storage with R2-only configuration (used by legacy tests).
     pub fn new(config: &R2Config) -> Result<Self> {
         let remote_store = Some(Self::build_remote_store(config)?);
-        Self::new_with_cache_and_remote(Self::default_cache_dir(), remote_store, "content", true)
+        let s3_client = Some(Self::build_s3_client(config));
+        let bucket = Some(config.bucket.clone());
+        Self::new_with_cache_and_remote(
+            Self::default_cache_dir(),
+            remote_store,
+            s3_client,
+            bucket,
+            "content",
+            true,
+        )
     }
 
     /// Create storage with custom prefix (used by integration tests).
     pub fn with_prefix(config: &R2Config, prefix: impl Into<String>) -> Result<Self> {
         let remote_store = Some(Self::build_remote_store(config)?);
-        Self::new_with_cache_and_remote(Self::default_cache_dir(), remote_store, prefix, true)
+        let s3_client = Some(Self::build_s3_client(config));
+        let bucket = Some(config.bucket.clone());
+        Self::new_with_cache_and_remote(
+            Self::default_cache_dir(),
+            remote_store,
+            s3_client,
+            bucket,
+            prefix,
+            true,
+        )
     }
 
     /// Return the R2/object-store key string for a given hash and extension.
@@ -538,6 +603,75 @@ impl ContentStorage {
             .await
             .with_context(|| format!("Content not found: {}", content_hash))?;
         Ok(meta)
+    }
+
+    /// Returns true if this storage has a remote (R2/S3) backend configured,
+    /// meaning presigned URLs can be generated.
+    pub fn has_remote(&self) -> bool {
+        self.s3_client.is_some()
+    }
+
+    /// Generate a presigned GET URL for content with the given hash and extension.
+    ///
+    /// The URL allows the holder to download the content directly from R2/S3
+    /// without authentication for the duration of `ttl`.
+    pub async fn presigned_get_url(
+        &self,
+        content_hash: &str,
+        extension: &str,
+        ttl: Duration,
+    ) -> Result<String> {
+        let client = self.s3_client.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Cannot generate presigned URL: R2/S3 not configured")
+        })?;
+        let bucket = self.bucket.as_ref().unwrap();
+        let key = self.storage_key(content_hash, extension)?;
+
+        let presigning = PresigningConfig::expires_in(ttl).context("Invalid presigning TTL")?;
+        let presigned = client
+            .get_object()
+            .bucket(bucket)
+            .key(&key)
+            .presigned(presigning)
+            .await
+            .context("Failed to generate presigned GET URL")?;
+
+        Ok(presigned.uri().to_string())
+    }
+
+    /// Generate a presigned PUT URL for uploading content to a specific key.
+    ///
+    /// The URL allows the holder to upload content directly to R2/S3
+    /// without authentication for the duration of `ttl`.
+    pub async fn presigned_put_url(&self, storage_key: &str, ttl: Duration) -> Result<String> {
+        let client = self.s3_client.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Cannot generate presigned URL: R2/S3 not configured")
+        })?;
+        let bucket = self.bucket.as_ref().unwrap();
+
+        let presigning = PresigningConfig::expires_in(ttl).context("Invalid presigning TTL")?;
+        let presigned = client
+            .put_object()
+            .bucket(bucket)
+            .key(storage_key)
+            .presigned(presigning)
+            .await
+            .context("Failed to generate presigned PUT URL")?;
+
+        Ok(presigned.uri().to_string())
+    }
+
+    /// Generate a presigned PUT URL for content with the given hash and extension.
+    ///
+    /// Convenience wrapper that computes the storage key from hash + extension.
+    pub async fn presigned_put_url_for_content(
+        &self,
+        content_hash: &str,
+        extension: &str,
+        ttl: Duration,
+    ) -> Result<String> {
+        let key = self.storage_key(content_hash, extension)?;
+        self.presigned_put_url(&key, ttl).await
     }
 }
 

@@ -38,6 +38,11 @@ object_store.workspace = true
 bytes.workspace = true
 futures.workspace = true
 
+# AWS SDK (presigned URLs for R2/S3)
+aws-sdk-s3.workspace = true
+aws-config.workspace = true
+aws-credential-types.workspace = true
+
 # Time
 chrono.workspace = true
 

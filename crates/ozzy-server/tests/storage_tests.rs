@@ -21,6 +21,7 @@ use anyhow::Result;
 use ozzy_server::config::R2Config;
 use ozzy_server::storage::ContentStorage;
 use std::env;
+use std::time::Duration;
 
 fn get_test_config() -> Option<R2Config> {
     // Check if R2 credentials are available
@@ -277,6 +278,191 @@ async fn test_large_file() -> Result<()> {
 
     // Cleanup
     storage.delete(&hash, "bin").await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_has_remote() -> Result<()> {
+    if should_skip_r2_tests() {
+        eprintln!("Skipping R2 tests - no credentials configured");
+        return Ok(());
+    }
+
+    let config = get_test_config().unwrap();
+    let storage = ContentStorage::with_prefix(&config, test_prefix())?;
+
+    assert!(storage.has_remote());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_presigned_get_url_format() -> Result<()> {
+    if should_skip_r2_tests() {
+        eprintln!("Skipping R2 tests - no credentials configured");
+        return Ok(());
+    }
+
+    let config = get_test_config().unwrap();
+    let storage = ContentStorage::with_prefix(&config, test_prefix())?;
+
+    // Store content first
+    let content = b"presigned get test content";
+    let hash = storage.store(content, "txt").await?;
+
+    // Generate presigned GET URL
+    let url = storage
+        .presigned_get_url(&hash, "txt", Duration::from_secs(3600))
+        .await?;
+
+    // Verify URL contains expected components
+    assert!(url.contains(&hash), "URL should contain content hash");
+    assert!(
+        url.contains("X-Amz-Signature") || url.contains("x-amz-signature"),
+        "URL should contain AWS signature"
+    );
+    assert!(
+        url.contains("X-Amz-Expires") || url.contains("x-amz-expires"),
+        "URL should contain expiry"
+    );
+
+    // Cleanup
+    storage.delete(&hash, "txt").await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_presigned_get_url_download() -> Result<()> {
+    if should_skip_r2_tests() {
+        eprintln!("Skipping R2 tests - no credentials configured");
+        return Ok(());
+    }
+
+    let config = get_test_config().unwrap();
+    let storage = ContentStorage::with_prefix(&config, test_prefix())?;
+
+    // Store content
+    let content = b"download via presigned URL test";
+    let hash = storage.store(content, "txt").await?;
+
+    // Generate presigned GET URL
+    let url = storage
+        .presigned_get_url(&hash, "txt", Duration::from_secs(3600))
+        .await?;
+
+    // Download via presigned URL using reqwest
+    let client = reqwest::Client::new();
+    let response = client.get(&url).send().await?;
+    assert!(
+        response.status().is_success(),
+        "Presigned GET should succeed"
+    );
+    let body = response.bytes().await?;
+    assert_eq!(
+        &body[..],
+        content,
+        "Downloaded content should match original"
+    );
+
+    // Cleanup
+    storage.delete(&hash, "txt").await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_presigned_put_url_upload() -> Result<()> {
+    if should_skip_r2_tests() {
+        eprintln!("Skipping R2 tests - no credentials configured");
+        return Ok(());
+    }
+
+    let config = get_test_config().unwrap();
+    let prefix = test_prefix();
+    let storage = ContentStorage::with_prefix(&config, &prefix)?;
+
+    // Compute hash for content we're about to upload
+    let content = b"upload via presigned PUT test";
+    let hash = ozzy_core::hash::blake3_hash(content);
+
+    // Generate presigned PUT URL
+    let url = storage
+        .presigned_put_url_for_content(&hash, "txt", Duration::from_secs(3600))
+        .await?;
+
+    // Upload via presigned URL using reqwest
+    let client = reqwest::Client::new();
+    let response = client.put(&url).body(content.to_vec()).send().await?;
+    assert!(
+        response.status().is_success(),
+        "Presigned PUT should succeed, got {}",
+        response.status()
+    );
+
+    // Verify content is now retrievable via normal get
+    let retrieved = storage.get(&hash, "txt").await?;
+    assert_eq!(&retrieved[..], content);
+
+    // Cleanup
+    storage.delete(&hash, "txt").await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_presigned_url_without_remote_fails() -> Result<()> {
+    // Create a local-only storage (no R2 config)
+    let dir = tempfile::tempdir()?;
+    use ozzy_server::config::Config;
+
+    // Manually create a Config without R2
+    let config = Config::from_env();
+    // If Config::from_env fails (missing DB etc.), just test the has_remote check
+    // by using a storage with no remote
+    let storage = ContentStorage::from_config_with_prefix(
+        &Config {
+            bind_address: "0.0.0.0:3000".into(),
+            database_url: "postgres://localhost/test".into(),
+            db_max_connections: 5,
+            github_client_id: "test".into(),
+            github_client_secret: "test".into(),
+            base_url: "http://localhost:3000".into(),
+            cache_dir: dir.path().to_str().unwrap().into(),
+            r2: None,
+            max_upload_size_bytes: 100_000_000,
+            cors_origins: "*".into(),
+            allowed_logins: vec![],
+            secrets_encryption_key: None,
+            github_app: None,
+            compute: ozzy_server::config::ComputeConfig {
+                enabled: false,
+                docker_runtime: None,
+                memory_limit: "2g".into(),
+                cpu_limit: "1".into(),
+                timeout_secs: 300,
+                tmpdir: "/tmp".into(),
+                tmpfs_size: "512m".into(),
+            },
+        },
+        "test",
+    )?;
+
+    assert!(!storage.has_remote());
+
+    let hash = "0000000000000000000000000000000000000000000000000000000000000000";
+    let result = storage
+        .presigned_get_url(hash, "txt", Duration::from_secs(3600))
+        .await;
+    assert!(result.is_err(), "Should fail without R2 configured");
+    assert!(
+        result.unwrap_err().to_string().contains("not configured"),
+        "Error should mention R2 not configured"
+    );
+
+    // Drop the unused config result
+    drop(config);
 
     Ok(())
 }
