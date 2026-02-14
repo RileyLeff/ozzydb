@@ -407,8 +407,8 @@ async fn main() -> Result<()> {
             }
         },
         _ => {
-            eprintln!("ozzy v2 - command not yet implemented");
-            eprintln!("See planning/v2_architecture.md for the design.");
+            eprintln!("Command not yet implemented.");
+            eprintln!("See planning/v3/architecture.md for the design.");
             std::process::exit(1);
         }
     }

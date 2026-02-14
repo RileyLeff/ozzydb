@@ -122,8 +122,8 @@ pub fn run(cwd: &Path) -> Result<()> {
     println!("  1. Upload data:       ozzy data upload <file>");
     println!("  2. Add transforms:    edit ozzy.toml [transforms] section");
     println!("  3. Define endpoints:  edit ozzy.toml [endpoints] section");
-    println!("  4. Test locally:      ozzy run <endpoint>");
-    println!("  5. Push to registry:  ozzy push");
+    println!("  4. Push to registry:  ozzy push");
+    println!("  5. Fetch results:     ozzy fetch <owner/project/endpoint>");
 
     Ok(())
 }

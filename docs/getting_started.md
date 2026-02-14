@@ -82,7 +82,7 @@ ozzy data show raw_readings
 A transform is just a Python function. Create one:
 
 ```bash
-ozzy transform scaffold clean --language python
+ozzy transform scaffold clean --lang python
 ```
 
 This creates `transforms/clean.py` with a template. Edit it:
