@@ -115,6 +115,14 @@ pub async fn add(name: &str, members: &[String]) -> Result<()> {
                     m
                 )
             })?;
+            if mtype != "data" && mtype != "collection" {
+                bail!(
+                    "Invalid member type '{}' in '{}': must be 'data' or 'collection'",
+                    mtype,
+                    m
+                );
+            }
+            shared::validate_name(mref, "member reference")?;
             Ok(serde_json::json!({
                 "member_type": mtype,
                 "member_ref": mref,
@@ -166,12 +174,20 @@ pub async fn rm(name: &str, members: &[String]) -> Result<()> {
 
     // Validate format
     for m in members {
-        if !m.contains(':') {
-            bail!(
+        let (mtype, mref) = m.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!(
                 "Invalid member format '{}': use 'type:name' (e.g., 'data:readings')",
+                m
+            )
+        })?;
+        if mtype != "data" && mtype != "collection" {
+            bail!(
+                "Invalid member type '{}' in '{}': must be 'data' or 'collection'",
+                mtype,
                 m
             );
         }
+        shared::validate_name(mref, "member reference")?;
     }
 
     let body = serde_json::json!({ "refs": members });

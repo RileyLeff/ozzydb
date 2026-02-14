@@ -76,6 +76,9 @@ pub fn load_project_from_toml() -> Result<ProjectRef> {
         .and_then(|r| r.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing git.repo in ozzy.toml"))?;
 
+    validate_name(owner, "project owner")?;
+    validate_name(name, "project name")?;
+
     Ok(ProjectRef {
         owner: owner.to_string(),
         slug: name.to_string(),
