@@ -31,10 +31,7 @@ impl FlyBackend {
     pub fn new(config: FlyConfig) -> Self {
         // No client-level timeout — each request sets its own .timeout() to avoid
         // a global 600s cap shadowing longer compute timeouts.
-        // Force IPv4: Docker's default bridge network lacks IPv6, and
-        // api.machines.dev resolves to both IPv4 and IPv6.
         let http = reqwest::Client::builder()
-            .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
             .build()
             .expect("Failed to create HTTP client");
         Self { config, http }
@@ -104,6 +101,9 @@ impl FlyBackend {
             Ok(resp) => resp,
             Err(e) => {
                 tracing::error!("Fly Machine creation request failed: {e:#}");
+                tracing::error!("Fly error debug: {e:?}");
+                tracing::error!("Fly is_connect: {}, is_timeout: {}, is_request: {}, is_builder: {}", e.is_connect(), e.is_timeout(), e.is_request(), e.is_builder());
+                tracing::error!("Fly URL: {}, token_len: {}", create_url, self.config.api_token.len());
                 return Err(e).context("Failed to create Fly Machine");
             }
         };
