@@ -225,7 +225,11 @@ async fn download_output(
     file_output: Option<&str>,
     hash: Option<&str>,
 ) -> Result<()> {
-    let url = format!("{}{}", registry_url, output_path);
+    let url = if output_path.starts_with("http://") || output_path.starts_with("https://") {
+        output_path.to_string()
+    } else {
+        format!("{}{}", registry_url, output_path)
+    };
 
     let mut request = client.get(&url);
     if let Some(t) = token {

@@ -108,16 +108,21 @@ pub fn clear() -> Result<()> {
     Ok(())
 }
 
-/// Compute the total size of a directory (recursively).
+/// Compute the total size of a directory (recursively, skipping symlinks).
 fn dir_size(path: &std::path::Path) -> Result<u64> {
     let mut total = 0u64;
+    if path.is_symlink() {
+        return Ok(0);
+    }
     if path.is_file() {
         return Ok(path.metadata()?.len());
     }
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
         let ft = entry.file_type()?;
-        if ft.is_file() {
+        if ft.is_symlink() {
+            continue;
+        } else if ft.is_file() {
             total += entry.metadata()?.len();
         } else if ft.is_dir() {
             total += dir_size(&entry.path())?;
