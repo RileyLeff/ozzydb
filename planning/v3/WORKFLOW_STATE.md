@@ -287,10 +287,20 @@ See `planning/v3/v3.1_compute_providers.md` for full plan.
 - Added table truncation on startup (idempotent test runs)
 - Removed strict `content_type` assertions (MinIO returns binary/octet-stream for presigned redirects)
 - All 20 integration + 12 E2E tests pass
-- Commit: (pending)
+- Commit: `e9cdda9`
 
-### Step 3: Unified I/O (NEXT)
-### Step 4: Slim ComputeRequest/ComputeResult
+### Step 3: Unified I/O (COMPLETE)
+- Added R2_PRESIGN_ENDPOINT config for compute-facing presigned URLs
+- Added compute_s3_client to ContentStorage with _for_compute presigned URL methods
+- Collapsed generate_docker_init/generate_fly_init into single generate_init()
+- Rewrote Docker backend: no bind mounts, downloads/uploads via R2 presigned URLs
+- Removed all is_fly branching from orchestrator (~6 branch points eliminated)
+- Secrets always delivered via R2 presigned URL (not raw env vars)
+- Source code always uploaded to R2 for container download
+- BackendSelector::from_config() now requires &ContentStorage (was Option)
+- Commit: `b21dc40`
+
+### Step 4: Slim ComputeRequest/ComputeResult (NEXT)
 ### Step 5: ComputeRegistry (replace BackendSelector)
 ### Step 6: Config restructure
 ### Step 7: Final cleanup
