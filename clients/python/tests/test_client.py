@@ -152,40 +152,65 @@ def _make_response(
 # ── Fetch tests ──────────────────────────────────────────────────
 
 
-class TestFetch:
-    def test_fetch_parquet(self, mock_client, tmp_path):
-        # Create test parquet data
-        df = pl.DataFrame({"id": [1, 2, 3], "value": [10.0, 20.0, 30.0]})
-        buf = io.BytesIO()
-        df.write_parquet(buf)
-        parquet_bytes = buf.getvalue()
+def _mock_fetch_sequence(mock_client, output_bytes, content_type, cache_hit=True):
+    """Set up mock responses for the POST + GET /output fetch flow.
 
-        mock_resp = _make_response(
-            content=parquet_bytes,
-            headers={
-                "content-type": "application/vnd.apache.parquet",
-                "x-ozzydb-hash": "abc123",
-                "x-ozzydb-cache": "miss",
-            },
+    For cache hits: POST returns done, then GET /output returns bytes.
+    For cache misses: POST returns queued, GET /jobs/{id} returns done, then GET /output.
+    """
+    job_id = "test-job-123"
+
+    # POST /fetch response
+    fetch_resp = _make_response(
+        json_data={
+            "job_id": job_id,
+            "status": "done" if cache_hit else "queued",
+            "output_url": f"/v1/jobs/{job_id}/output" if cache_hit else None,
+            "output_hash": "hash123" if cache_hit else None,
+        }
+    )
+
+    # GET /jobs/{id}/output response
+    output_resp = _make_response(
+        content=output_bytes,
+        headers={"content-type": content_type},
+    )
+
+    if cache_hit:
+        # POST fetch, then GET output
+        mock_client._session.request = MagicMock(side_effect=[fetch_resp, output_resp])
+    else:
+        # POST fetch, then GET /jobs/{id} poll, then GET output
+        poll_resp = _make_response(
+            json_data={
+                "status": "done",
+                "node_status": {"step1": "done"},
+                "output_hash": "hash123",
+                "error_message": None,
+            }
         )
-        mock_client._session.request = MagicMock(return_value=mock_resp)
+        mock_client._session.request = MagicMock(
+            side_effect=[fetch_resp, poll_resp, output_resp]
+        )
+
+
+class TestFetch:
+    def test_fetch_parquet_cache_hit(self, mock_client):
+        parquet_bytes = _make_parquet_bytes({"id": [1, 2, 3], "value": [10.0, 20.0, 30.0]})
+        _mock_fetch_sequence(mock_client, parquet_bytes, "application/vnd.apache.parquet")
 
         result = fetch("alice/proj/ep", client=mock_client)
         assert isinstance(result, pl.DataFrame)
         assert result.shape == (3, 2)
         assert result["id"].to_list() == [1, 2, 3]
 
-        # Verify request was made correctly
-        call_args = mock_client._session.request.call_args
-        assert "/fetch/alice/proj/ep" in call_args[1].get("url", call_args[0][1] if len(call_args[0]) > 1 else "")
+        # Verify POST was used for the first request
+        first_call = mock_client._session.request.call_args_list[0]
+        assert first_call[0][0] == "POST"
 
     def test_fetch_csv(self, mock_client):
         csv_bytes = b"a,b\n1,2\n3,4\n"
-        mock_resp = _make_response(
-            content=csv_bytes,
-            headers={"content-type": "text/csv"},
-        )
-        mock_client._session.request = MagicMock(return_value=mock_resp)
+        _mock_fetch_sequence(mock_client, csv_bytes, "text/csv")
 
         result = fetch("alice/proj/ep", client=mock_client)
         assert isinstance(result, pl.DataFrame)
@@ -193,52 +218,37 @@ class TestFetch:
 
     def test_fetch_with_params(self, mock_client):
         parquet_bytes = _make_parquet_bytes({"x": [1]})
-        mock_resp = _make_response(
-            content=parquet_bytes,
-            headers={"content-type": "application/vnd.apache.parquet"},
-        )
-        mock_client._session.request = MagicMock(return_value=mock_resp)
+        _mock_fetch_sequence(mock_client, parquet_bytes, "application/vnd.apache.parquet")
 
         fetch("alice/proj/ep", client=mock_client, threshold=50.0, limit=10)
 
-        call_args = mock_client._session.request.call_args
-        params = call_args[1].get("params", {})
+        # First call is POST /fetch with params
+        first_call = mock_client._session.request.call_args_list[0]
+        params = first_call[1].get("params", {})
         assert params["threshold"] == "50.0"
         assert params["limit"] == "10"
 
     def test_fetch_with_ref(self, mock_client):
         parquet_bytes = _make_parquet_bytes({"x": [1]})
-        mock_resp = _make_response(
-            content=parquet_bytes,
-            headers={"content-type": "application/vnd.apache.parquet"},
-        )
-        mock_client._session.request = MagicMock(return_value=mock_resp)
+        _mock_fetch_sequence(mock_client, parquet_bytes, "application/vnd.apache.parquet")
 
         fetch("alice/proj/ep", client=mock_client, ref_name="v1.0")
 
-        call_args = mock_client._session.request.call_args
-        params = call_args[1].get("params", {})
+        first_call = mock_client._session.request.call_args_list[0]
+        params = first_call[1].get("params", {})
         assert params["ref"] == "v1.0"
 
     def test_fetch_as_pandas(self, mock_client):
         import pandas as pd
 
         parquet_bytes = _make_parquet_bytes({"x": [1, 2, 3]})
-        mock_resp = _make_response(
-            content=parquet_bytes,
-            headers={"content-type": "application/vnd.apache.parquet"},
-        )
-        mock_client._session.request = MagicMock(return_value=mock_resp)
+        _mock_fetch_sequence(mock_client, parquet_bytes, "application/vnd.apache.parquet")
 
         result = fetch("alice/proj/ep", client=mock_client, as_pandas=True)
         assert isinstance(result, pd.DataFrame)
 
     def test_fetch_binary_fallback(self, mock_client):
-        mock_resp = _make_response(
-            content=b"\x00\x01\x02",
-            headers={"content-type": "image/png"},
-        )
-        mock_client._session.request = MagicMock(return_value=mock_resp)
+        _mock_fetch_sequence(mock_client, b"\x00\x01\x02", "image/png")
 
         result = fetch("alice/proj/ep", client=mock_client)
         assert isinstance(result, bytes)
@@ -268,20 +278,48 @@ class TestFetch:
             fetch("alice/proj/ep", client=mock_client)
         assert exc_info.value.status == 404
 
+    def test_fetch_poll_until_done(self, mock_client):
+        """Test the poll loop: POST returns queued, poll returns done."""
+        parquet_bytes = _make_parquet_bytes({"x": [1, 2]})
+        _mock_fetch_sequence(
+            mock_client, parquet_bytes, "application/vnd.apache.parquet",
+            cache_hit=False,
+        )
+
+        result = fetch("alice/proj/ep", client=mock_client, poll_interval=0.01)
+        assert isinstance(result, pl.DataFrame)
+        assert result.shape == (2, 1)
+
+        # Verify: POST, GET poll, GET output
+        assert len(mock_client._session.request.call_args_list) == 3
+
+    def test_fetch_job_error(self, mock_client):
+        """Test that job errors are raised as RuntimeError."""
+        fetch_resp = _make_response(
+            json_data={"job_id": "job-err", "status": "queued", "output_url": None, "output_hash": None}
+        )
+        poll_resp = _make_response(
+            json_data={
+                "status": "error",
+                "node_status": {"step1": "running"},
+                "output_hash": None,
+                "error_message": "Transform crashed",
+            }
+        )
+        mock_client._session.request = MagicMock(side_effect=[fetch_resp, poll_resp])
+
+        with pytest.raises(RuntimeError, match="Transform crashed"):
+            fetch("alice/proj/ep", client=mock_client, poll_interval=0.01)
+
 
 class TestFetchLazy:
     def test_fetch_lazy_parquet(self, mock_client):
         parquet_bytes = _make_parquet_bytes({"x": [1, 2, 3], "y": [4.0, 5.0, 6.0]})
-        mock_resp = _make_response(
-            content=parquet_bytes,
-            headers={"content-type": "application/vnd.apache.parquet"},
-        )
-        mock_client._session.request = MagicMock(return_value=mock_resp)
+        _mock_fetch_sequence(mock_client, parquet_bytes, "application/vnd.apache.parquet")
 
         result = fetch_lazy("alice/proj/ep", client=mock_client)
         assert isinstance(result, pl.LazyFrame)
 
-        # Collect and verify
         df = result.collect()
         assert df.shape == (3, 2)
 

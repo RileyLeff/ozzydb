@@ -6,13 +6,15 @@ import io
 import shutil
 import subprocess
 import tempfile
+import time
+import warnings
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import polars as pl
 
-from .http import OzzyClient, get_default_client
+from .http import OzzyClient, OzzyApiError, get_default_client
 from .types import (
     EndpointDetail,
     FetchMetadata,
@@ -59,15 +61,24 @@ def fetch(
     *,
     as_pandas: bool = False,
     ref_name: str | None = None,
+    poll_interval: float = 2.0,
+    timeout: float = 600.0,
+    verbose: bool = False,
     client: OzzyClient | None = None,
     **params: Any,
 ) -> Any:
     """Fetch endpoint output from the OzzyDB registry.
 
+    Submits a compute job via POST, polls for completion, then downloads
+    the result. Cache hits return immediately without polling.
+
     Args:
         ref: Remote reference in "owner/project/endpoint" format.
         as_pandas: If True, return a pandas DataFrame instead of polars.
         ref_name: Git ref (branch/tag) to resolve against.
+        poll_interval: Seconds between status polls (default 2).
+        timeout: Maximum seconds to wait for job completion (default 600).
+        verbose: If True, print job progress to stderr.
         client: Optional OzzyClient instance (uses default if not provided).
         **params: Endpoint parameters passed as query string.
 
@@ -82,23 +93,141 @@ def fetch(
     if ref_name:
         query["ref"] = ref_name
 
-    resp = c.request(
-        "GET",
+    # POST to trigger job
+    fetch_resp = c.json_request(
+        "POST",
         f"/fetch/{quote(owner, safe='')}/{quote(project, safe='')}/{quote(endpoint, safe='')}",
         params=query,
-        stream=True,
     )
+
+    job_id = fetch_resp["job_id"]
+    status = fetch_resp.get("status", "queued")
+    output_url = fetch_resp.get("output_url")
+    output_hash = fetch_resp.get("output_hash")
+
+    # Cache hit — download immediately
+    if status == "done" and output_url:
+        if verbose:
+            import sys
+            print("Cache hit", file=sys.stderr)
+        return _download_job_output(
+            c, job_id, output_url, output_hash, as_pandas=as_pandas
+        )
+
+    # Poll for completion
+    start = time.monotonic()
+    while True:
+        if time.monotonic() - start > timeout:
+            raise TimeoutError(
+                f"Job {job_id} did not complete within {timeout}s"
+            )
+        time.sleep(poll_interval)
+
+        job = c.json_request("GET", f"/jobs/{job_id}")
+        job_status = job.get("status", "unknown")
+
+        if verbose:
+            import sys
+            node_status = job.get("node_status", {})
+            parts = []
+            for name in sorted(node_status):
+                s = node_status[name]
+                sym = "+" if s == "done" else "~" if s == "running" else "."
+                parts.append(f"[{sym}]{name}")
+            print(f"\r{' '.join(parts)}", end="", file=sys.stderr, flush=True)
+
+        if job_status == "done":
+            if verbose:
+                print(f"\rDone{' ' * 40}", file=sys.stderr)
+            job_output_url = f"/jobs/{job_id}/output"
+            return _download_job_output(
+                c, job_id, job_output_url, job.get("output_hash"),
+                as_pandas=as_pandas,
+            )
+        elif job_status == "error":
+            if verbose:
+                print("", file=sys.stderr)
+            msg = job.get("error_message", "unknown error")
+            raise RuntimeError(f"Job {job_id} failed: {msg}")
+
+
+def fetch_lazy(
+    ref: str,
+    *,
+    ref_name: str | None = None,
+    poll_interval: float = 2.0,
+    timeout: float = 600.0,
+    client: OzzyClient | None = None,
+    **params: Any,
+) -> pl.LazyFrame:
+    """Fetch endpoint output as a polars LazyFrame.
+
+    Only works for parquet outputs. For other formats, use fetch() instead.
+    Uses the same async job model as fetch().
+
+    Args:
+        ref: Remote reference in "owner/project/endpoint" format.
+        ref_name: Git ref (branch/tag) to resolve against.
+        poll_interval: Seconds between status polls (default 2).
+        timeout: Maximum seconds to wait (default 600).
+        client: Optional OzzyClient instance.
+        **params: Endpoint parameters.
+
+    Returns:
+        polars.LazyFrame
+    """
+    # Reuse fetch() to get the result, then convert to lazy
+    result = fetch(
+        ref,
+        as_pandas=False,
+        ref_name=ref_name,
+        poll_interval=poll_interval,
+        timeout=timeout,
+        client=client,
+        **params,
+    )
+
+    if isinstance(result, pl.DataFrame):
+        return result.lazy()
+    raise ValueError(
+        f"Cannot create LazyFrame: fetch returned {type(result).__name__}"
+    )
+
+
+# ── Job output download ──────────────────────────────────────────
+
+
+def _download_job_output(
+    c: OzzyClient,
+    job_id: str,
+    output_url: str,
+    output_hash: str | None,
+    *,
+    as_pandas: bool = False,
+) -> Any:
+    """Download output from a completed job.
+
+    Handles both redirect (presigned URL) and direct proxy responses.
+    """
+    import requests as req_lib
+
+    resp = c.request("GET", output_url, stream=True, allow_redirects=False)
+
+    # Handle redirect to presigned URL
+    if resp.status_code in (302, 307):
+        location = resp.headers.get("location")
+        resp.close()
+        if not location:
+            raise RuntimeError("Redirect response missing Location header")
+        resp = req_lib.get(location, stream=True)
+        resp.raise_for_status()
 
     content_type = resp.headers.get("content-type", "application/octet-stream")
-    meta = FetchMetadata(
-        hash=resp.headers.get("x-ozzydb-hash"),
-        cache=resp.headers.get("x-ozzydb-cache"),
-        verification=resp.headers.get("x-ozzydb-verification"),
-        content_type=content_type,
-    )
 
-    # Stream to a temp file to avoid loading everything into memory
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=_ext_for_type(content_type))
+    # Stream to temp file
+    tmp = tempfile.NamedTemporaryFile(
+        delete=False, suffix=_ext_for_type(content_type)
+    )
     tmp_path = tmp.name
     try:
         for chunk in resp.iter_content(chunk_size=8192):
@@ -113,86 +242,16 @@ def fetch(
 
     try:
         result = _read_output(tmp_path, content_type, as_pandas=as_pandas)
-        # Attach metadata to the result if it's a DataFrame
+        # Attach metadata
         if hasattr(result, "attrs"):
             result.attrs["ozzydb"] = {
-                "hash": meta.hash,
-                "cache": meta.cache,
-                "verification": meta.verification,
-                "content_type": meta.content_type,
+                "hash": output_hash,
+                "content_type": content_type,
+                "job_id": job_id,
             }
         return result
     finally:
         Path(tmp_path).unlink(missing_ok=True)
-
-
-def fetch_lazy(
-    ref: str,
-    *,
-    ref_name: str | None = None,
-    client: OzzyClient | None = None,
-    **params: Any,
-) -> pl.LazyFrame:
-    """Fetch endpoint output as a polars LazyFrame.
-
-    Only works for parquet outputs. For other formats, use fetch() instead.
-
-    Args:
-        ref: Remote reference in "owner/project/endpoint" format.
-        ref_name: Git ref (branch/tag) to resolve against.
-        client: Optional OzzyClient instance.
-        **params: Endpoint parameters.
-
-    Returns:
-        polars.LazyFrame
-    """
-    owner, project, endpoint = _parse_remote_ref(ref)
-    c = client or get_default_client()
-
-    query: dict[str, str] = {k: str(v) for k, v in params.items()}
-    if ref_name:
-        query["ref"] = ref_name
-
-    resp = c.request(
-        "GET",
-        f"/fetch/{quote(owner, safe='')}/{quote(project, safe='')}/{quote(endpoint, safe='')}",
-        params=query,
-        stream=True,
-    )
-
-    content_type = resp.headers.get("content-type", "application/octet-stream")
-
-    # Write to temp file
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".parquet")
-    tmp_path = tmp.name
-    try:
-        for chunk in resp.iter_content(chunk_size=8192):
-            tmp.write(chunk)
-        tmp.close()
-    except Exception:
-        tmp.close()
-        Path(tmp_path).unlink(missing_ok=True)
-        raise
-    finally:
-        resp.close()
-
-    if "parquet" in content_type:
-        # For lazy scanning, the file must persist while the LazyFrame is alive.
-        # Register cleanup via atexit so the file is removed when Python exits.
-        import atexit
-        atexit.register(lambda p=tmp_path: Path(p).unlink(missing_ok=True))
-        return pl.scan_parquet(tmp_path)
-    else:
-        # Fall back: read into DataFrame and convert to lazy
-        try:
-            df = _read_output(tmp_path, content_type, as_pandas=False)
-            if isinstance(df, pl.DataFrame):
-                return df.lazy()
-            raise ValueError(
-                f"Cannot create LazyFrame from content type: {content_type}"
-            )
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
 
 
 # ── Inspect ──────────────────────────────────────────────────────
