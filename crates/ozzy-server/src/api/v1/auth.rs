@@ -379,6 +379,9 @@ pub enum ApiError {
     /// 410 Gone - resource has been yanked/retracted
     #[error("{0}")]
     Gone(String),
+    /// 429 Too Many Requests - rate limit exceeded
+    #[error("{0}")]
+    TooManyRequests(String),
     /// 503 Service Unavailable - feature not enabled or dependency not ready
     #[error("{0}")]
     ServiceUnavailable(String),
@@ -410,6 +413,10 @@ impl ApiError {
 
     pub fn gone(msg: impl Into<String>) -> Self {
         Self::Gone(msg.into())
+    }
+
+    pub fn too_many_requests(msg: impl Into<String>) -> Self {
+        Self::TooManyRequests(msg.into())
     }
 
     pub fn service_unavailable(msg: impl Into<String>) -> Self {
@@ -466,6 +473,9 @@ impl axum::response::IntoResponse for ApiError {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg),
             ApiError::Gone(msg) => (StatusCode::GONE, "gone", msg),
+            ApiError::TooManyRequests(msg) => {
+                (StatusCode::TOO_MANY_REQUESTS, "too_many_requests", msg)
+            }
             ApiError::ServiceUnavailable(msg) => {
                 (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable", msg)
             }

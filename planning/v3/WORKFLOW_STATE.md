@@ -94,5 +94,28 @@
 - Review fix commits: `e0b4379`, `19e0ca3`
 - Models: Claude Opus only (Gemini: E2BIG at 368k tokens, Codex: skipped at 368k > 258k limit)
 
+### Phase 3: Fly Backend + Rate Limiting (IN PROGRESS)
+
+#### Step 3.1: FlyBackend + BackendSelector
+- FlyBackend implementing ComputeBackend trait (fly.rs)
+- FlyConfig + RateLimitConfig added to config.rs
+- BackendSelector priority: Fly (if R2) > Docker > None
+- Updated orchestrator init script selection
+- Commit: `f2e0c70`
+
+#### Step 3.2: Environment image management
+- environments.rs: provider tracking (docker/fly), image ref formatting
+- DB queries: get_provider_image, upsert_provider_image
+- Commit: `844f19c`
+
+#### Step 3.3: Rate limiting integration
+- Wired check_limits() into fetch endpoint before async job creation
+- Added TooManyRequests (429) variant to ApiError
+- Rate limits checked after cache-hit fast path (cache hits don't count against limits)
+- Anonymous users: global limit only; authenticated: per-user + global
+- Commit: (pending)
+
 ## What's Next
-- Phase 3: Fly Backend + Rate Limiting
+- Step 3.4: Orphan machine cleanup
+- Step 3.5: Secrets delivery for compute
+- Phase 3 exhaustive review

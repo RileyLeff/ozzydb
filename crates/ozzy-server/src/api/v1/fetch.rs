@@ -231,7 +231,35 @@ async fn fetch_endpoint(
             .into_response());
     }
 
-    // ── 8. Create queued job + spawn background execution ────────
+    // ── 8. Rate limit check (only for non-cached execution) ─────
+    if let Some(user_id) = auth_user_id {
+        if let Err(e) = crate::compute::rate_limit::check_limits(
+            &state.db,
+            &state.config.rate_limit,
+            user_id,
+        )
+        .await
+        {
+            return Err(ApiError::TooManyRequests(e.to_string()));
+        }
+    } else {
+        // Anonymous users: check global limit only
+        if state.config.rate_limit.global_max_concurrent > 0 {
+            let global_active = state
+                .db
+                .count_active_jobs_global()
+                .await
+                .map_err(ApiError::Internal)?;
+            if global_active >= state.config.rate_limit.global_max_concurrent as i64 {
+                return Err(ApiError::TooManyRequests(format!(
+                    "Global concurrent job limit exceeded ({}/{})",
+                    global_active, state.config.rate_limit.global_max_concurrent
+                )));
+            }
+        }
+    }
+
+    // ── 9. Create queued job + spawn background execution ────────
     let job = state
         .db
         .create_job(
