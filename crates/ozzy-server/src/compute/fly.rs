@@ -92,7 +92,7 @@ impl FlyBackend {
             self.config.api_url, self.config.app_name
         );
 
-        let create_resp = self
+        let create_resp = match self
             .http
             .post(&create_url)
             .bearer_auth(&self.config.api_token)
@@ -100,7 +100,13 @@ impl FlyBackend {
             .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
-            .context("Failed to create Fly Machine")?;
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::error!("Fly Machine creation request failed: {e:#}");
+                return Err(e).context("Failed to create Fly Machine");
+            }
+        };
 
         if !create_resp.status().is_success() {
             let status = create_resp.status();
@@ -275,14 +281,20 @@ impl FlyBackend {
             self.config.api_url, self.config.app_name
         );
 
-        let resp = self
+        let resp = match self
             .http
             .get(&url)
             .bearer_auth(&self.config.api_token)
             .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
-            .context("Failed to list Fly Machines")?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Fly list machines request failed: {e:#}");
+                return Err(e).context("Failed to list Fly Machines");
+            }
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();
