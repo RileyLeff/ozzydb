@@ -108,6 +108,22 @@ async fn main() -> Result<()> {
         compute,
     };
 
+    // Spawn periodic orphan cleanup for Fly backend
+    if let Some(fly) = compute.as_ref().and_then(|c| c.as_fly()) {
+        let fly_clone = fly.clone();
+        tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(5 * 60); // every 5 minutes
+            let max_age = std::time::Duration::from_secs(30 * 60); // 30 min threshold
+            loop {
+                tokio::time::sleep(interval).await;
+                if let Err(e) = fly_clone.cleanup_orphans(max_age).await {
+                    tracing::error!("Fly orphan cleanup failed: {}", e);
+                }
+            }
+        });
+        tracing::info!("Fly orphan cleanup task started (every 5 min, max age 30 min)");
+    }
+
     // Build router
     let app = Router::new()
         .merge(api::router())

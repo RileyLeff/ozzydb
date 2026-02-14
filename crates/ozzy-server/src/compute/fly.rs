@@ -395,6 +395,55 @@ impl FlyBackend {
     async fn cleanup_temp_output(&self, temp_key: &str) -> Result<()> {
         self.storage.delete_by_key(temp_key).await
     }
+
+    /// Find and destroy orphaned Fly machines.
+    ///
+    /// An orphan is any `ozzy-job-*` machine older than `max_age`. These are
+    /// machines whose orchestrator crashed, timed out, or failed to clean up.
+    /// Called periodically from a background task.
+    pub async fn cleanup_orphans(&self, max_age: std::time::Duration) -> Result<u32> {
+        let machines = self.list_machines().await?;
+        let cutoff = chrono::Utc::now() - chrono::Duration::from_std(max_age)?;
+        let mut destroyed = 0u32;
+
+        for machine in &machines {
+            // Only touch our machines
+            let name = machine.name.as_deref().unwrap_or("");
+            if !name.starts_with("ozzy-job-") {
+                continue;
+            }
+
+            // Parse created_at timestamp
+            let created_at = match &machine.created_at {
+                Some(ts) => match ts.parse::<chrono::DateTime<chrono::Utc>>() {
+                    Ok(dt) => dt,
+                    Err(_) => continue, // Can't determine age, skip
+                },
+                None => continue,
+            };
+
+            if created_at < cutoff {
+                tracing::warn!(
+                    "Destroying orphaned Fly Machine: {} (id: {}, state: {:?}, created: {})",
+                    name,
+                    machine.id,
+                    machine.state,
+                    created_at,
+                );
+                if let Err(e) = self.destroy_machine(&machine.id).await {
+                    tracing::error!("Failed to destroy orphan {}: {}", machine.id, e);
+                } else {
+                    destroyed += 1;
+                }
+            }
+        }
+
+        if destroyed > 0 {
+            tracing::info!("Orphan cleanup: destroyed {} machines", destroyed);
+        }
+
+        Ok(destroyed)
+    }
 }
 
 // ── Fly Machines API types ──────────────────────────────────────
@@ -548,6 +597,48 @@ mod tests {
 
         let state: MachineState = serde_json::from_str(json).unwrap();
         assert_eq!(state.exit_code, None);
+    }
+
+    #[test]
+    fn test_orphan_detection_logic() {
+        // Verify the naming convention and age check that cleanup_orphans uses
+        let now = chrono::Utc::now();
+        let old = now - chrono::Duration::minutes(45);
+        let recent = now - chrono::Duration::minutes(5);
+        let max_age = std::time::Duration::from_secs(30 * 60); // 30 min
+        let cutoff = now - chrono::Duration::from_std(max_age).unwrap();
+
+        // Old ozzy-job machine → orphan
+        let m1 = MachineListEntry {
+            id: "m1".into(),
+            name: Some("ozzy-job-abc".into()),
+            state: Some("stopped".into()),
+            created_at: Some(old.to_rfc3339()),
+        };
+        assert!(m1.name.as_deref().unwrap().starts_with("ozzy-job-"));
+        let ts1: chrono::DateTime<chrono::Utc> =
+            m1.created_at.as_deref().unwrap().parse().unwrap();
+        assert!(ts1 < cutoff, "Old machine should be before cutoff");
+
+        // Recent ozzy-job machine → not an orphan
+        let m2 = MachineListEntry {
+            id: "m2".into(),
+            name: Some("ozzy-job-def".into()),
+            state: Some("running".into()),
+            created_at: Some(recent.to_rfc3339()),
+        };
+        let ts2: chrono::DateTime<chrono::Utc> =
+            m2.created_at.as_deref().unwrap().parse().unwrap();
+        assert!(ts2 >= cutoff, "Recent machine should be after cutoff");
+
+        // Non-ozzy machine → skipped
+        let m3 = MachineListEntry {
+            id: "m3".into(),
+            name: Some("other-app".into()),
+            state: Some("running".into()),
+            created_at: Some(old.to_rfc3339()),
+        };
+        assert!(!m3.name.as_deref().unwrap().starts_with("ozzy-job-"));
     }
 
     #[test]
