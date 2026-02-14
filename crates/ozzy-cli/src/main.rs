@@ -406,11 +406,101 @@ async fn main() -> Result<()> {
                 commands::cache::clear()?;
             }
         },
-        _ => {
-            eprintln!("Command not yet implemented.");
-            eprintln!("See planning/v3/architecture.md for the design.");
-            std::process::exit(1);
+        Commands::Push { r#ref, message } => {
+            commands::push::run(r#ref.as_deref(), message.as_deref()).await?;
         }
+        Commands::Data { command } => match command {
+            DataCommands::Upload {
+                files,
+                name,
+                description,
+                tags,
+                meta,
+                collection,
+            } => {
+                commands::data::upload(
+                    &files,
+                    name.as_deref(),
+                    description.as_deref(),
+                    tags.as_deref(),
+                    meta.as_deref(),
+                    collection.as_deref(),
+                )
+                .await?;
+            }
+            DataCommands::Ls => {
+                commands::data::ls().await?;
+            }
+            DataCommands::Show { name } => {
+                commands::data::show(&name).await?;
+            }
+            DataCommands::Describe {
+                name,
+                set_description,
+                history,
+            } => {
+                commands::data::describe(&name, set_description.as_deref(), history).await?;
+            }
+            DataCommands::Yank { name, reason } => {
+                commands::data::yank(&name, &reason).await?;
+            }
+            DataCommands::Download { name, output } => {
+                commands::data::download(&name, output.as_deref()).await?;
+            }
+        },
+        Commands::Collection { command } => match command {
+            CollectionCommands::Create { name } => {
+                commands::collection::create(&name).await?;
+            }
+            CollectionCommands::Add { name, members } => {
+                commands::collection::add(&name, &members).await?;
+            }
+            CollectionCommands::Rm { name, members } => {
+                commands::collection::rm(&name, &members).await?;
+            }
+            CollectionCommands::Ls { name } => {
+                commands::collection::ls(name.as_deref()).await?;
+            }
+            CollectionCommands::Log { name } => {
+                commands::collection::log(&name).await?;
+            }
+            CollectionCommands::Flatten { name } => {
+                commands::collection::flatten(&name).await?;
+            }
+        },
+        Commands::Endpoint { command } => match command {
+            EndpointCommands::Ls { r#ref } => {
+                commands::endpoint::ls(r#ref.as_deref()).await?;
+            }
+            EndpointCommands::Show { name, r#ref } => {
+                commands::endpoint::show(&name, r#ref.as_deref()).await?;
+            }
+            EndpointCommands::Yank {
+                name,
+                r#ref,
+                reason,
+            } => {
+                commands::endpoint::yank(&name, &r#ref, &reason).await?;
+            }
+            EndpointCommands::Dag {
+                name,
+                format,
+                r#ref,
+            } => {
+                commands::endpoint::dag(&name, &format, r#ref.as_deref()).await?;
+            }
+        },
+        Commands::Secret { command } => match command {
+            SecretCommands::Set { name } => {
+                commands::secret::set(&name).await?;
+            }
+            SecretCommands::Ls => {
+                commands::secret::ls().await?;
+            }
+            SecretCommands::Rm { name } => {
+                commands::secret::rm(&name).await?;
+            }
+        },
     }
 
     Ok(())
