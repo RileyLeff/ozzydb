@@ -71,6 +71,9 @@ services:
       FLY_CPU_KIND: ${FLY_CPU_KIND:-}
       FLY_CPUS: ${FLY_CPUS:-}
       FLY_MEMORY_MB: ${FLY_MEMORY_MB:-}
+      # Rate limiting (concurrent job limits; 0 = unlimited)
+      RATE_LIMIT_GLOBAL_MAX: ${RATE_LIMIT_GLOBAL_MAX:-}
+      RATE_LIMIT_PER_USER_MAX: ${RATE_LIMIT_PER_USER_MAX:-}
       RUST_LOG: ${RUST_LOG:-info,ozzy_server=debug}
     volumes:
       # Docker socket for server-side compute (transform execution)
