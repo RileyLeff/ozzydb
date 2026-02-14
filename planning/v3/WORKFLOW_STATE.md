@@ -1,7 +1,7 @@
 # v3 Workflow State
 
-## Current Phase: Phase 2 — Async Job Model + Parallel DAG
-## Current Step: Step 2.5 COMPLETE, starting Step 2.6
+## Current Phase: Phase 3 — Fly Backend + Rate Limiting
+## Current Step: Starting Phase 3
 
 ## Completed Steps
 
@@ -19,7 +19,7 @@
 #### Phase 1 Review: 3 rounds, converged (2 consecutive clean)
 - Commit: `e798544`
 
-### Phase 2: Async Job Model + Parallel DAG (IN PROGRESS)
+### Phase 2: Async Job Model + Parallel DAG (COMPLETE)
 
 #### Step 2.1: Jobs table migration + DB operations + tests
 - Created `migrations/002_v3_jobs.sql` (jobs + environment_provider_images tables)
@@ -63,6 +63,21 @@
 - Updated orchestrator to use backend from state instead of direct docker::run()
 - Updated main.rs + all test files (api_tests, e2e_tests, integration_tests)
 - 2 unit tests (disabled/enabled config)
+- Commit: `8865b2a`
+
+#### Step 2.6: Update CLI ozzy fetch for async model
+- Rewrote `ozzy fetch` to POST + poll + download pattern
+- Per-node status display during polling
+- Handles presigned URL redirects for output download
+- 3 new unit tests (format_node_status)
+- Commit: `21dd3fe`
+
+#### Step 2.7: Update Python client fetch()
+- Rewrote `fetch()` and `fetch_lazy()` for async POST + poll
+- Added `_download_job_output()` helper for redirect/proxy handling
+- Added `poll_interval`, `timeout`, `verbose` parameters
+- 2 new test cases (poll_until_done, job_error)
+- Commit: `fae0b13`
 
 ## Deferred Steps
 
@@ -72,7 +87,12 @@
 ### Step 1.5: Deploy R2 to production
 **Reason:** Requires SSH access to VPS. Will be done manually.
 
+#### Phase 2 Exhaustive Review: 4 rounds, converged (2 consecutive clean)
+- Round 1: 8 fixes (job output storage/lookup, status mismatch, secrets hash, param sanitization, wave ordering, poll timeout)
+- Round 2: 1 fix (orchestrator missing secret handling)
+- Rounds 3-4: CLEAN
+- Review fix commits: `e0b4379`, `19e0ca3`
+- Models: Claude Opus only (Gemini: E2BIG at 368k tokens, Codex: skipped at 368k > 258k limit)
+
 ## What's Next
-- Step 2.6: Update CLI ozzy fetch for async model
-- Step 2.7: Update Python client fetch()
-- Phase 2 exhaustive review
+- Phase 3: Fly Backend + Rate Limiting
