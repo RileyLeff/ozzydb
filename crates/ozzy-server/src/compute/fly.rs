@@ -62,7 +62,7 @@ impl FlyBackend {
             region: self.config.region.clone(),
             config: MachineConfig {
                 image: request.image.clone(),
-                auto_destroy: true,
+                auto_destroy: false,
                 env,
                 guest: GuestConfig {
                     cpu_kind: self.config.cpu_kind.clone(),
