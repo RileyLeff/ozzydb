@@ -1,7 +1,7 @@
 # v3 Workflow State
 
-## Current Phase: Phase 3 — Fly Backend + Rate Limiting
-## Current Step: Starting Phase 3
+## Current Phase: Phase 5 — Cleanup + Local Dev Stack
+## Current Step: Starting Phase 5
 
 ## Completed Steps
 
@@ -163,5 +163,30 @@
 - Review fix commit: `e031bb0`
 - Rounds 5-6: CLEAN (convergence reached — 2 consecutive clean rounds)
 
+### Phase 4: Admin Dashboard (COMPLETE)
+
+#### Step 4.1: Admin flag + API
+- Migration 003_v3_admin.sql: `is_admin BOOLEAN DEFAULT false` on users table
+- `AdminUser` extractor in auth/middleware.rs (account-scoped + is_admin=true)
+- Admin API endpoints: GET /v1/admin/jobs, POST /v1/admin/jobs/{id}/cancel, GET /v1/admin/rate-limits, GET /v1/admin/users
+- DB queries: list_jobs_global, cancel_job, list_users, set_user_admin
+- 4 unit tests
+- Commit: `ab8ea5d`
+
+#### Step 4.2: Admin frontend page
+- Admin dashboard page at /admin with three tabs: Jobs, Users, Rate Limits
+- Jobs tab: auto-refreshing table with cancel buttons, status filter
+- Users tab: listing with admin badges
+- Rate Limits tab: current config + active job count
+- Nav dropdown shows Admin link for admin users
+- is_admin field added to server UserInfo response + frontend types
+- Commit: `49def7d`
+
+#### Phase 4 Exhaustive Review: 3 rounds, converged (2 consecutive clean)
+- Round 1: 5 fixes (cancel_job fetch_optional→execute, queued-only cancel, negative limit clamping, double-fetch, status validation)
+- Rounds 2-3: CLEAN
+- Review fix commit: `cba927c`
+- Models: Claude Opus only (~389k tokens, exceeds Codex/Gemini limits)
+
 ## What's Next
-- Phase 4 (next in implementation plan)
+- Phase 5 (Cleanup + Local Dev Stack)
