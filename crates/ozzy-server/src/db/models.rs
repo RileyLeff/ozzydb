@@ -291,6 +291,43 @@ pub struct MaterializedCacheEntry {
 }
 
 // ============================================================
+// Jobs (async compute)
+// ============================================================
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct Job {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub endpoint_name: String,
+    pub commit_id: Uuid,
+    pub params: serde_json::Value,
+    pub params_hash: String,
+    pub status: String,
+    pub node_status: serde_json::Value,
+    pub output_hash: Option<String>,
+    pub output_content_type: Option<String>,
+    pub error_message: Option<String>,
+    pub created_by: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+// ============================================================
+// Environment provider images
+// ============================================================
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct EnvironmentProviderImage {
+    pub id: Uuid,
+    pub env_hash: String,
+    pub provider: String,
+    pub image_ref: String,
+    pub pushed_at: DateTime<Utc>,
+}
+
+// ============================================================
 // GitHub installations
 // ============================================================
 

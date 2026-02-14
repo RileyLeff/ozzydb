@@ -1179,3 +1179,499 @@ async fn test_materialized_cache() -> Result<()> {
 
     Ok(())
 }
+
+// ========================================================================
+// Job Operations
+// ========================================================================
+
+#[tokio::test]
+async fn test_create_and_get_job() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+    let sha = format!("{:040x}", rand::random::<u128>());
+    let commit = db
+        .insert_commit(
+            project.id,
+            "github",
+            "user/repo",
+            &sha,
+            "hash",
+            user.id,
+            None,
+        )
+        .await?;
+
+    let params = serde_json::json!({"threshold": 0.5});
+    let params_hash = format!("{:064x}", rand::random::<u128>());
+    let node_status = serde_json::json!({"transform_a": "queued", "transform_b": "queued"});
+
+    let job = db
+        .create_job(
+            project.id,
+            "analysis",
+            commit.id,
+            &params,
+            &params_hash,
+            &node_status,
+            Some(user.id),
+        )
+        .await?;
+
+    assert_eq!(job.project_id, project.id);
+    assert_eq!(job.endpoint_name, "analysis");
+    assert_eq!(job.commit_id, commit.id);
+    assert_eq!(job.status, "queued");
+    assert_eq!(job.params, params);
+    assert_eq!(job.params_hash, params_hash);
+    assert_eq!(job.node_status, node_status);
+    assert_eq!(job.created_by, Some(user.id));
+    assert!(job.started_at.is_none());
+    assert!(job.completed_at.is_none());
+    assert!(job.expires_at.is_some());
+
+    // Get by ID
+    let found = db.get_job(job.id).await?.unwrap();
+    assert_eq!(found.id, job.id);
+    assert_eq!(found.status, "queued");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_find_active_job_dedup() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+    let sha = format!("{:040x}", rand::random::<u128>());
+    let commit = db
+        .insert_commit(
+            project.id,
+            "github",
+            "user/repo",
+            &sha,
+            "hash",
+            user.id,
+            None,
+        )
+        .await?;
+
+    let params_hash = format!("{:064x}", rand::random::<u128>());
+
+    // No active job initially
+    let found = db
+        .find_active_job(project.id, "analysis", commit.id, &params_hash)
+        .await?;
+    assert!(found.is_none());
+
+    // Create a queued job
+    let job = db
+        .create_job(
+            project.id,
+            "analysis",
+            commit.id,
+            &serde_json::json!({}),
+            &params_hash,
+            &serde_json::json!({}),
+            Some(user.id),
+        )
+        .await?;
+
+    // Now find_active_job should return it
+    let found = db
+        .find_active_job(project.id, "analysis", commit.id, &params_hash)
+        .await?
+        .unwrap();
+    assert_eq!(found.id, job.id);
+
+    // Mark as done — should no longer be found
+    db.update_job_status(job.id, "done").await?;
+    let found = db
+        .find_active_job(project.id, "analysis", commit.id, &params_hash)
+        .await?;
+    assert!(found.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_update_job_status_timestamps() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+    let sha = format!("{:040x}", rand::random::<u128>());
+    let commit = db
+        .insert_commit(
+            project.id,
+            "github",
+            "user/repo",
+            &sha,
+            "hash",
+            user.id,
+            None,
+        )
+        .await?;
+
+    let job = db
+        .create_job(
+            project.id,
+            "ep",
+            commit.id,
+            &serde_json::json!({}),
+            "phash",
+            &serde_json::json!({}),
+            None,
+        )
+        .await?;
+
+    // Transition to running → sets started_at
+    db.update_job_status(job.id, "running").await?;
+    let job = db.get_job(job.id).await?.unwrap();
+    assert_eq!(job.status, "running");
+    assert!(job.started_at.is_some());
+    assert!(job.completed_at.is_none());
+
+    // Transition to done → sets completed_at
+    db.update_job_status(job.id, "done").await?;
+    let job = db.get_job(job.id).await?.unwrap();
+    assert_eq!(job.status, "done");
+    assert!(job.completed_at.is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_update_node_status() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+    let sha = format!("{:040x}", rand::random::<u128>());
+    let commit = db
+        .insert_commit(
+            project.id,
+            "github",
+            "user/repo",
+            &sha,
+            "hash",
+            user.id,
+            None,
+        )
+        .await?;
+
+    let job = db
+        .create_job(
+            project.id,
+            "ep",
+            commit.id,
+            &serde_json::json!({}),
+            "phash",
+            &serde_json::json!({"node_a": "queued", "node_b": "queued"}),
+            None,
+        )
+        .await?;
+
+    // Update node_a to running
+    db.update_node_status(job.id, "node_a", "running").await?;
+    let job = db.get_job(job.id).await?.unwrap();
+    assert_eq!(job.node_status["node_a"], "running");
+    assert_eq!(job.node_status["node_b"], "queued");
+
+    // Update node_a to done, node_b to running
+    db.update_node_status(job.id, "node_a", "done").await?;
+    db.update_node_status(job.id, "node_b", "running").await?;
+    let job = db.get_job(job.id).await?.unwrap();
+    assert_eq!(job.node_status["node_a"], "done");
+    assert_eq!(job.node_status["node_b"], "running");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_set_job_output_and_error() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+    let sha = format!("{:040x}", rand::random::<u128>());
+    let commit = db
+        .insert_commit(
+            project.id,
+            "github",
+            "user/repo",
+            &sha,
+            "hash",
+            user.id,
+            None,
+        )
+        .await?;
+
+    // Test set_job_output
+    let job1 = db
+        .create_job(
+            project.id,
+            "ep",
+            commit.id,
+            &serde_json::json!({}),
+            &format!("ph_{}", Uuid::new_v4()),
+            &serde_json::json!({}),
+            None,
+        )
+        .await?;
+
+    db.set_job_output(job1.id, "output_hash_abc", "application/vnd.apache.parquet")
+        .await?;
+    let job1 = db.get_job(job1.id).await?.unwrap();
+    assert_eq!(job1.status, "done");
+    assert_eq!(job1.output_hash, Some("output_hash_abc".to_string()));
+    assert_eq!(
+        job1.output_content_type,
+        Some("application/vnd.apache.parquet".to_string())
+    );
+    assert!(job1.completed_at.is_some());
+
+    // Test set_job_error
+    let job2 = db
+        .create_job(
+            project.id,
+            "ep",
+            commit.id,
+            &serde_json::json!({}),
+            &format!("ph_{}", Uuid::new_v4()),
+            &serde_json::json!({}),
+            None,
+        )
+        .await?;
+
+    db.set_job_error(job2.id, "Transform failed: division by zero")
+        .await?;
+    let job2 = db.get_job(job2.id).await?.unwrap();
+    assert_eq!(job2.status, "failed");
+    assert_eq!(
+        job2.error_message,
+        Some("Transform failed: division by zero".to_string())
+    );
+    assert!(job2.completed_at.is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_list_jobs() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+    let sha = format!("{:040x}", rand::random::<u128>());
+    let commit = db
+        .insert_commit(
+            project.id,
+            "github",
+            "user/repo",
+            &sha,
+            "hash",
+            user.id,
+            None,
+        )
+        .await?;
+
+    // Create two jobs
+    for i in 0..2 {
+        db.create_job(
+            project.id,
+            "ep",
+            commit.id,
+            &serde_json::json!({}),
+            &format!("ph_{}", i),
+            &serde_json::json!({}),
+            None,
+        )
+        .await?;
+    }
+
+    let jobs = db.list_jobs(project.id, 10).await?;
+    assert_eq!(jobs.len(), 2);
+    // Most recent first
+    assert!(jobs[0].created_at >= jobs[1].created_at);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cleanup_expired_jobs() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let user = db
+        .upsert_user_from_github(
+            (rand::random::<i64>() & i64::MAX),
+            &unique_name("user"),
+            None,
+            None,
+        )
+        .await?;
+    let project = db
+        .create_project(user.id, &unique_name("proj"), None, "private")
+        .await?;
+    let sha = format!("{:040x}", rand::random::<u128>());
+    let commit = db
+        .insert_commit(
+            project.id,
+            "github",
+            "user/repo",
+            &sha,
+            "hash",
+            user.id,
+            None,
+        )
+        .await?;
+
+    // Create a job (default 24h expiry — won't be cleaned up)
+    let job = db
+        .create_job(
+            project.id,
+            "ep",
+            commit.id,
+            &serde_json::json!({}),
+            &format!("ph_{}", Uuid::new_v4()),
+            &serde_json::json!({}),
+            None,
+        )
+        .await?;
+
+    // Cleanup shouldn't delete it (not expired yet)
+    let _cleaned = db.cleanup_expired_jobs().await?;
+    assert!(db.get_job(job.id).await?.is_some());
+
+    // Manually set expires_at to the past
+    sqlx::query("UPDATE jobs SET expires_at = now() - interval '1 hour' WHERE id = $1")
+        .bind(job.id)
+        .execute(db.pool())
+        .await?;
+
+    // Now cleanup should remove it
+    let cleaned = db.cleanup_expired_jobs().await?;
+    assert!(cleaned >= 1);
+    assert!(db.get_job(job.id).await?.is_none());
+
+    Ok(())
+}
+
+// ========================================================================
+// Environment Provider Image Operations
+// ========================================================================
+
+#[tokio::test]
+async fn test_provider_images() -> Result<()> {
+    let Some(db) = get_test_db().await else {
+        return Ok(());
+    };
+
+    let env_hash = format!("env_{:032x}", rand::random::<u128>());
+
+    // Not found initially
+    assert!(db.get_provider_image(&env_hash, "docker").await?.is_none());
+
+    // Upsert creates
+    let img = db
+        .upsert_provider_image(&env_hash, "docker", "python:3.12-slim")
+        .await?;
+    assert_eq!(img.env_hash, env_hash);
+    assert_eq!(img.provider, "docker");
+    assert_eq!(img.image_ref, "python:3.12-slim");
+
+    // Get
+    let found = db.get_provider_image(&env_hash, "docker").await?.unwrap();
+    assert_eq!(found.image_ref, "python:3.12-slim");
+
+    // Upsert updates image_ref
+    let updated = db
+        .upsert_provider_image(&env_hash, "docker", "python:3.13-slim")
+        .await?;
+    assert_eq!(updated.image_ref, "python:3.13-slim");
+
+    // Different provider is separate
+    let fly_img = db
+        .upsert_provider_image(&env_hash, "fly", "registry.fly.io/ozzy/abc123")
+        .await?;
+    assert_eq!(fly_img.provider, "fly");
+
+    // Both exist independently
+    let docker = db.get_provider_image(&env_hash, "docker").await?.unwrap();
+    let fly = db.get_provider_image(&env_hash, "fly").await?.unwrap();
+    assert_eq!(docker.image_ref, "python:3.13-slim");
+    assert_eq!(fly.image_ref, "registry.fly.io/ozzy/abc123");
+
+    Ok(()
+)
+}

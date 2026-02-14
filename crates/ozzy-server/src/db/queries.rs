@@ -1801,4 +1801,221 @@ impl Database {
             .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    // ========================================================================
+    // Job Operations
+    // ========================================================================
+
+    /// Create a new job. Returns the created job.
+    pub async fn create_job(
+        &self,
+        project_id: Uuid,
+        endpoint_name: &str,
+        commit_id: Uuid,
+        params: &serde_json::Value,
+        params_hash: &str,
+        node_status: &serde_json::Value,
+        created_by: Option<Uuid>,
+    ) -> Result<Job> {
+        let job = sqlx::query_as::<_, Job>(
+            "INSERT INTO jobs (project_id, endpoint_name, commit_id, params, params_hash, node_status, created_by, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, now() + interval '24 hours')
+             RETURNING *",
+        )
+        .bind(project_id)
+        .bind(endpoint_name)
+        .bind(commit_id)
+        .bind(params)
+        .bind(params_hash)
+        .bind(node_status)
+        .bind(created_by)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(job)
+    }
+
+    /// Get a job by ID.
+    pub async fn get_job(&self, job_id: Uuid) -> Result<Option<Job>> {
+        let job = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(job)
+    }
+
+    /// Find an active (queued or running) job with the same dedup key.
+    pub async fn find_active_job(
+        &self,
+        project_id: Uuid,
+        endpoint_name: &str,
+        commit_id: Uuid,
+        params_hash: &str,
+    ) -> Result<Option<Job>> {
+        let job = sqlx::query_as::<_, Job>(
+            "SELECT * FROM jobs
+             WHERE project_id = $1 AND endpoint_name = $2 AND commit_id = $3 AND params_hash = $4
+             AND status IN ('queued', 'running')
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )
+        .bind(project_id)
+        .bind(endpoint_name)
+        .bind(commit_id)
+        .bind(params_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(job)
+    }
+
+    /// Update job status. Sets started_at when transitioning to 'running',
+    /// completed_at when transitioning to 'done' or 'failed'.
+    pub async fn update_job_status(&self, job_id: Uuid, status: &str) -> Result<bool> {
+        let result = match status {
+            "running" => {
+                sqlx::query(
+                    "UPDATE jobs SET status = $2, started_at = now() WHERE id = $1 AND status IN ('queued', 'running')",
+                )
+                .bind(job_id)
+                .bind(status)
+                .execute(&self.pool)
+                .await?
+            }
+            "done" | "failed" => {
+                sqlx::query(
+                    "UPDATE jobs SET status = $2, completed_at = now() WHERE id = $1",
+                )
+                .bind(job_id)
+                .bind(status)
+                .execute(&self.pool)
+                .await?
+            }
+            _ => {
+                sqlx::query("UPDATE jobs SET status = $2 WHERE id = $1")
+                    .bind(job_id)
+                    .bind(status)
+                    .execute(&self.pool)
+                    .await?
+            }
+        };
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Update individual node status in the JSONB node_status field.
+    pub async fn update_node_status(
+        &self,
+        job_id: Uuid,
+        node_name: &str,
+        status: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE jobs SET node_status = jsonb_set(node_status, ARRAY[$2], to_jsonb($3::text))
+             WHERE id = $1",
+        )
+        .bind(job_id)
+        .bind(node_name)
+        .bind(status)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Set job output on completion.
+    pub async fn set_job_output(
+        &self,
+        job_id: Uuid,
+        output_hash: &str,
+        output_content_type: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE jobs SET output_hash = $2, output_content_type = $3,
+             status = 'done', completed_at = now()
+             WHERE id = $1",
+        )
+        .bind(job_id)
+        .bind(output_hash)
+        .bind(output_content_type)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Set job error on failure.
+    pub async fn set_job_error(&self, job_id: Uuid, error_message: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE jobs SET error_message = $2, status = 'failed', completed_at = now()
+             WHERE id = $1",
+        )
+        .bind(job_id)
+        .bind(error_message)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// List jobs for a project, ordered by most recent first.
+    pub async fn list_jobs(
+        &self,
+        project_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<Job>> {
+        let jobs = sqlx::query_as::<_, Job>(
+            "SELECT * FROM jobs WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(project_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(jobs)
+    }
+
+    /// Delete expired jobs.
+    pub async fn cleanup_expired_jobs(&self) -> Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM jobs WHERE expires_at IS NOT NULL AND expires_at < now()",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    // ========================================================================
+    // Environment Provider Images
+    // ========================================================================
+
+    /// Get the image reference for an environment on a specific provider.
+    pub async fn get_provider_image(
+        &self,
+        env_hash: &str,
+        provider: &str,
+    ) -> Result<Option<EnvironmentProviderImage>> {
+        let image = sqlx::query_as::<_, EnvironmentProviderImage>(
+            "SELECT * FROM environment_provider_images WHERE env_hash = $1 AND provider = $2",
+        )
+        .bind(env_hash)
+        .bind(provider)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(image)
+    }
+
+    /// Upsert an environment provider image record.
+    pub async fn upsert_provider_image(
+        &self,
+        env_hash: &str,
+        provider: &str,
+        image_ref: &str,
+    ) -> Result<EnvironmentProviderImage> {
+        let image = sqlx::query_as::<_, EnvironmentProviderImage>(
+            "INSERT INTO environment_provider_images (env_hash, provider, image_ref)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (env_hash, provider) DO UPDATE SET image_ref = $3, pushed_at = now()
+             RETURNING *",
+        )
+        .bind(env_hash)
+        .bind(provider)
+        .bind(image_ref)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(image)
+    }
 }
