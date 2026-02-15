@@ -37,6 +37,9 @@ set -e
 
 echo "OzzyDB init: starting"
 
+# Create workspace directory (may not exist in the base image)
+mkdir -p /workspace
+
 # Download and export secrets (if OZZY_SECRETS_URL is set)
 if [ -n "$OZZY_SECRETS_URL" ]; then
     python3 -c "

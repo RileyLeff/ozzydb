@@ -494,8 +494,8 @@ pub struct MachineListEntry {
 /// Extract exit code from machine events as a fallback.
 ///
 /// Looks for the last event of type "exit" and returns its exit code.
-/// Prefers `guest_exit_code` (the actual init process exit) over `exit_code`
-/// (the Fly machine-level exit, which can differ from the guest's).
+/// Uses `exit_code` (the user command's actual exit code) as the primary source.
+/// Falls back to `guest_exit_code` (Fly init system exit) if `exit_code` is missing.
 fn extract_exit_code_from_events(events: &[MachineEvent]) -> Option<i32> {
     events
         .iter()
@@ -503,7 +503,7 @@ fn extract_exit_code_from_events(events: &[MachineEvent]) -> Option<i32> {
         .find(|e| e.event_type.as_deref() == Some("exit"))
         .and_then(|e| e.request.as_ref())
         .and_then(|r| r.exit_event.as_ref())
-        .and_then(|ee| ee.guest_exit_code.or(ee.exit_code))
+        .and_then(|ee| ee.exit_code.or(ee.guest_exit_code))
 }
 
 #[cfg(test)]
@@ -601,9 +601,10 @@ mod tests {
     }
 
     #[test]
-    fn test_guest_exit_code_preferred_over_machine_exit_code() {
-        // Fly returns guest_exit_code=0 (process succeeded) but exit_code=2 (machine-level)
-        // We should prefer guest_exit_code
+    fn test_exit_code_preferred_over_guest_exit_code() {
+        // exit_code is the user command's actual exit code;
+        // guest_exit_code is the Fly init system's exit code.
+        // We prefer exit_code as it reflects the actual command result.
         let json = r#"{
             "events": [
                 {"type": "start", "timestamp": 1771113249144},
@@ -612,7 +613,20 @@ mod tests {
         }"#;
 
         let state: MachineState = serde_json::from_str(json).unwrap();
-        assert_eq!(extract_exit_code_from_events(&state.events), Some(0));
+        assert_eq!(extract_exit_code_from_events(&state.events), Some(2));
+    }
+
+    #[test]
+    fn test_guest_exit_code_fallback() {
+        // When exit_code is missing, fall back to guest_exit_code
+        let json = r#"{
+            "events": [
+                {"type": "exit", "timestamp": 1771113250634, "request": {"exit_event": {"guest_exit_code": 1}}}
+            ]
+        }"#;
+
+        let state: MachineState = serde_json::from_str(json).unwrap();
+        assert_eq!(extract_exit_code_from_events(&state.events), Some(1));
     }
 
     #[test]
