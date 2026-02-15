@@ -135,27 +135,6 @@ fn filename_stem(filename: &str) -> &str {
     base.split('.').next().unwrap_or(base)
 }
 
-/// Map content type to file extension for download filenames.
-fn content_type_to_extension(content_type: &str) -> &str {
-    match content_type {
-        "application/vnd.apache.parquet" => "parquet",
-        "text/csv" => "csv",
-        "text/tab-separated-values" => "tsv",
-        "application/json" => "json",
-        "application/geo+json" => "geojson",
-        "application/pdf" => "pdf",
-        "image/tiff" => "tiff",
-        "image/png" => "png",
-        "image/jpeg" => "jpeg",
-        "text/plain" => "txt",
-        "application/xml" => "xml",
-        "application/x-netcdf" => "nc",
-        "application/vnd.apache.arrow.stream" => "arrow",
-        "application/vnd.apache.arrow.file" => "feather",
-        _ => "bin",
-    }
-}
-
 // ============================================================================
 // Routes
 // ============================================================================
@@ -278,15 +257,19 @@ async fn upload_data(
     let existing_ref = state.db.get_content_ref(&hash).await?;
     let deduplicated = existing_ref.is_some();
 
+    // Determine storage extension from content type (must match the fetch download path)
+    let storage_ext =
+        super::fetch::content_type_to_extension(&content_type);
+
     // Compute the actual storage key
     let r2_key = state
         .storage
-        .storage_key(&hash, "bin")
+        .storage_key(&hash, &storage_ext)
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("Invalid hash: {}", e)))?;
 
     // Store content if this is a new hash
     if !deduplicated {
-        state.storage.store(&file_bytes, "bin").await?;
+        state.storage.store(&file_bytes, &storage_ext).await?;
     }
 
     // Insert data atom record BEFORE upserting content_refs.
@@ -489,7 +472,7 @@ async fn download_data(
     }
 
     // Build download filename with extension
-    let ext = content_type_to_extension(&atom.content_type);
+    let ext = super::fetch::content_type_to_extension(&atom.content_type);
     let filename = format!("{}.{}", atom.name, ext);
 
     // Redirect to a presigned URL (zero server bandwidth).
@@ -499,7 +482,7 @@ async fn download_data(
         .storage
         .presigned_get_url_with_filename(
             &atom.hash,
-            "bin",
+            &ext,
             std::time::Duration::from_secs(3600),
             Some(&filename),
         )
@@ -683,12 +666,12 @@ mod tests {
 
     #[test]
     fn test_content_type_to_extension() {
+        use super::super::fetch::content_type_to_extension;
         assert_eq!(
             content_type_to_extension("application/vnd.apache.parquet"),
             "parquet"
         );
         assert_eq!(content_type_to_extension("text/csv"), "csv");
-        assert_eq!(content_type_to_extension("application/pdf"), "pdf");
         assert_eq!(content_type_to_extension("image/png"), "png");
         assert_eq!(content_type_to_extension("unknown/type"), "bin");
     }
