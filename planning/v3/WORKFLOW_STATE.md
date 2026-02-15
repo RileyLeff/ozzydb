@@ -351,3 +351,18 @@ See `planning/v3/v3.1_compute_providers.md` for full plan.
 - Review fix commits: `8c0b38f`, `c6908a0`, `70bcc29`, `1675af8`, `ac0fdb9`, `636c579`, `0bf88bf`
 - Models: Claude Opus only (~380k tokens, exceeds Codex/Gemini limits)
 - Total: 24 fixes across 7 rounds
+
+---
+
+## Post-CLI: E2E Smoke Test (COMPLETE)
+
+### Production smoke test with tryozzydb
+- Full pipeline verified: push → data upload → fetch → correct output → cache hit
+- 6 bugs found and fixed during testing:
+  1. Fly Machine timestamp deserialization (integer vs string) — `d3fde69`
+  2. Exit code interpretation (exit_code vs guest_exit_code) — `d5cb7c1`, corrected in `a7859ad`
+  3. Missing /workspace/ directory in containers — `a7859ad`
+  4. No curl in python:3.12-slim (replaced with urllib) — `64e60a7`
+  5. Storage key extension mismatch (.bin vs content-type) — `4dc0ea7`
+  6. Transform calling convention (v2→v3 signature) — fixed in tryozzydb repo
+- Container initialization robustness documented in `planning/v3/next_steps.md`
