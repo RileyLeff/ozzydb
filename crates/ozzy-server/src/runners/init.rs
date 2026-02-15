@@ -5,8 +5,8 @@
 //! and uploading output. This is the same script for all compute backends
 //! (Docker, Fly Machines, etc.).
 //!
-//! **Requires:** `python3` (for secrets + input downloads) and `curl` (for
-//! source code download + output upload) in the environment image.
+//! **Requires:** `python3` in the environment image (all HTTP I/O is done via
+//! `urllib.request`, no `curl` dependency).
 
 use super::RunnerType;
 
@@ -64,10 +64,14 @@ chmod +x /workspace/runner.{runner_ext}
 # Download source code from R2 (if any — source-based transforms need /workspace/source/)
 if [ -n "$OZZY_SOURCE_DOWNLOAD" ]; then
     mkdir -p /workspace/source
-    curl -sS -o /tmp/source.tar.gz "$OZZY_SOURCE_DOWNLOAD" || {{
-        echo "ERROR: Failed to download source code" >&2
-        exit 1
-    }}
+    python3 -c "
+import os, sys, urllib.request
+try:
+    urllib.request.urlretrieve(os.environ['OZZY_SOURCE_DOWNLOAD'], '/tmp/source.tar.gz')
+except Exception as e:
+    print('ERROR: Failed to download source code: ' + str(e), file=sys.stderr)
+    sys.exit(1)
+" || exit 1
     tar xzf /tmp/source.tar.gz -C /workspace/source
     rm -f /tmp/source.tar.gz
 fi
@@ -113,12 +117,21 @@ fi
 # Upload output tarball to presigned URL
 cd /workspace/output
 tar czf /tmp/output.tar.gz .
-UPLOAD_URL=$(cat /tmp/ozzy_upload_url)
-rm -f /tmp/ozzy_upload_url
-curl -sSf -X PUT -T /tmp/output.tar.gz "$UPLOAD_URL" || {{
-    echo "ERROR: Failed to upload output" >&2
-    exit 1
-}}
+python3 -c "
+import sys, urllib.request
+try:
+    with open('/tmp/ozzy_upload_url') as f:
+        url = f.read().strip()
+    with open('/tmp/output.tar.gz', 'rb') as f:
+        data = f.read()
+    req = urllib.request.Request(url, data=data, method='PUT')
+    req.add_header('Content-Type', 'application/gzip')
+    urllib.request.urlopen(req)
+except Exception as e:
+    print('ERROR: Failed to upload output: ' + str(e), file=sys.stderr)
+    sys.exit(1)
+" || exit 1
+rm -f /tmp/ozzy_upload_url /tmp/output.tar.gz
 
 echo "OzzyDB init: transform completed successfully"
 "#,
@@ -174,7 +187,8 @@ mod tests {
     fn test_init_uploads_output() {
         let script = generate_init(RunnerType::Python);
         assert!(script.contains("tar czf"));
-        assert!(script.contains("curl"));
+        assert!(script.contains("urllib.request"));
+        assert!(script.contains("ozzy_upload_url"));
     }
 
     #[test]
@@ -192,7 +206,7 @@ mod tests {
         assert!(script.contains("OZZY_SOURCE_DOWNLOAD"));
         assert!(script.contains("/workspace/source"));
         assert!(script.contains("source.tar.gz"));
-        assert!(script.contains("curl -sS -o /tmp/source.tar.gz"));
+        assert!(script.contains("urlretrieve"));
         assert!(script.contains("unset OZZY_SOURCE_DOWNLOAD"));
     }
 
