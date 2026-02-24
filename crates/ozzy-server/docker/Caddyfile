@@ -43,7 +43,7 @@
 
 # Frontend (SPA)
 {$FRONTEND_DOMAIN} {
-    root * /srv/frontend
+    root * /srv/frontend/build
 
     # SPA fallback: try the requested file, then fall back to index.html
     try_files {path} /index.html

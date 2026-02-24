@@ -828,7 +828,9 @@ async fn resolve_edge_source(
             .ok_or_else(|| anyhow::anyhow!("Collection '{}' has no versions", coll_name))?;
         Ok(version.hash)
     } else if source.starts_with("endpoint:") {
-        Ok(ozzy_core::hash::blake3_hash(source.as_bytes()))
+        anyhow::bail!(
+            "Cross-project endpoint dependencies ('{source}') are not yet implemented"
+        )
     } else {
         let output = node_outputs.get(source).ok_or_else(|| {
             anyhow::anyhow!(

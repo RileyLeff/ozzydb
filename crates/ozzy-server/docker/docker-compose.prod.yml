@@ -104,7 +104,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-      - /opt/ozzydb/frontend/build:/srv/frontend:ro
+      - /opt/ozzydb/frontend:/srv/frontend:ro
     environment:
       API_DOMAIN: ${API_DOMAIN:?API_DOMAIN required}
       FRONTEND_DOMAIN: ${FRONTEND_DOMAIN:?FRONTEND_DOMAIN required}
