@@ -39,14 +39,10 @@
 
 ## Deployment Notes
 
-### Caddy 404 after frontend rebuild (RECURRING)
-**Problem:** After rebuilding the frontend on the VPS (`npm run build`), ozzydb.com returns 404.
-**Root cause:** The Caddy Docker container bind-mounts `/opt/ozzydb/frontend/build:/srv/frontend:ro`. Docker resolves bind mounts at container *creation* time. If the `build/` directory was empty or nonexistent when the container was first created, the mount points to a stale inode. Rebuilding creates a new `build/` directory but Caddy still sees the old (empty) mount.
-**Fix:** After every frontend rebuild, restart Caddy:
-```
-cd /opt/ozzydb/crates/ozzy-server/docker && docker compose -f docker-compose.prod.yml --env-file .env.prod restart caddy
-```
-**Prevention:** Always run this restart after `npm run build` on the VPS. Consider adding a deploy script.
+### ~~Caddy 404 after frontend rebuild~~ FIXED (2026-02-23)
+**Was:** Rebuilding SvelteKit frontend caused Caddy 404 until container restart (stale bind mount inode).
+**Fix:** Changed `docker-compose.prod.yml` to mount parent directory (`/opt/ozzydb/frontend:/srv/frontend:ro`) and updated `Caddyfile` to `root * /srv/frontend/build`. Parent dir inode never changes, so SvelteKit can wipe and recreate `build/` freely.
+**Note:** After deploying this change on VPS, need to `docker compose down && docker compose up -d` (not just restart) to pick up the new mount.
 
 ### VPS Access
 - **Public IP:** 46.225.111.110

@@ -17,7 +17,7 @@
 
 ### Design Notes for Future
 - Collections (`is_collection`) not wired in orchestrator — will need multi-file download support when implemented.
-- `PlatformFingerprint::detect()` runs on server, not in container — fine for single-server Docker, needs rethinking for multi-arch Fly deployments.
+- `PlatformFingerprint::detect()` runs on server, not in container — **confirmed bug** (Gemini 2.5 review, 2026-02-23). Harmless in current single-server Docker setup but will produce wrong materialized cache keys on Fly or multi-arch. Detailed writeup in `planning/v3/next_steps.md` under "BUG: PlatformFingerprint". Fix blocked on compute provider decisions.
 - Docker containers have network access to host (needed for presigned URL I/O) — consider custom network with limited egress for defense-in-depth.
 
 ## Session 2026-02-14: CLI Implementation + Review

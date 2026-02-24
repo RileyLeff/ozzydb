@@ -12,16 +12,35 @@ Completed 2026-02-14. Full pipeline verified: push → data upload → fetch →
 Cron job: `pg_dump | gzip | upload to R2`. No backup strategy exists today.
 
 ### Rethink GitHub auth flow for LLM/CLI ergonomics
+**STATUS: Actively being reworked.** Riley is implementing a new auth solution that will replace the current GitHub-coupled flow. The GitHub username rename issue (where renaming a GitHub account breaks `owner/project` references in downstream `ozzy.toml` files) will be addressed as part of this work.
+
 The current auth flow has high friction for LLM agents and automated workflows:
 - `ozzy auth login` requires interactive browser-based GitHub device flow
 - GitHub App installation requires visiting a web UI — no API/CLI path available
 - Both steps block autonomous operation entirely
+- GitHub username renames silently break `owner/project` URLs via the `ON CONFLICT (github_id) DO UPDATE SET username = EXCLUDED.username` upsert in `db/queries.rs`
 
 Consider alternatives:
 - Personal access token auth (paste a PAT, skip device flow)
 - Server-side API key auth (bypass GitHub entirely for CLI usage)
 - `gh` CLI token reuse (detect existing GitHub auth)
 - Make GitHub App optional (support public repos without it, allow PAT-based private repo access)
+- Decouple OzzyDB identity from GitHub username (pin on first login, or use redirect/alias table)
+
+### BUG: `PlatformFingerprint::detect()` hashes the server, not the container
+
+`PlatformFingerprint::detect()` is called in `orchestrator.rs:74` and `fetch.rs:319` on the **API server process**, but it's used to compute materialized cache keys for transforms that execute inside **compute containers**. This means:
+
+1. **Wrong platform in cache key:** If the server runs Alpine (musl) but compute containers run `python:3.12-slim` (glibc), the materialized hash records the server's platform, not the container's.
+2. **Mass cache invalidation on server migration:** Moving the API server from x86_64 to aarch64 (or changing its OS) would invalidate the entire materialized cache globally, even though compute containers haven't changed.
+3. **Currently masked:** Single-server Docker setup means server and containers share the same kernel/arch, so the hash is coincidentally close enough. Breaks as soon as compute moves to Fly or a different-arch host.
+
+**Fix options:**
+- **Infer from environment definition:** The `ozzy.toml` environment spec (base image, runtime) determines the container platform. Derive the fingerprint from the image manifest (os/arch/variant from the OCI image index).
+- **Probe on first use:** Run a tiny detection script inside the container image once, cache the result keyed by image digest. Adds ~1s latency on first use of an image.
+- **Hardcode per-provider:** Docker backend → server's platform (correct today). Fly backend → Fly machine config (region/arch). Less dynamic but simpler.
+
+**Impact:** Medium-term. Harmless in the current single-server Docker setup, but must be fixed before enabling Fly compute or multi-arch deployments.
 
 ### Container initialization robustness
 The current init script (shell bootstrap that runs inside compute containers) has fragile assumptions:
