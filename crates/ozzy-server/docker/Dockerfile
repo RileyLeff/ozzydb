@@ -1,25 +1,31 @@
-# Multi-stage build for ozzy-server
+# Multi-stage build for ozzy-server using cargo-chef
 # Build context should be the repo root
 
-FROM rust:1-alpine AS builder
-
+# --- Stage 1: Install cargo-chef ---
+FROM rust:1-alpine AS chef
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
-
+RUN cargo install cargo-chef
 WORKDIR /app
 
-# Copy workspace files
+# --- Stage 2: Prepare dependency recipe ---
+FROM chef AS planner
 COPY Cargo.toml ./
 COPY crates/ ./crates/
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Build release binary (cache mounts persist cargo registry + target dir across builds)
+# --- Stage 3: Cook dependencies (cached until Cargo.toml/lock change) ---
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
 ENV OPENSSL_STATIC=1
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
-    cargo build --release --package ozzy-server && \
+RUN cargo chef cook --release --recipe-path recipe.json --package ozzy-server
+
+# Now copy actual source and build (only recompiles workspace code)
+COPY Cargo.toml ./
+COPY crates/ ./crates/
+RUN cargo build --release --package ozzy-server && \
     cp /app/target/release/ozzy-server /usr/local/bin/ozzy-server
 
-# Runtime image
+# --- Stage 4: Runtime image ---
 FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates curl docker-cli
