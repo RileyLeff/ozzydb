@@ -111,7 +111,7 @@ impl TypeRefExpr {
 }
 
 /// Literal values accepted by constructor arguments.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Literal {
     Bool(bool),
@@ -122,7 +122,7 @@ pub enum Literal {
 }
 
 /// A constructor application like `csv(delimiter=",", header=true)`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConstructorExpr {
     pub name: BuiltinConstructor,
     #[serde(default)]
@@ -130,7 +130,7 @@ pub struct ConstructorExpr {
 }
 
 /// A single record field in a record type expression.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecordField {
     pub name: String,
     pub ty: TypeExpr,
@@ -139,7 +139,7 @@ pub struct RecordField {
 }
 
 /// A record expression. Records are closed by default; `open=true` models `...`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecordExpr {
     #[serde(default)]
     pub fields: Vec<RecordField>,
@@ -148,7 +148,7 @@ pub struct RecordExpr {
 }
 
 /// The v1 surface syntax tree for OzzyDB type expressions.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TypeExpr {
     Builtin(BuiltinType),
@@ -188,7 +188,7 @@ impl TypeExpr {
 }
 
 /// A local named type definition used before publication.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TypeDefinition {
     pub name: String,
     pub expr: TypeExpr,
@@ -236,7 +236,7 @@ pub enum TypeLanguageError {
 
 /// A local set of named type definitions. This is the v1 surface layer that
 /// later compiles into published `TypeVersion`s.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TypeDefinitions {
     pub types: BTreeMap<String, TypeDefinition>,
 }
@@ -421,7 +421,10 @@ fn require_literal_kind(
     let matches = match expected {
         LiteralKind::Bool => matches!(literal, Literal::Bool(_)),
         LiteralKind::String => matches!(literal, Literal::String(_)),
-        LiteralKind::Number => matches!(literal, Literal::Integer(_) | Literal::Float(_)),
+        LiteralKind::Number => {
+            matches!(literal, Literal::Integer(_))
+                || matches!(literal, Literal::Float(value) if value.is_finite())
+        }
         LiteralKind::ScalarList => match literal {
             Literal::List(values) => !values.is_empty() && values.iter().all(Literal::is_scalar),
             _ => false,
@@ -443,8 +446,8 @@ impl Literal {
     fn is_scalar(&self) -> bool {
         matches!(
             self,
-            Literal::Bool(_) | Literal::Integer(_) | Literal::Float(_) | Literal::String(_)
-        )
+            Literal::Bool(_) | Literal::Integer(_) | Literal::String(_)
+        ) || matches!(self, Literal::Float(value) if value.is_finite())
     }
 }
 

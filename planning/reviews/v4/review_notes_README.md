@@ -15,3 +15,7 @@ Phase 1 crate scaffolding is allowed to be narrow and incomplete. It should mode
 ### The v1 constructor surface is intentionally closed
 
 `BuiltinConstructor` is a fixed enum in Phase 1. This is intentional. v4 should start with an explicit, auditable builtin constructor set rather than preserving stringly-typed extensibility before the canonicalization and verifier model are stable.
+
+### Phase 1 refinement is intentionally conservative
+
+The first `refines(...)` implementation does not attempt structural merge of intersected records or theorem-prover-style inference. It is allowed to return `false` in cases that may become provable later, as long as it does not return incorrect `true` results.

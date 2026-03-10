@@ -1,7 +1,7 @@
 # v4 Workflow State
 
 ## Current Phase: Phase 1 - Core Type System Foundation
-## Current Step: Step 1.2 complete (core type language); Step 1.3 next
+## Current Step: Step 1.3 complete (canonicalization and relations); Step 1.4 next
 
 ## Completed Steps
 
@@ -60,19 +60,42 @@
 - Changed `TypeExpr::Table` to wrap a row type expression, not just an inline record.
 - Changed float literals to `OrderedFloat<f64>` so the syntax layer can derive `Eq`/`Hash` ahead of canonicalization.
 
+### Phase 1.3: Canonicalization and relation checks
+- Added canonicalization of the v1 type language surface.
+- Added canonical IDs and an in-memory canonical interner.
+- Implemented:
+  - strict `equivalent(...)`
+  - conservative `refines(...)`
+  - canonical `never`
+- Added canonical reduction for:
+  - scalar base conflicts
+  - conflicting `csv` constraints
+  - conflicting `unit(...)` constraints
+  - `min > max`
+  - empty `enum(...)` intersections
+  - record fields that canonicalize to `never`
+- Added the first structural refinement rules for:
+  - records
+  - collections
+  - tables
+  - builtin constructor families
+- Replaced the temporary serde-driven canonical hash path with an explicit deterministic AST fingerprint.
+
 ## Open Review Findings
-- None blocking for Phase 1.2.
+- None blocking for Phase 1.3.
 - Review artifacts:
   - `planning/reviews/v4/01_phase1_1_review.md`
   - `planning/reviews/v4/02_phase1_2_review.md`
+  - `planning/reviews/v4/03_phase1_3_review.md`
 
 ## Current Blockers
 - None.
 
 ## Next Recommended Steps
-1. Start Step 1.3 and implement canonicalization, strict equivalence, conservative refinement, and `never`.
-2. Keep the implementation narrow: no planner logic and no server wiring yet.
-3. Re-run the review loop after Step 1.3 lands.
+1. Start Step 1.4 and wire verification planning around the existing witness/report types.
+2. Reuse `ozzy-core/src/schema.rs` narrowly as tabular witness and schema-checking support.
+3. Keep the implementation narrow: no server wiring yet.
+4. Re-run the review loop after Step 1.4 lands.
 
 ## Notes
 - Existing v3 planning and type-system notes remain background context only.

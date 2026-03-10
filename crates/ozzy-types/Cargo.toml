@@ -9,6 +9,7 @@ keywords = ["types", "verification", "reproducibility", "science"]
 categories = ["science"]
 
 [dependencies]
+blake3.workspace = true
 ordered-float.workspace = true
 serde.workspace = true
 serde_json.workspace = true
