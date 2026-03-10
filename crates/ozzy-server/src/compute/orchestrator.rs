@@ -1,7 +1,7 @@
 //! DAG orchestrator: runs jobs by executing nodes in parallel waves.
 //!
 //! Given a job, the orchestrator:
-//! 1. Loads context from DB (commit state, pinned snapshot, bound runtime defs)
+//! 1. Loads context from DB (published project revision, pinned snapshot, runtime defs)
 //! 2. Computes topological waves (groups of nodes that can run in parallel)
 //! 3. For each wave: check cache, dispatch uncached nodes in parallel
 //! 4. Updates job/node status as execution progresses
@@ -13,7 +13,7 @@ use base64::Engine as _;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::registry::{RuntimeTransformDef, bind_commit_state_to_snapshot};
+use crate::registry::{RuntimeTransformDef, load_published_project_revision_by_commit};
 
 /// Run a job to completion: load context, execute DAG in parallel waves, update status.
 pub async fn run_job(state: AppState, job_id: Uuid) {
@@ -47,26 +47,14 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
         .await?
         .ok_or_else(|| anyhow::anyhow!("Commit {} not found", job.commit_id))?;
 
-    let commit_state = state
-        .db
-        .get_commit_state(commit.id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Commit state missing for commit {}", commit.id))?;
+    let published =
+        load_published_project_revision_by_commit(&state.db, &state.registry_snapshots, commit.id)
+            .await?;
 
-    let endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef> =
-        serde_json::from_value(commit_state.endpoints.clone())?;
-
-    let endpoint_def = endpoints
+    let endpoint_def = published
+        .endpoints
         .get(&job.endpoint_name)
         .ok_or_else(|| anyhow::anyhow!("Endpoint '{}' not found", job.endpoint_name))?;
-
-    let (_, _, runtime_defs) = bind_commit_state_to_snapshot(
-        &state.db,
-        &state.registry_snapshots,
-        commit.id,
-        &commit_state,
-    )
-    .await?;
 
     let resolved_params: serde_json::Value = job.params.clone();
     // Safety: source_dir TempDir lives for the duration of run_job_inner. Spawned tasks
@@ -135,8 +123,8 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
             let resolved_params = resolved_params.clone();
             let platform_hash = platform_hash.clone();
             let platform = platform.clone();
-            let transforms = runtime_defs.transforms.clone();
-            let environments = runtime_defs.environments.clone();
+            let transforms = published.runtime.transforms.clone();
+            let environments = published.runtime.environments.clone();
             let endpoint_def = endpoint_def.clone();
             let edge_map_for_node: Vec<(String, String)> = match edge_map.get(node_name.as_str()) {
                 Some(edges) => edges

@@ -118,6 +118,10 @@ pub struct StoredProjectRevision {
     pub registry_revision_id: Uuid,
     pub ozzy_toml_hash: String,
     pub ozzy_toml_raw: String,
+    pub environments: Value,
+    pub transforms: Value,
+    pub endpoints: Value,
+    pub project_meta: Value,
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
 }

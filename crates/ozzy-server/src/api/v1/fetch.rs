@@ -19,7 +19,7 @@ use super::auth::ApiError;
 use crate::AppState;
 use crate::auth::middleware::MaybeAuthUser;
 use crate::compute::orchestrator::NodeOutput;
-use crate::registry::{RuntimeTransformDef, bind_commit_state_to_snapshot};
+use crate::registry::{RuntimeTransformDef, load_published_project_revision_by_commit};
 
 /// Build the fetch router.
 pub fn router() -> Router<AppState> {
@@ -86,19 +86,14 @@ async fn fetch_endpoint(
         })?
     };
 
-    let commit_state = state.db.get_commit_state(commit.id).await?.ok_or_else(|| {
-        ApiError::Internal(anyhow::anyhow!(
-            "Commit state missing for commit {}",
-            commit.id
-        ))
-    })?;
-
-    // ── 2. Parse endpoint from commit state ─────────────────────
-    let endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef> =
-        serde_json::from_value(commit_state.endpoints.clone())
+    let published =
+        load_published_project_revision_by_commit(&state.db, &state.registry_snapshots, commit.id)
+            .await
             .map_err(|e| ApiError::Internal(e.into()))?;
 
-    let endpoint_def = endpoints
+    // ── 2. Resolve endpoint from the published project revision ───────────
+    let endpoint_def = published
+        .endpoints
         .get(&endpoint_name)
         .ok_or_else(|| ApiError::not_found(format!("Endpoint '{}' not found", endpoint_name)))?;
 
@@ -114,17 +109,7 @@ async fn fetch_endpoint(
         )));
     }
 
-    // ── 4. Bind authored commit-state defs to the pinned v4 snapshot ──────
-    let (_, _, runtime_defs) = bind_commit_state_to_snapshot(
-        &state.db,
-        &state.registry_snapshots,
-        commit.id,
-        &commit_state,
-    )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
-
-    // ── 5. Validate consumer params ─────────────────────────────
+    // ── 4. Validate consumer params ─────────────────────────────
     let resolved_params = validate_and_resolve_params(endpoint_def, &query.params)?;
 
     // Compute canonical params hash for dedup
@@ -132,7 +117,7 @@ async fn fetch_endpoint(
         serde_json::to_string(&resolved_params).map_err(|e| ApiError::Internal(e.into()))?;
     let params_hash = ozzy_core::hash::blake3_hash(canonical_params.as_bytes());
 
-    // ── 6. Check dedup (return existing active job) ─────────────
+    // ── 5. Check dedup (return existing active job) ─────────────
     if let Some(existing) = state
         .db
         .find_active_job(project.id, &endpoint_name, commit.id, &params_hash)
@@ -153,15 +138,15 @@ async fn fetch_endpoint(
             .into_response());
     }
 
-    // ── 7. Build execution order + cache-hit fast path ──────────
+    // ── 6. Build execution order + cache-hit fast path ──────────
     let exec_order = build_execution_order(endpoint_def)?;
 
     let (all_cached, node_outputs) = check_all_node_caches(
         &state,
         &commit,
         endpoint_def,
-        &runtime_defs.transforms,
-        &runtime_defs.environments,
+        &published.runtime.transforms,
+        &published.runtime.environments,
         &resolved_params,
         &exec_order,
         project.id,
@@ -234,7 +219,7 @@ async fn fetch_endpoint(
             .into_response());
     }
 
-    // ── 8. Rate limit check (only for non-cached execution) ─────
+    // ── 7. Rate limit check (only for non-cached execution) ─────
     // NOTE: This is an advisory/soft limit — concurrent requests can race past
     // the check before job creation (TOCTOU). This is standard for rate limiters
     // and acceptable since the limits are for resource protection, not billing.

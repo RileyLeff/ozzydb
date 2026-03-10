@@ -1,7 +1,7 @@
 # v4 Workflow State
 
 ## Current Phase: Phase 2 underway
-## Current Step: Phase 2.2 cleanup complete; ready for Phase 2.3
+## Current Step: Phase 2.3 project revisions complete; ready for Phase 3.1
 
 ## Completed Steps
 
@@ -200,8 +200,33 @@
   - `cargo check -p ozzy-server`
   - `cargo test -p ozzy-types`
 
+### Phase 2.3: Project revision objects
+- Added `crates/ozzy-server/migrations/005_v4_project_revision_payloads.sql`.
+- Extended `v4_project_revisions` to persist the authored runtime payloads needed to interpret a published commit:
+  - `environments`
+  - `transforms`
+  - `endpoints`
+  - `project_meta`
+- Extended the v4 DB models/query layer so project revisions round-trip those payloads.
+- Added `PublishedProjectRevision` as the server-visible object that combines:
+  - the stored project revision row
+  - the pinned `RegistrySnapshot`
+  - bound runtime definitions
+  - published endpoint definitions
+- Moved runtime server reads onto `PublishedProjectRevision`:
+  - `fetch`
+  - `compute::orchestrator`
+  - endpoint inspection
+- Removed direct `commit_state` reads from those runtime paths.
+- Added test coverage for:
+  - project revision payload persistence
+  - published project revision loading from a pinned snapshot
+- Verification for this checkpoint:
+  - `cargo check -p ozzy-server`
+  - `cargo test -p ozzy-types`
+
 ## Open Review Findings
-- None blocking for Phase 2.2 cleanup.
+- None blocking for Phase 2.3.
 - Review artifacts:
   - `planning/reviews/v4/01_phase1_1_review.md`
   - `planning/reviews/v4/02_phase1_2_review.md`
@@ -213,13 +238,14 @@
   - `planning/reviews/v4/08_phase2_1_review.md`
   - `planning/reviews/v4/09_phase2_2_review.md`
   - `planning/reviews/v4/10_phase2_2_cleanup_review.md`
+  - `planning/reviews/v4/11_phase2_3_review.md`
 
 ## Current Blockers
 - None.
 
 ## Next Recommended Steps
-1. Start Phase 2.3 and make `v4_project_revisions` the server-visible replacement for "what a pushed commit means".
-2. Keep `commit_state` out of the new runtime path entirely when Phase 3/5 move push and fetch onto the v4 objects.
+1. Start Phase 3.1 and replace the remaining v3 parser/control structures with a v4-oriented `ozzy.toml` ingestion surface.
+2. Rewrite push so it publishes `PublishedProjectRevision` payloads directly instead of leaving them as manual/test-only objects.
 3. Preserve the Phase 1 rule that semantic subsystems return typed errors instead of panicking or falling back.
 4. Extend the remaining unsupported builtin verifier surface only when the required registry/artifact/execution infrastructure exists.
 

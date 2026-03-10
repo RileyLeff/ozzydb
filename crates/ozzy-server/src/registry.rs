@@ -17,7 +17,6 @@ use ozzy_types::relations;
 use ozzy_types::syntax::{TypeDefinitions, TypeExpr, TypeRefExpr};
 
 use crate::Database;
-use crate::db::models::CommitState;
 use crate::db::v4::{
     StoredCanonicalType, StoredEnvironmentVersion, StoredProjectRevision, StoredRegistryRevision,
     StoredTransformPort, StoredTransformVersion, StoredTypeVersion, V4QueryError,
@@ -67,6 +66,15 @@ pub struct RuntimeTransformDef {
 pub struct BoundRuntimeDefinitions {
     pub environments: HashMap<String, EnvironmentDef>,
     pub transforms: HashMap<String, RuntimeTransformDef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishedProjectRevision {
+    pub row: StoredProjectRevision,
+    pub snapshot: Arc<RegistrySnapshot>,
+    pub runtime: BoundRuntimeDefinitions,
+    pub endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef>,
+    pub project_meta: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -159,16 +167,12 @@ impl RegistrySnapshot {
 
     pub fn bind_runtime_definitions(
         &self,
-        commit_state: &CommitState,
+        authored_environments: &HashMap<String, EnvironmentDef>,
+        authored_transforms: &HashMap<String, TransformDef>,
     ) -> Result<BoundRuntimeDefinitions, RegistrySnapshotError> {
-        let authored_environments: HashMap<String, EnvironmentDef> =
-            serde_json::from_value(commit_state.environments.clone())?;
-        let authored_transforms: HashMap<String, TransformDef> =
-            serde_json::from_value(commit_state.transforms.clone())?;
-
         let mut environments = HashMap::new();
         let mut environment_keys_by_authored_name = HashMap::new();
-        for (authored_name, authored_env) in &authored_environments {
+        for (authored_name, authored_env) in authored_environments {
             let authored_def = serde_json::to_value(authored_env)?;
             let matches = self
                 .environments
@@ -203,7 +207,7 @@ impl RegistrySnapshot {
         }
 
         let mut transforms = HashMap::new();
-        for (authored_name, authored_transform) in &authored_transforms {
+        for (authored_name, authored_transform) in authored_transforms {
             let expected_environment_key = environment_keys_by_authored_name
                 .get(&authored_transform.environment)
                 .ok_or_else(
@@ -597,23 +601,28 @@ pub async fn load_project_revision_snapshot_by_commit(
     Ok((project_revision, snapshot))
 }
 
-pub async fn bind_commit_state_to_snapshot(
+pub async fn load_published_project_revision_by_commit(
     db: &Database,
     cache: &RegistrySnapshotCache,
     commit_id: Uuid,
-    commit_state: &CommitState,
-) -> Result<
-    (
-        StoredProjectRevision,
-        Arc<RegistrySnapshot>,
-        BoundRuntimeDefinitions,
-    ),
-    RegistrySnapshotError,
-> {
+) -> Result<PublishedProjectRevision, RegistrySnapshotError> {
     let (project_revision, snapshot) =
         load_project_revision_snapshot_by_commit(db, cache, commit_id).await?;
-    let bindings = snapshot.bind_runtime_definitions(commit_state)?;
-    Ok((project_revision, snapshot, bindings))
+    let environments: HashMap<String, EnvironmentDef> =
+        serde_json::from_value(project_revision.environments.clone())?;
+    let transforms: HashMap<String, TransformDef> =
+        serde_json::from_value(project_revision.transforms.clone())?;
+    let endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef> =
+        serde_json::from_value(project_revision.endpoints.clone())?;
+    let runtime = snapshot.bind_runtime_definitions(&environments, &transforms)?;
+
+    Ok(PublishedProjectRevision {
+        row: project_revision.clone(),
+        snapshot,
+        runtime,
+        endpoints,
+        project_meta: project_revision.project_meta.clone(),
+    })
 }
 
 async fn load_registry_snapshot_uncached(
@@ -948,6 +957,28 @@ mod tests {
                 revision.id,
                 "snapshot_ozzy_toml_hash",
                 "[types]\nWaterPotential = 'float64'\n",
+                json!({ "python_sci": { "base": "python", "lockfile": "uv.lock" } }),
+                json!({
+                    "clean_wp": {
+                        "source": "transforms/clean.py:clean",
+                        "environment": "python_sci",
+                        "params": {},
+                        "network": false,
+                        "secrets": []
+                    }
+                }),
+                json!({
+                    "fetch_water_potential": {
+                        "nodes": {
+                            "clean": {
+                                "transform": "clean_wp",
+                                "params": {}
+                            }
+                        },
+                        "edges": []
+                    }
+                }),
+                json!({ "name": "snapshot-test", "owner": "user" }),
                 user.id,
             )
             .await
@@ -964,11 +995,19 @@ mod tests {
             load_project_revision_snapshot_by_commit(&db, &cache, commit.id)
                 .await
                 .expect("load snapshot by commit");
+        let published = load_published_project_revision_by_commit(&db, &cache, commit.id)
+            .await
+            .expect("load published project revision");
 
         assert!(Arc::ptr_eq(&snapshot, &snapshot_again));
         assert!(Arc::ptr_eq(&snapshot, &loaded_by_commit));
+        assert!(Arc::ptr_eq(&snapshot, &published.snapshot));
         assert_eq!(loaded_project_revision.id, project_revision.id);
+        assert_eq!(published.row.id, project_revision.id);
         assert_eq!(snapshot.revision().id, revision.id);
+        assert!(published.endpoints.contains_key("fetch_water_potential"));
+        assert!(published.runtime.environments.contains_key("python_sci@1"));
+        assert!(published.runtime.transforms.contains_key("clean_wp"));
 
         let (resolved_type, resolved_row) = snapshot
             .resolve_type_ref(&TypeRefExpr::new(

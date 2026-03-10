@@ -1,8 +1,7 @@
 //! Endpoint inspection API (no execution — that's Phase 4).
 //!
-//! Endpoint definitions still come from commit-state data during Phase 2, but
-//! every read must also resolve through a pinned v4 project revision so this
-//! path cannot observe commits that were never published into the v4 registry.
+//! Endpoint inspection reads from the published v4 project revision so the
+//! server-visible meaning of a pushed commit no longer depends on commit_state.
 
 use std::collections::HashMap;
 
@@ -17,8 +16,8 @@ use super::access::enforce_read_access;
 use super::auth::ApiError;
 use crate::AppState;
 use crate::auth::middleware::MaybeAuthUser;
-use crate::db::models::{Commit, CommitState};
-use crate::registry::load_project_revision_snapshot_by_commit;
+use crate::db::models::Commit;
+use crate::registry::{PublishedProjectRevision, load_published_project_revision_by_commit};
 
 /// Build the endpoints router.
 pub fn router() -> Router<AppState> {
@@ -116,14 +115,11 @@ async fn list_endpoints(
     Query(query): Query<RefQuery>,
     auth: MaybeAuthUser,
 ) -> Result<Json<Vec<EndpointSummary>>, ApiError> {
-    let (_, commit_state) =
-        resolve_commit_state(&state, &owner, &slug, query.ref_name.as_deref(), &auth).await?;
+    let (_, published) =
+        resolve_published_revision(&state, &owner, &slug, query.ref_name.as_deref(), &auth).await?;
 
-    let endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef> =
-        serde_json::from_value(commit_state.endpoints.clone())
-            .map_err(|e| ApiError::Internal(e.into()))?;
-
-    let mut summaries: Vec<EndpointSummary> = endpoints
+    let mut summaries: Vec<EndpointSummary> = published
+        .endpoints
         .iter()
         .map(|(name, def)| EndpointSummary {
             name: name.clone(),
@@ -144,14 +140,11 @@ async fn get_endpoint(
     Query(query): Query<RefQuery>,
     auth: MaybeAuthUser,
 ) -> Result<Json<EndpointDetail>, ApiError> {
-    let (commit, commit_state) =
-        resolve_commit_state(&state, &owner, &slug, query.ref_name.as_deref(), &auth).await?;
+    let (commit, published) =
+        resolve_published_revision(&state, &owner, &slug, query.ref_name.as_deref(), &auth).await?;
 
-    let endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef> =
-        serde_json::from_value(commit_state.endpoints.clone())
-            .map_err(|e| ApiError::Internal(e.into()))?;
-
-    let def = endpoints
+    let def = published
+        .endpoints
         .get(&name)
         .ok_or_else(|| ApiError::not_found(format!("Endpoint '{}' not found", name)))?;
 
@@ -172,14 +165,11 @@ async fn get_endpoint_dag(
     Query(query): Query<DagQuery>,
     auth: MaybeAuthUser,
 ) -> Result<Json<DagResponse>, ApiError> {
-    let (_, commit_state) =
-        resolve_commit_state(&state, &owner, &slug, query.ref_name.as_deref(), &auth).await?;
+    let (_, published) =
+        resolve_published_revision(&state, &owner, &slug, query.ref_name.as_deref(), &auth).await?;
 
-    let endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef> =
-        serde_json::from_value(commit_state.endpoints.clone())
-            .map_err(|e| ApiError::Internal(e.into()))?;
-
-    let def = endpoints
+    let def = published
+        .endpoints
         .get(&name)
         .ok_or_else(|| ApiError::not_found(format!("Endpoint '{}' not found", name)))?;
 
@@ -202,14 +192,14 @@ async fn get_endpoint_dag(
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-/// Resolve a project's commit state at a given ref (or latest commit).
-async fn resolve_commit_state(
+/// Resolve a project's published v4 revision at a given ref (or latest commit).
+async fn resolve_published_revision(
     state: &AppState,
     owner: &str,
     slug: &str,
     ref_name: Option<&str>,
     auth: &MaybeAuthUser,
-) -> Result<(Commit, CommitState), ApiError> {
+) -> Result<(Commit, PublishedProjectRevision), ApiError> {
     let project =
         state.db.get_project(owner, slug).await?.ok_or_else(|| {
             ApiError::not_found(format!("Project '{}/{}' not found", owner, slug))
@@ -241,18 +231,12 @@ async fn resolve_commit_state(
         })?
     };
 
-    load_project_revision_snapshot_by_commit(&state.db, &state.registry_snapshots, commit.id)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let published =
+        load_published_project_revision_by_commit(&state.db, &state.registry_snapshots, commit.id)
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?;
 
-    let commit_state = state.db.get_commit_state(commit.id).await?.ok_or_else(|| {
-        ApiError::Internal(anyhow::anyhow!(
-            "Commit state missing for commit {}",
-            commit.id
-        ))
-    })?;
-
-    Ok((commit, commit_state))
+    Ok((commit, published))
 }
 
 /// Extract parameter summaries from an endpoint definition.

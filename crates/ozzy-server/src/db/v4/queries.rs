@@ -545,6 +545,10 @@ impl Database {
         registry_revision_id: Uuid,
         ozzy_toml_hash: &str,
         ozzy_toml_raw: &str,
+        environments: Value,
+        transforms: Value,
+        endpoints: Value,
+        project_meta: Value,
         created_by: Uuid,
     ) -> Result<StoredProjectRevision, V4QueryError> {
         sqlx::query_as::<_, StoredProjectRevision>(
@@ -555,9 +559,13 @@ impl Database {
                 registry_revision_id,
                 ozzy_toml_hash,
                 ozzy_toml_raw,
+                environments,
+                transforms,
+                endpoints,
+                project_meta,
                 created_by
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING *
             "#,
         )
@@ -566,6 +574,10 @@ impl Database {
         .bind(registry_revision_id)
         .bind(ozzy_toml_hash)
         .bind(ozzy_toml_raw)
+        .bind(environments)
+        .bind(transforms)
+        .bind(endpoints)
+        .bind(project_meta)
         .bind(created_by)
         .fetch_one(self.pool())
         .await
@@ -891,6 +903,28 @@ mod tests {
                 registry_revision.id,
                 "test_ozzy_toml_hash",
                 "[types]\nWaterPotential = 'float64'\n",
+                json!({ "python_sci": { "base": "python", "lockfile": "uv.lock" } }),
+                json!({
+                    "clean_wp": {
+                        "source": "transforms/clean.py:clean",
+                        "environment": "python_sci",
+                        "params": {},
+                        "network": false,
+                        "secrets": []
+                    }
+                }),
+                json!({
+                    "fetch_water_potential": {
+                        "nodes": {
+                            "clean": {
+                                "transform": "clean_wp",
+                                "params": {}
+                            }
+                        },
+                        "edges": []
+                    }
+                }),
+                json!({ "name": "test", "owner": "user" }),
                 user.id,
             )
             .await
@@ -969,6 +1003,21 @@ mod tests {
         assert_eq!(loaded_transforms.len(), 1);
         assert_eq!(loaded_ports.len(), 1);
         assert_eq!(loaded_project_revision.id, project_revision.id);
+        assert_eq!(
+            loaded_project_revision.environments["python_sci"]["base"],
+            "python"
+        );
+        assert_eq!(
+            loaded_project_revision.transforms["clean_wp"]["environment"],
+            "python_sci"
+        );
+        assert!(
+            loaded_project_revision
+                .endpoints
+                .get("fetch_water_potential")
+                .is_some()
+        );
+        assert_eq!(loaded_project_revision.project_meta["owner"], "user");
         assert_eq!(loaded_conformance.status, "declared");
     }
 }
