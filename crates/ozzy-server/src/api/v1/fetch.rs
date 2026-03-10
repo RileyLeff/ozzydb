@@ -19,6 +19,7 @@ use super::auth::ApiError;
 use crate::AppState;
 use crate::auth::middleware::MaybeAuthUser;
 use crate::compute::orchestrator::NodeOutput;
+use crate::registry::{RuntimeTransformDef, bind_commit_state_to_snapshot};
 
 /// Build the fetch router.
 pub fn router() -> Router<AppState> {
@@ -113,20 +114,22 @@ async fn fetch_endpoint(
         )));
     }
 
-    // ── 4. Load transforms and environments ─────────────────────
-    let transforms: HashMap<String, ozzy_core::toml_spec::TransformDef> =
-        serde_json::from_value(commit_state.transforms.clone())
-            .map_err(|e| ApiError::Internal(e.into()))?;
-
-    let environments: HashMap<String, ozzy_core::toml_spec::EnvironmentDef> =
-        serde_json::from_value(commit_state.environments.clone())
-            .map_err(|e| ApiError::Internal(e.into()))?;
+    // ── 4. Bind authored commit-state defs to the pinned v4 snapshot ──────
+    let (_, _, runtime_defs) = bind_commit_state_to_snapshot(
+        &state.db,
+        &state.registry_snapshots,
+        commit.id,
+        &commit_state,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.into()))?;
 
     // ── 5. Validate consumer params ─────────────────────────────
     let resolved_params = validate_and_resolve_params(endpoint_def, &query.params)?;
 
     // Compute canonical params hash for dedup
-    let canonical_params = serde_json::to_string(&resolved_params).unwrap_or_default();
+    let canonical_params =
+        serde_json::to_string(&resolved_params).map_err(|e| ApiError::Internal(e.into()))?;
     let params_hash = ozzy_core::hash::blake3_hash(canonical_params.as_bytes());
 
     // ── 6. Check dedup (return existing active job) ─────────────
@@ -157,8 +160,8 @@ async fn fetch_endpoint(
         &state,
         &commit,
         endpoint_def,
-        &transforms,
-        &environments,
+        &runtime_defs.transforms,
+        &runtime_defs.environments,
         &resolved_params,
         &exec_order,
         project.id,
@@ -309,7 +312,7 @@ async fn check_all_node_caches(
     state: &AppState,
     commit: &crate::db::Commit,
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
-    transforms: &HashMap<String, ozzy_core::toml_spec::TransformDef>,
+    transforms: &HashMap<String, RuntimeTransformDef>,
     environments: &HashMap<String, ozzy_core::toml_spec::EnvironmentDef>,
     resolved_params: &serde_json::Value,
     exec_order: &[String],
@@ -386,7 +389,7 @@ async fn compute_materialized_hash(
     commit: &crate::db::Commit,
     node_name: &str,
     node_def: &ozzy_core::toml_spec::NodeDef,
-    transform_def: &ozzy_core::toml_spec::TransformDef,
+    transform_def: &RuntimeTransformDef,
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
     environments: &HashMap<String, ozzy_core::toml_spec::EnvironmentDef>,
     resolved_params: &serde_json::Value,
@@ -409,7 +412,7 @@ async fn compute_materialized_hash(
     let node_params = resolve_node_params(node_name, node_def, endpoint_def, resolved_params);
     let params_hash = ozzy_core::hash::blake3_hash(
         serde_json::to_string(&node_params)
-            .unwrap_or_default()
+            .map_err(|e| ApiError::Internal(e.into()))?
             .as_bytes(),
     );
 
@@ -434,7 +437,8 @@ async fn compute_materialized_hash(
     let (source_hash, function_name) =
         compute_source_hash(transform_def, node_def, commit, source_dir)?;
 
-    let params_schema_hash = compute_params_schema_hash(transform_def);
+    let params_schema_hash =
+        compute_params_schema_hash(transform_def).map_err(|e| ApiError::Internal(e.into()))?;
 
     let transform_hash = ozzy_core::hash::transform_hash(
         &source_hash,
@@ -460,7 +464,7 @@ async fn compute_materialized_hash(
 
 /// Compute source hash for a transform.
 fn compute_source_hash(
-    transform_def: &ozzy_core::toml_spec::TransformDef,
+    transform_def: &RuntimeTransformDef,
     node_def: &ozzy_core::toml_spec::NodeDef,
     commit: &crate::db::Commit,
     source_dir: &Option<tempfile::TempDir>,
@@ -475,25 +479,33 @@ fn compute_source_hash(
         })?;
         let file_path_str = source.split(':').next().unwrap_or(source);
         let hash = if let Some(sd) = source_dir {
+            let source_root = sd.path().canonicalize().map_err(|e| {
+                ApiError::Internal(anyhow::anyhow!("Failed to canonicalize source dir: {}", e))
+            })?;
             let full_path = sd.path().join(file_path_str);
-            let canonical = full_path.canonicalize().ok();
-            let within_source = canonical
-                .as_ref()
-                .and_then(|c| sd.path().canonicalize().ok().map(|sd| c.starts_with(sd)))
-                .unwrap_or(false);
-            if !within_source {
+            let canonical = full_path.canonicalize().map_err(|e| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "Failed to canonicalize source path '{}' for transform '{}': {}",
+                    file_path_str,
+                    node_def.transform,
+                    e
+                ))
+            })?;
+            if !canonical.starts_with(&source_root) {
                 return Err(ApiError::BadRequest(format!(
                     "Source path '{}' escapes source directory",
                     file_path_str,
                 )));
             }
-            std::fs::read(&full_path)
-                .map(|bytes| ozzy_core::hash::blake3_hash(&bytes))
-                .unwrap_or_else(|_| {
-                    ozzy_core::hash::blake3_hash(
-                        format!("{}:{}", node_def.transform, commit.git_commit_sha).as_bytes(),
-                    )
-                })
+            let bytes = std::fs::read(&canonical).map_err(|e| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "Failed to read source file '{}' for transform '{}': {}",
+                    file_path_str,
+                    node_def.transform,
+                    e
+                ))
+            })?;
+            ozzy_core::hash::blake3_hash(&bytes)
         } else {
             ozzy_core::hash::blake3_hash(
                 format!("{}:{}", node_def.transform, commit.git_commit_sha).as_bytes(),
@@ -515,20 +527,14 @@ fn compute_source_hash(
 
 /// Compute params schema hash for a transform.
 pub(crate) fn compute_params_schema_hash(
-    transform_def: &ozzy_core::toml_spec::TransformDef,
-) -> String {
-    if transform_def.params.is_empty() {
-        ozzy_core::hash::blake3_hash(b"")
-    } else {
-        let mut sorted_params: Vec<_> = transform_def.params.iter().collect();
-        sorted_params.sort_by_key(|(name, _)| name.as_str());
-        let schema_str: String = sorted_params
-            .iter()
-            .map(|(name, def)| format!("{}:{}", name, def.type_))
-            .collect::<Vec<_>>()
-            .join("\0");
-        ozzy_core::hash::blake3_hash(schema_str.as_bytes())
+    transform_def: &RuntimeTransformDef,
+) -> Result<String, serde_json::Error> {
+    if transform_def.params_schema == serde_json::json!({}) {
+        return Ok(ozzy_core::hash::blake3_hash(b""));
     }
+
+    let schema_str = serde_json::to_string(&transform_def.params_schema)?;
+    Ok(ozzy_core::hash::blake3_hash(schema_str.as_bytes()))
 }
 
 // ── Background job execution is now in compute::orchestrator ──────
@@ -832,9 +838,7 @@ async fn resolve_edge_source_inner(
             .ok_or_else(|| anyhow::anyhow!("Collection '{}' has no versions", coll_name))?;
         Ok(version.hash)
     } else if source.starts_with("endpoint:") {
-        anyhow::bail!(
-            "Cross-project endpoint dependencies ('{source}') are not yet implemented"
-        )
+        anyhow::bail!("Cross-project endpoint dependencies ('{source}') are not yet implemented")
     } else {
         let output = node_outputs.get(source).ok_or_else(|| {
             anyhow::anyhow!(
@@ -1032,7 +1036,7 @@ pub(crate) fn resolve_node_params(
 async fn resolve_secrets_hash(
     state: &AppState,
     project_id: Uuid,
-    transform: &ozzy_core::toml_spec::TransformDef,
+    transform: &RuntimeTransformDef,
 ) -> Result<Option<String>, ApiError> {
     resolve_secrets_hash_inner(state, project_id, transform)
         .await
@@ -1042,7 +1046,7 @@ async fn resolve_secrets_hash(
 async fn resolve_secrets_hash_inner(
     state: &AppState,
     project_id: Uuid,
-    transform: &ozzy_core::toml_spec::TransformDef,
+    transform: &RuntimeTransformDef,
 ) -> Result<Option<String>, anyhow::Error> {
     if transform.secrets.is_empty() {
         return Ok(None);

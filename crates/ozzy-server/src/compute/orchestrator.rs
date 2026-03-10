@@ -1,7 +1,7 @@
 //! DAG orchestrator: runs jobs by executing nodes in parallel waves.
 //!
 //! Given a job, the orchestrator:
-//! 1. Loads context from DB (commit state, endpoint, transforms, environments)
+//! 1. Loads context from DB (commit state, pinned snapshot, bound runtime defs)
 //! 2. Computes topological waves (groups of nodes that can run in parallel)
 //! 3. For each wave: check cache, dispatch uncached nodes in parallel
 //! 4. Updates job/node status as execution progresses
@@ -13,6 +13,7 @@ use base64::Engine as _;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::registry::{RuntimeTransformDef, bind_commit_state_to_snapshot};
 
 /// Run a job to completion: load context, execute DAG in parallel waves, update status.
 pub async fn run_job(state: AppState, job_id: Uuid) {
@@ -59,11 +60,13 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
         .get(&job.endpoint_name)
         .ok_or_else(|| anyhow::anyhow!("Endpoint '{}' not found", job.endpoint_name))?;
 
-    let transforms: HashMap<String, ozzy_core::toml_spec::TransformDef> =
-        serde_json::from_value(commit_state.transforms.clone())?;
-
-    let environments: HashMap<String, ozzy_core::toml_spec::EnvironmentDef> =
-        serde_json::from_value(commit_state.environments.clone())?;
+    let (_, _, runtime_defs) = bind_commit_state_to_snapshot(
+        &state.db,
+        &state.registry_snapshots,
+        commit.id,
+        &commit_state,
+    )
+    .await?;
 
     let resolved_params: serde_json::Value = job.params.clone();
     // Safety: source_dir TempDir lives for the duration of run_job_inner. Spawned tasks
@@ -132,16 +135,16 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
             let resolved_params = resolved_params.clone();
             let platform_hash = platform_hash.clone();
             let platform = platform.clone();
-            let transforms = transforms.clone();
-            let environments = environments.clone();
+            let transforms = runtime_defs.transforms.clone();
+            let environments = runtime_defs.environments.clone();
             let endpoint_def = endpoint_def.clone();
-            let edge_map_for_node: Vec<(String, String)> = edge_map
-                .get(node_name.as_str())
-                .cloned()
-                .unwrap_or_default()
-                .iter()
-                .map(|(a, b)| (a.to_string(), b.to_string()))
-                .collect();
+            let edge_map_for_node: Vec<(String, String)> = match edge_map.get(node_name.as_str()) {
+                Some(edges) => edges
+                    .iter()
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+                    .collect(),
+                None => Vec::new(),
+            };
 
             let source_dir_path = source_dir.as_ref().map(|d| d.path().to_path_buf());
             let node_outputs_snapshot: HashMap<String, NodeOutput> = node_outputs.clone();
@@ -184,12 +187,10 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
                         node_outputs.insert(node_name, output);
                     }
                     Ok((node_name, Err(e))) => {
-                        wave_error =
-                            Some(anyhow::anyhow!("Node '{}' failed: {}", node_name, e));
+                        wave_error = Some(anyhow::anyhow!("Node '{}' failed: {}", node_name, e));
                     }
                     Err(e) => {
-                        wave_error =
-                            Some(anyhow::anyhow!("Node execution task panicked: {}", e));
+                        wave_error = Some(anyhow::anyhow!("Node execution task panicked: {}", e));
                     }
                 }
             }
@@ -237,7 +238,7 @@ async fn execute_node(
     job_id: Uuid,
     node_name: &str,
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
-    transforms: &HashMap<String, ozzy_core::toml_spec::TransformDef>,
+    transforms: &HashMap<String, RuntimeTransformDef>,
     environments: &HashMap<String, ozzy_core::toml_spec::EnvironmentDef>,
     commit: &crate::db::Commit,
     project_id: Uuid,
@@ -282,11 +283,7 @@ async fn execute_node(
         endpoint_def,
         resolved_params,
     );
-    let params_hash = ozzy_core::hash::blake3_hash(
-        serde_json::to_string(&node_params)
-            .unwrap_or_default()
-            .as_bytes(),
-    );
+    let params_hash = ozzy_core::hash::blake3_hash(serde_json::to_string(&node_params)?.as_bytes());
 
     // Resolve secrets hash
     let secrets_hash = resolve_secrets_hash(state, project_id, transform_def).await?;
@@ -316,7 +313,7 @@ async fn execute_node(
         compute_source_hash(transform_def, node_def, commit, source_dir)?;
 
     let params_schema_hash =
-        super::super::api::v1::fetch::compute_params_schema_hash(transform_def);
+        super::super::api::v1::fetch::compute_params_schema_hash(transform_def)?;
 
     let transform_hash = ozzy_core::hash::transform_hash(
         &source_hash,
@@ -403,7 +400,11 @@ async fn execute_node(
             }
         }
     } else if let Some(command) = &transform_def.command {
-        let input_names: Vec<&str> = transform_def.inputs.keys().map(|s| s.as_str()).collect();
+        let input_names: Vec<&str> = transform_def
+            .input_names
+            .iter()
+            .map(String::as_str)
+            .collect();
         crate::runners::command::generate_shell_wrapper(command, &input_names)
     } else {
         anyhow::bail!(
@@ -413,8 +414,16 @@ async fn execute_node(
     };
 
     let runner_type = if transform_def.source.is_some() {
-        crate::runners::detect_runner_type(transform_def.source.as_deref().unwrap_or(""))
-            .unwrap_or(crate::runners::RunnerType::Python)
+        let source = transform_def
+            .source
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("missing source for source-based transform"))?;
+        crate::runners::detect_runner_type(source).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unsupported source file type in transform '{}'",
+                node_def.transform
+            )
+        })?
     } else {
         crate::runners::RunnerType::Command
     };
@@ -432,7 +441,7 @@ async fn execute_node(
             edges_for_node,
             node_outputs,
         )
-        .await;
+        .await?;
         compute_inputs.push(crate::compute::InputSpec {
             name: input_name.clone(),
             content_type,
@@ -446,11 +455,11 @@ async fn execute_node(
     let mut env_vars: HashMap<String, String> = HashMap::new();
     env_vars.insert(
         "OZZY_PARAMS".to_string(),
-        serde_json::to_string(&node_params).unwrap_or_default(),
+        serde_json::to_string(&node_params)?,
     );
     env_vars.insert(
         "OZZY_INPUT_MANIFEST".to_string(),
-        serde_json::to_string(&input_manifest).unwrap_or_default(),
+        serde_json::to_string(&input_manifest)?,
     );
     for (key, value) in param_env_vars {
         env_vars.insert(key, value);
@@ -459,11 +468,12 @@ async fn execute_node(
     // Build presigned download URLs for each input (all backends use presigned URLs)
     let mut downloads: Vec<serde_json::Value> = Vec::new();
     for (input_name, hash) in &input_hashes {
-        let ext = compute_inputs
+        let content_type = compute_inputs
             .iter()
             .find(|i| &i.name == input_name)
-            .map(|i| super::super::api::v1::fetch::content_type_to_extension(&i.content_type))
-            .unwrap_or_else(|| "bin".to_string());
+            .map(|i| i.content_type.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing input spec for input '{}'", input_name))?;
+        let ext = super::super::api::v1::fetch::content_type_to_extension(content_type);
         let url = state
             .storage
             .presigned_get_url_for_compute(
@@ -482,7 +492,7 @@ async fn execute_node(
     if !downloads.is_empty() {
         env_vars.insert(
             "OZZY_INPUT_DOWNLOADS".to_string(),
-            serde_json::to_string(&downloads).unwrap_or_default(),
+            serde_json::to_string(&downloads)?,
         );
     }
 
@@ -668,7 +678,7 @@ async fn execute_node(
     let output_r2_key = state.storage.storage_key(&output_hash, &output_ext)?;
 
     // Insert materialized cache record
-    let platform_str = serde_json::to_string(platform).unwrap_or_default();
+    let platform_str = serde_json::to_string(platform)?;
     state
         .db
         .insert_materialized_cache(
@@ -828,9 +838,7 @@ async fn resolve_edge_source(
             .ok_or_else(|| anyhow::anyhow!("Collection '{}' has no versions", coll_name))?;
         Ok(version.hash)
     } else if source.starts_with("endpoint:") {
-        anyhow::bail!(
-            "Cross-project endpoint dependencies ('{source}') are not yet implemented"
-        )
+        anyhow::bail!("Cross-project endpoint dependencies ('{source}') are not yet implemented")
     } else {
         let output = node_outputs.get(source).ok_or_else(|| {
             anyhow::anyhow!(
@@ -844,7 +852,7 @@ async fn resolve_edge_source(
 
 /// Compute source hash for a transform (orchestrator version).
 fn compute_source_hash(
-    transform_def: &ozzy_core::toml_spec::TransformDef,
+    transform_def: &RuntimeTransformDef,
     node_def: &ozzy_core::toml_spec::NodeDef,
     commit: &crate::db::Commit,
     source_dir: Option<&std::path::Path>,
@@ -859,22 +867,30 @@ fn compute_source_hash(
         })?;
         let file_path_str = source.split(':').next().unwrap_or(source);
         let hash = if let Some(sd) = source_dir {
+            let source_root = sd
+                .canonicalize()
+                .map_err(|e| anyhow::anyhow!("Failed to canonicalize source dir: {}", e))?;
             let full_path = sd.join(file_path_str);
-            let canonical = full_path.canonicalize().ok();
-            let within_source = canonical
-                .as_ref()
-                .and_then(|c| sd.canonicalize().ok().map(|sdc| c.starts_with(sdc)))
-                .unwrap_or(false);
-            if !within_source {
+            let canonical = full_path.canonicalize().map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to canonicalize source path '{}' for transform '{}': {}",
+                    file_path_str,
+                    node_def.transform,
+                    e
+                )
+            })?;
+            if !canonical.starts_with(&source_root) {
                 anyhow::bail!("Source path '{}' escapes source directory", file_path_str);
             }
-            std::fs::read(&full_path)
-                .map(|bytes| ozzy_core::hash::blake3_hash(&bytes))
-                .unwrap_or_else(|_| {
-                    ozzy_core::hash::blake3_hash(
-                        format!("{}:{}", node_def.transform, commit.git_commit_sha).as_bytes(),
-                    )
-                })
+            let bytes = std::fs::read(&canonical).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to read source file '{}' for transform '{}': {}",
+                    file_path_str,
+                    node_def.transform,
+                    e
+                )
+            })?;
+            ozzy_core::hash::blake3_hash(&bytes)
         } else {
             ozzy_core::hash::blake3_hash(
                 format!("{}:{}", node_def.transform, commit.git_commit_sha).as_bytes(),
@@ -899,7 +915,6 @@ fn compute_source_hash(
 /// For data atoms: reads content_type from DB.
 /// For collections: returns "collection".
 /// For node outputs: reads from the NodeOutput struct.
-/// Falls back to "application/octet-stream" if unknown.
 async fn resolve_input_content_type(
     input_name: &str,
     _hash: &str,
@@ -907,25 +922,32 @@ async fn resolve_input_content_type(
     project_id: Uuid,
     edges_for_node: &[(String, String)],
     node_outputs: &HashMap<String, NodeOutput>,
-) -> String {
+) -> Result<String, anyhow::Error> {
     // Find the source string for this input name
     let source = edges_for_node
         .iter()
         .find(|(name, _)| name == input_name)
         .map(|(_, s)| s.as_str())
-        .unwrap_or("");
+        .ok_or_else(|| anyhow::anyhow!("Input '{}' has no bound edge source", input_name))?;
 
     if let Some(data_name) = source.strip_prefix("data:") {
-        if let Ok(Some(atom)) = state.db.get_data_atom(project_id, data_name).await {
-            return atom.content_type;
-        }
+        let atom = state
+            .db
+            .get_data_atom(project_id, data_name)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Data atom '{}' not found", data_name))?;
+        return Ok(atom.content_type);
     } else if source.starts_with("collection:") {
-        return "collection".to_string();
+        return Ok("collection".to_string());
     } else if let Some(output) = node_outputs.get(source) {
-        return output.content_type.clone();
+        return Ok(output.content_type.clone());
     }
 
-    "application/octet-stream".to_string()
+    Err(anyhow::anyhow!(
+        "Input '{}' points at unavailable source '{}'",
+        input_name,
+        source
+    ))
 }
 
 /// Resolve secrets hash for a transform.
@@ -934,7 +956,7 @@ async fn resolve_input_content_type(
 async fn resolve_secrets_hash(
     state: &AppState,
     project_id: Uuid,
-    transform_def: &ozzy_core::toml_spec::TransformDef,
+    transform_def: &RuntimeTransformDef,
 ) -> Result<Option<String>, anyhow::Error> {
     if transform_def.secrets.is_empty() {
         return Ok(None);

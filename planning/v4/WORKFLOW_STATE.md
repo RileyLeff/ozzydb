@@ -1,7 +1,7 @@
 # v4 Workflow State
 
 ## Current Phase: Phase 2 underway
-## Current Step: Phase 2.2 registry snapshots complete
+## Current Step: Phase 2.2 cleanup complete; ready for Phase 2.3
 
 ## Completed Steps
 
@@ -187,8 +187,21 @@
   - `cargo test -p ozzy-types`
   - the new DB-gated server snapshot test was authored, but the `cargo test -p ozzy-server ...` link/run step remained a poor checkpoint signal in this harness
 
+### Phase 2.2 cleanup pass
+- Wired the pinned snapshot layer into live server flows:
+  - `fetch`
+  - `compute::orchestrator`
+  - endpoint inspection
+- Added registry-backed `equivalent(...)` and `refines(...)` queries on `RegistrySnapshot`.
+- Reworked `RegistrySnapshotCache` into a bounded single-flight cache instead of an unbounded map.
+- Split internal snapshot corruption from user-facing unknown-type errors with a dedicated `MissingStoredTypeRowForResolvedType` error.
+- Removed touched silent fallback paths from fetch/orchestrator/endpoint inspection.
+- Verification for this checkpoint:
+  - `cargo check -p ozzy-server`
+  - `cargo test -p ozzy-types`
+
 ## Open Review Findings
-- None blocking for Phase 2.1.
+- None blocking for Phase 2.2 cleanup.
 - Review artifacts:
   - `planning/reviews/v4/01_phase1_1_review.md`
   - `planning/reviews/v4/02_phase1_2_review.md`
@@ -199,6 +212,7 @@
   - `planning/reviews/v4/07_phase1_followup_fix_review.md`
   - `planning/reviews/v4/08_phase2_1_review.md`
   - `planning/reviews/v4/09_phase2_2_review.md`
+  - `planning/reviews/v4/10_phase2_2_cleanup_review.md`
 
 ## Current Blockers
 - None.

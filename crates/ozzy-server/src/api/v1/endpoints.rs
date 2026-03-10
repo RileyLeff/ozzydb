@@ -1,7 +1,8 @@
 //! Endpoint inspection API (no execution — that's Phase 4).
 //!
-//! Reads endpoint definitions from the commit_state JSONB to provide
-//! listings, detail views, and DAG visualizations.
+//! Endpoint definitions still come from commit-state data during Phase 2, but
+//! every read must also resolve through a pinned v4 project revision so this
+//! path cannot observe commits that were never published into the v4 registry.
 
 use std::collections::HashMap;
 
@@ -17,6 +18,7 @@ use super::auth::ApiError;
 use crate::AppState;
 use crate::auth::middleware::MaybeAuthUser;
 use crate::db::models::{Commit, CommitState};
+use crate::registry::load_project_revision_snapshot_by_commit;
 
 /// Build the endpoints router.
 pub fn router() -> Router<AppState> {
@@ -117,29 +119,17 @@ async fn list_endpoints(
     let (_, commit_state) =
         resolve_commit_state(&state, &owner, &slug, query.ref_name.as_deref(), &auth).await?;
 
-    let endpoints: HashMap<String, serde_json::Value> =
+    let endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef> =
         serde_json::from_value(commit_state.endpoints.clone())
             .map_err(|e| ApiError::Internal(e.into()))?;
 
     let mut summaries: Vec<EndpointSummary> = endpoints
         .iter()
-        .map(|(name, def)| {
-            let params = extract_param_summaries(def);
-            let node_count = def
-                .get("nodes")
-                .and_then(|n| n.as_object())
-                .map(|n| n.len())
-                .unwrap_or(0);
-
-            EndpointSummary {
-                name: name.clone(),
-                description: def
-                    .get("description")
-                    .and_then(|d| d.as_str())
-                    .map(String::from),
-                params,
-                node_count,
-            }
+        .map(|(name, def)| EndpointSummary {
+            name: name.clone(),
+            description: def.description.clone(),
+            params: extract_param_summaries(def),
+            node_count: def.nodes.len(),
         })
         .collect();
 
@@ -157,7 +147,7 @@ async fn get_endpoint(
     let (commit, commit_state) =
         resolve_commit_state(&state, &owner, &slug, query.ref_name.as_deref(), &auth).await?;
 
-    let endpoints: HashMap<String, serde_json::Value> =
+    let endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef> =
         serde_json::from_value(commit_state.endpoints.clone())
             .map_err(|e| ApiError::Internal(e.into()))?;
 
@@ -165,20 +155,13 @@ async fn get_endpoint(
         .get(&name)
         .ok_or_else(|| ApiError::not_found(format!("Endpoint '{}' not found", name)))?;
 
-    let params = extract_param_details(def);
-    let nodes = extract_nodes(def);
-    let edges = extract_edges(def);
-
     Ok(Json(EndpointDetail {
         name,
-        description: def
-            .get("description")
-            .and_then(|d| d.as_str())
-            .map(String::from),
+        description: def.description.clone(),
         commit_sha: commit.git_commit_sha,
-        params,
-        nodes,
-        edges,
+        params: extract_param_details(def),
+        nodes: extract_nodes(def),
+        edges: extract_edges(def),
     }))
 }
 
@@ -192,7 +175,7 @@ async fn get_endpoint_dag(
     let (_, commit_state) =
         resolve_commit_state(&state, &owner, &slug, query.ref_name.as_deref(), &auth).await?;
 
-    let endpoints: HashMap<String, serde_json::Value> =
+    let endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef> =
         serde_json::from_value(commit_state.endpoints.clone())
             .map_err(|e| ApiError::Internal(e.into()))?;
 
@@ -234,7 +217,6 @@ async fn resolve_commit_state(
 
     enforce_read_access(state, &project, owner, slug, auth).await?;
 
-    // Resolve commit: by ref if specified, otherwise latest
     let commit = if let Some(ref_name) = ref_name {
         let r = state
             .db
@@ -253,12 +235,15 @@ async fn resolve_commit_state(
                 ))
             })?
     } else {
-        // Get latest commit
         let commits = state.db.list_commits(project.id, 1).await?;
         commits.into_iter().next().ok_or_else(|| {
             ApiError::not_found("No commits found. Push a commit first with `ozzy push`.")
         })?
     };
+
+    load_project_revision_snapshot_by_commit(&state.db, &state.registry_snapshots, commit.id)
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
 
     let commit_state = state.db.get_commit_state(commit.id).await?.ok_or_else(|| {
         ApiError::Internal(anyhow::anyhow!(
@@ -270,140 +255,90 @@ async fn resolve_commit_state(
     Ok((commit, commit_state))
 }
 
-/// Extract parameter summaries from an endpoint JSON definition.
-fn extract_param_summaries(def: &serde_json::Value) -> Vec<ParamSummary> {
-    let Some(params) = def.get("params").and_then(|p| p.as_object()) else {
-        return vec![];
-    };
-    params
+/// Extract parameter summaries from an endpoint definition.
+fn extract_param_summaries(def: &ozzy_core::toml_spec::EndpointDef) -> Vec<ParamSummary> {
+    def.params
         .iter()
-        .map(|(name, p)| ParamSummary {
+        .map(|(name, param)| ParamSummary {
             name: name.clone(),
-            type_: p
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("string")
-                .to_string(),
-            description: p
-                .get("description")
-                .and_then(|d| d.as_str())
-                .map(String::from),
-            default: p.get("default").cloned(),
+            type_: param.type_.clone(),
+            description: param.description.clone(),
+            default: param.default.clone(),
         })
         .collect()
 }
 
-/// Extract detailed parameter info from an endpoint JSON definition.
-fn extract_param_details(def: &serde_json::Value) -> Vec<ParamDetail> {
-    let Some(params) = def.get("params").and_then(|p| p.as_object()) else {
-        return vec![];
-    };
-    params
+/// Extract detailed parameter info from an endpoint definition.
+fn extract_param_details(def: &ozzy_core::toml_spec::EndpointDef) -> Vec<ParamDetail> {
+    def.params
         .iter()
-        .map(|(name, p)| ParamDetail {
+        .map(|(name, param)| ParamDetail {
             name: name.clone(),
-            type_: p
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("string")
-                .to_string(),
-            description: p
-                .get("description")
-                .and_then(|d| d.as_str())
-                .map(String::from),
-            default: p.get("default").cloned(),
-            min: p.get("min").and_then(|v| v.as_f64()),
-            max: p.get("max").and_then(|v| v.as_f64()),
-            enum_values: p.get("enum").and_then(|v| v.as_array()).cloned(),
-            binds: p
-                .get("binds")
-                .and_then(|b| b.as_str())
-                .unwrap_or("")
-                .to_string(),
+            type_: param.type_.clone(),
+            description: param.description.clone(),
+            default: param.default.clone(),
+            min: param.min,
+            max: param.max,
+            enum_values: param.enum_values.clone(),
+            binds: param.binds.clone(),
         })
         .collect()
 }
 
-/// Extract nodes from an endpoint JSON definition.
-fn extract_nodes(def: &serde_json::Value) -> HashMap<String, NodeDetail> {
-    let Some(nodes) = def.get("nodes").and_then(|n| n.as_object()) else {
-        return HashMap::new();
-    };
-    nodes
+/// Extract nodes from an endpoint definition.
+fn extract_nodes(def: &ozzy_core::toml_spec::EndpointDef) -> HashMap<String, NodeDetail> {
+    def.nodes
         .iter()
-        .map(|(name, n)| {
-            let params: HashMap<String, serde_json::Value> = n
-                .get("params")
-                .and_then(|p| serde_json::from_value(p.clone()).ok())
-                .unwrap_or_default();
+        .map(|(name, node)| {
             (
                 name.clone(),
                 NodeDetail {
-                    transform: n
-                        .get("transform")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    params,
-                    machine: n.get("machine").and_then(|m| m.as_str()).map(String::from),
+                    transform: node.transform.clone(),
+                    params: node.params.clone(),
+                    machine: node.machine.clone(),
                 },
             )
         })
         .collect()
 }
 
-/// Extract edges from an endpoint JSON definition.
-fn extract_edges(def: &serde_json::Value) -> Vec<EdgeDetail> {
-    let Some(edges) = def.get("edges").and_then(|e| e.as_array()) else {
-        return vec![];
-    };
-    edges
+/// Extract edges from an endpoint definition.
+fn extract_edges(def: &ozzy_core::toml_spec::EndpointDef) -> Vec<EdgeDetail> {
+    def.edges
         .iter()
-        .filter_map(|e| {
-            Some(EdgeDetail {
-                from: e.get("from")?.as_str()?.to_string(),
-                to: e.get("to")?.as_str()?.to_string(),
-            })
+        .map(|edge| EdgeDetail {
+            from: edge.from.clone(),
+            to: edge.to.clone(),
         })
         .collect()
 }
 
 /// Render a Mermaid graph from an endpoint definition.
-fn render_mermaid_dag(def: &serde_json::Value, endpoint_name: &str) -> String {
-    let mut lines = vec![format!("graph TD")];
+fn render_mermaid_dag(def: &ozzy_core::toml_spec::EndpointDef, endpoint_name: &str) -> String {
+    let mut lines = vec!["graph TD".to_string()];
     lines.push(format!("    subgraph {}", endpoint_name));
 
-    // Add nodes
-    if let Some(nodes) = def.get("nodes").and_then(|n| n.as_object()) {
-        for (name, n) in nodes {
-            let transform = n.get("transform").and_then(|t| t.as_str()).unwrap_or("?");
-            lines.push(format!(
-                "    {}[\"{}<br/><small>{}</small>\"]",
-                name, name, transform
-            ));
-        }
+    for (name, node) in &def.nodes {
+        lines.push(format!(
+            "    {}[\"{}<br/><small>{}</small>\"]",
+            name, name, node.transform
+        ));
     }
 
-    // Add edges
-    if let Some(edges) = def.get("edges").and_then(|e| e.as_array()) {
-        for edge in edges {
-            let from = edge.get("from").and_then(|f| f.as_str()).unwrap_or("?");
-            let to = edge.get("to").and_then(|t| t.as_str()).unwrap_or("?");
+    for edge in &def.edges {
+        let from = edge.from.as_str();
+        let to = edge.to.as_str();
 
-            // Parse edge source: could be "data:name", "collection:name", or "node_name"
-            let from_id = if from.contains(':') {
-                // External source — create a node for it
-                let safe_id = from.replace(':', "_").replace('/', "_");
-                lines.push(format!("    {}(({}))", safe_id, from));
-                safe_id
-            } else {
-                from.to_string()
-            };
+        let from_id = if from.contains(':') {
+            let safe_id = from.replace(':', "_").replace('/', "_");
+            lines.push(format!("    {}(({}))", safe_id, from));
+            safe_id
+        } else {
+            from.to_string()
+        };
 
-            // Parse edge target: "node.input"
-            let to_node = to.split('.').next().unwrap_or(to);
-            lines.push(format!("    {} --> {}", from_id, to_node));
-        }
+        let to_node = to.split('.').next().unwrap_or(to);
+        lines.push(format!("    {} --> {}", from_id, to_node));
     }
 
     lines.push("    end".to_string());

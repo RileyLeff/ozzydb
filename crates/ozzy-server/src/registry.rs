@@ -1,18 +1,23 @@
 //! Immutable v4 registry snapshots loaded from persisted registry revisions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::future::Future;
 use std::sync::Arc;
 
+use ozzy_core::toml_spec::{EnvironmentDef, TransformDef};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use serde_json::Value;
+use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 use ozzy_types::canonical::{CanonicalType, CanonicalTypeId, CanonicalizationError};
 use ozzy_types::ports::{TypedPort, TypedPortSet};
 use ozzy_types::registry::{RegistryError, TypeRegistry, TypeVersion, TypeVersionId};
-use ozzy_types::syntax::{TypeExpr, TypeRefExpr};
+use ozzy_types::relations;
+use ozzy_types::syntax::{TypeDefinitions, TypeExpr, TypeRefExpr};
 
 use crate::Database;
+use crate::db::models::CommitState;
 use crate::db::v4::{
     StoredCanonicalType, StoredEnvironmentVersion, StoredProjectRevision, StoredRegistryRevision,
     StoredTransformPort, StoredTransformVersion, StoredTypeVersion, V4QueryError,
@@ -33,11 +38,35 @@ impl VersionedName {
     }
 }
 
+impl std::fmt::Display for VersionedName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.name, self.version)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SnapshotTransformVersion {
     pub row: StoredTransformVersion,
     pub inputs: TypedPortSet,
     pub outputs: TypedPortSet,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeTransformDef {
+    pub source: Option<String>,
+    pub command: Option<String>,
+    pub environment: String,
+    pub description: Option<String>,
+    pub input_names: Vec<String>,
+    pub params_schema: Value,
+    pub network: bool,
+    pub secrets: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BoundRuntimeDefinitions {
+    pub environments: HashMap<String, EnvironmentDef>,
+    pub transforms: HashMap<String, RuntimeTransformDef>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,15 +104,13 @@ impl RegistrySnapshot {
     pub fn resolve_type_ref(
         &self,
         type_ref: &TypeRefExpr,
-    ) -> Result<(&TypeVersion, &StoredTypeVersion), RegistryError> {
+    ) -> Result<(&TypeVersion, &StoredTypeVersion), RegistrySnapshotError> {
         let type_version = self.type_registry.resolve_ref(type_ref)?;
         let row = self.type_rows.get(&type_version.id).ok_or_else(|| {
-            RegistryError::UnknownTypeVersionReference {
-                name: type_ref.name.clone(),
-                version: type_ref
-                    .version
-                    .clone()
-                    .unwrap_or_else(|| "<unversioned>".to_string()),
+            RegistrySnapshotError::MissingStoredTypeRowForResolvedType {
+                type_name: type_version.name.clone(),
+                type_version: type_version.version.clone(),
+                type_version_id: type_version.id.as_str().to_string(),
             }
         })?;
         Ok((type_version, row))
@@ -100,6 +127,162 @@ impl RegistrySnapshot {
     pub fn equivalent_type_versions(&self, id: &TypeVersionId) -> Option<&[TypeVersionId]> {
         let canonical = self.type_registry.get(id)?.canonical.as_ref()?;
         self.equivalence_index.get(canonical).map(Vec::as_slice)
+    }
+
+    pub fn equivalent(
+        &self,
+        left: &TypeRefExpr,
+        right: &TypeRefExpr,
+    ) -> Result<bool, RegistrySnapshotError> {
+        let left = self.expand_published_type_ref(left)?;
+        let right = self.expand_published_type_ref(right)?;
+        Ok(relations::equivalent(
+            &TypeDefinitions::default(),
+            &left,
+            &right,
+        )?)
+    }
+
+    pub fn refines(
+        &self,
+        left: &TypeRefExpr,
+        right: &TypeRefExpr,
+    ) -> Result<bool, RegistrySnapshotError> {
+        let left = self.expand_published_type_ref(left)?;
+        let right = self.expand_published_type_ref(right)?;
+        Ok(relations::refines(
+            &TypeDefinitions::default(),
+            &left,
+            &right,
+        )?)
+    }
+
+    pub fn bind_runtime_definitions(
+        &self,
+        commit_state: &CommitState,
+    ) -> Result<BoundRuntimeDefinitions, RegistrySnapshotError> {
+        let authored_environments: HashMap<String, EnvironmentDef> =
+            serde_json::from_value(commit_state.environments.clone())?;
+        let authored_transforms: HashMap<String, TransformDef> =
+            serde_json::from_value(commit_state.transforms.clone())?;
+
+        let mut environments = HashMap::new();
+        let mut environment_keys_by_authored_name = HashMap::new();
+        for (authored_name, authored_env) in &authored_environments {
+            let authored_def = serde_json::to_value(authored_env)?;
+            let matches = self
+                .environments
+                .iter()
+                .filter(|(key, stored)| {
+                    key.name == *authored_name && stored.definition == authored_def
+                })
+                .collect::<Vec<_>>();
+
+            match matches.as_slice() {
+                [] => {
+                    return Err(RegistrySnapshotError::MissingSnapshotEnvironmentBinding {
+                        environment_name: authored_name.clone(),
+                    });
+                }
+                [single] => {
+                    let (versioned_name, stored) = single;
+                    let runtime_key = versioned_name.to_string();
+                    let env_def: EnvironmentDef =
+                        serde_json::from_value(stored.definition.clone())?;
+                    environment_keys_by_authored_name
+                        .insert(authored_name.clone(), runtime_key.clone());
+                    environments.insert(runtime_key, env_def);
+                }
+                many => {
+                    return Err(RegistrySnapshotError::AmbiguousSnapshotEnvironmentBinding {
+                        environment_name: authored_name.clone(),
+                        candidates: many.iter().map(|(key, _)| key.to_string()).collect(),
+                    });
+                }
+            }
+        }
+
+        let mut transforms = HashMap::new();
+        for (authored_name, authored_transform) in &authored_transforms {
+            let expected_environment_key = environment_keys_by_authored_name
+                .get(&authored_transform.environment)
+                .ok_or_else(
+                    || RegistrySnapshotError::MissingSnapshotEnvironmentBinding {
+                        environment_name: authored_transform.environment.clone(),
+                    },
+                )?;
+            let expected_params_schema = serde_json::to_value(&authored_transform.params)?;
+            let mut authored_input_names = authored_transform
+                .inputs
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            authored_input_names.sort();
+
+            let matches = self
+                .transforms
+                .iter()
+                .filter(|(key, transform)| {
+                    let mut snapshot_input_names =
+                        transform.inputs.ports.keys().cloned().collect::<Vec<_>>();
+                    snapshot_input_names.sort();
+                    key.name == *authored_name
+                        && transform.row.source_ref == authored_transform.source
+                        && transform.row.command == authored_transform.command
+                        && transform.row.description == authored_transform.description
+                        && transform.row.params_schema == expected_params_schema
+                        && transform.row.network_access == authored_transform.network
+                        && transform.row.secrets == authored_transform.secrets
+                        && self
+                            .environment_keys_by_row_id
+                            .get(&transform.row.environment_version_id)
+                            .map(ToString::to_string)
+                            .as_deref()
+                            == Some(expected_environment_key.as_str())
+                        && snapshot_input_names == authored_input_names
+                })
+                .collect::<Vec<_>>();
+
+            match matches.as_slice() {
+                [] => {
+                    return Err(RegistrySnapshotError::MissingSnapshotTransformBinding {
+                        transform_name: authored_name.clone(),
+                    });
+                }
+                [single] => {
+                    let (_, transform) = single;
+                    transforms.insert(
+                        authored_name.clone(),
+                        RuntimeTransformDef {
+                            source: transform.row.source_ref.clone(),
+                            command: transform.row.command.clone(),
+                            environment: expected_environment_key.clone(),
+                            description: transform.row.description.clone(),
+                            input_names: {
+                                let mut names =
+                                    transform.inputs.ports.keys().cloned().collect::<Vec<_>>();
+                                names.sort();
+                                names
+                            },
+                            params_schema: transform.row.params_schema.clone(),
+                            network: transform.row.network_access,
+                            secrets: transform.row.secrets.clone(),
+                        },
+                    );
+                }
+                many => {
+                    return Err(RegistrySnapshotError::AmbiguousSnapshotTransformBinding {
+                        transform_name: authored_name.clone(),
+                        candidates: many.iter().map(|(key, _)| key.to_string()).collect(),
+                    });
+                }
+            }
+        }
+
+        Ok(BoundRuntimeDefinitions {
+            environments,
+            transforms,
+        })
     }
 
     pub fn environment(&self, name: &str, version: &str) -> Option<&StoredEnvironmentVersion> {
@@ -121,29 +304,167 @@ impl RegistrySnapshot {
         let key = self.transform_keys_by_row_id.get(&row_id)?;
         self.transforms.get(key)
     }
+
+    fn expand_published_type_ref(
+        &self,
+        type_ref: &TypeRefExpr,
+    ) -> Result<TypeExpr, RegistrySnapshotError> {
+        let (type_version, _) = self.resolve_type_ref(type_ref)?;
+        self.expand_type_expr(&type_version.expr, &mut Vec::new())
+    }
+
+    fn expand_type_expr(
+        &self,
+        expr: &TypeExpr,
+        stack: &mut Vec<TypeVersionId>,
+    ) -> Result<TypeExpr, RegistrySnapshotError> {
+        match expr {
+            TypeExpr::Builtin(_) | TypeExpr::Never => Ok(expr.clone()),
+            TypeExpr::Ref(type_ref) => {
+                let version = type_ref.version.clone().ok_or_else(|| {
+                    RegistrySnapshotError::UnexpectedLocalTypeReference {
+                        type_name: type_ref.name.clone(),
+                    }
+                })?;
+
+                let (type_version, _) = self.resolve_type_ref(type_ref)?;
+                if stack.contains(&type_version.id) {
+                    let mut cycle = stack
+                        .iter()
+                        .map(|id| id.as_str().to_string())
+                        .collect::<Vec<_>>();
+                    cycle.push(format!("{}@{}", type_ref.name, version));
+                    return Err(RegistrySnapshotError::RecursivePublishedTypeReference { cycle });
+                }
+
+                stack.push(type_version.id.clone());
+                let expanded = self.expand_type_expr(&type_version.expr, stack);
+                stack.pop();
+                expanded
+            }
+            TypeExpr::Intersection(parts) => Ok(TypeExpr::Intersection(
+                parts
+                    .iter()
+                    .map(|part| self.expand_type_expr(part, stack))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            TypeExpr::Constructor(_) => Ok(expr.clone()),
+            TypeExpr::Record(record) => Ok(TypeExpr::Record(ozzy_types::syntax::RecordExpr {
+                fields: record
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        Ok(ozzy_types::syntax::RecordField {
+                            name: field.name.clone(),
+                            ty: self.expand_type_expr(&field.ty, stack)?,
+                            optional: field.optional,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, RegistrySnapshotError>>()?,
+                open: record.open,
+            })),
+            TypeExpr::Collection(item) => Ok(TypeExpr::Collection(Box::new(
+                self.expand_type_expr(item, stack)?,
+            ))),
+            TypeExpr::Table(row) => Ok(TypeExpr::Table(Box::new(
+                self.expand_type_expr(row, stack)?,
+            ))),
+        }
+    }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
+struct RegistrySnapshotCacheState {
+    entries: BTreeMap<Uuid, Arc<RegistrySnapshot>>,
+    access_order: VecDeque<Uuid>,
+    inflight: BTreeMap<Uuid, Arc<Notify>>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RegistrySnapshotCache {
-    inner: Arc<RwLock<BTreeMap<Uuid, Arc<RegistrySnapshot>>>>,
+    inner: Arc<Mutex<RegistrySnapshotCacheState>>,
+    capacity: usize,
 }
 
 impl RegistrySnapshotCache {
-    pub async fn get(&self, registry_revision_id: Uuid) -> Option<Arc<RegistrySnapshot>> {
-        let guard = self.inner.read().await;
-        guard.get(&registry_revision_id).cloned()
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(RegistrySnapshotCacheState::default())),
+            capacity,
+        }
     }
 
-    pub async fn insert(
+    pub async fn get_or_try_insert_with<F, Fut, E>(
         &self,
         registry_revision_id: Uuid,
-        snapshot: Arc<RegistrySnapshot>,
-    ) -> Arc<RegistrySnapshot> {
-        let mut guard = self.inner.write().await;
-        guard
-            .entry(registry_revision_id)
-            .or_insert_with(|| snapshot.clone())
-            .clone()
+        load: F,
+    ) -> Result<Arc<RegistrySnapshot>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Arc<RegistrySnapshot>, E>>,
+    {
+        let mut load = Some(load);
+
+        loop {
+            let maybe_wait = {
+                let mut guard = self.inner.lock().await;
+                if let Some(snapshot) = guard.entries.get(&registry_revision_id).cloned() {
+                    touch_access_order(&mut guard.access_order, registry_revision_id);
+                    return Ok(snapshot);
+                }
+
+                if let Some(waiter) = guard.inflight.get(&registry_revision_id).cloned() {
+                    Some(waiter)
+                } else {
+                    let waiter = Arc::new(Notify::new());
+                    guard.inflight.insert(registry_revision_id, waiter);
+                    None
+                }
+            };
+
+            if let Some(waiter) = maybe_wait {
+                waiter.notified().await;
+                continue;
+            }
+
+            let load_result = load
+                .take()
+                .expect("loader is only invoked by the owner task")()
+            .await;
+
+            let waiter = {
+                let mut guard = self.inner.lock().await;
+                let waiter = guard
+                    .inflight
+                    .remove(&registry_revision_id)
+                    .expect("inflight marker exists for loader task");
+
+                if let Ok(snapshot) = &load_result {
+                    if !guard.entries.contains_key(&registry_revision_id) {
+                        guard.entries.insert(registry_revision_id, snapshot.clone());
+                        touch_access_order(&mut guard.access_order, registry_revision_id);
+
+                        while guard.entries.len() > self.capacity {
+                            let Some(evicted) = guard.access_order.pop_front() else {
+                                break;
+                            };
+                            guard.entries.remove(&evicted);
+                        }
+                    }
+                }
+
+                waiter
+            };
+
+            waiter.notify_waiters();
+            return load_result;
+        }
+    }
+}
+
+impl Default for RegistrySnapshotCache {
+    fn default() -> Self {
+        Self::with_capacity(128)
     }
 }
 
@@ -161,6 +482,18 @@ pub enum RegistrySnapshotError {
     UnknownRegistryRevision { registry_revision_id: Uuid },
     #[error("project revision for commit '{commit_id}' does not exist")]
     UnknownProjectRevisionForCommit { commit_id: Uuid },
+    #[error(
+        "resolved published type '{type_name}@{type_version}' is missing its stored row for id '{type_version_id}'"
+    )]
+    MissingStoredTypeRowForResolvedType {
+        type_name: String,
+        type_version: String,
+        type_version_id: String,
+    },
+    #[error("published type expression unexpectedly contains unresolved local ref '{type_name}'")]
+    UnexpectedLocalTypeReference { type_name: String },
+    #[error("recursive published type reference detected: {cycle:?}")]
+    RecursivePublishedTypeReference { cycle: Vec<String> },
     #[error(
         "type version '{type_name}@{type_version}' points at missing canonical type row '{canonical_type_row_id}'"
     )]
@@ -210,6 +543,31 @@ pub enum RegistrySnapshotError {
         port_kind: String,
         port_name: String,
     },
+    #[error("commit state environment '{environment_name}' has no matching snapshot environment")]
+    MissingSnapshotEnvironmentBinding { environment_name: String },
+    #[error(
+        "commit state environment '{environment_name}' matches multiple snapshot environments: {candidates:?}"
+    )]
+    AmbiguousSnapshotEnvironmentBinding {
+        environment_name: String,
+        candidates: Vec<String>,
+    },
+    #[error("commit state transform '{transform_name}' has no matching snapshot transform")]
+    MissingSnapshotTransformBinding { transform_name: String },
+    #[error(
+        "commit state transform '{transform_name}' matches multiple snapshot transforms: {candidates:?}"
+    )]
+    AmbiguousSnapshotTransformBinding {
+        transform_name: String,
+        candidates: Vec<String>,
+    },
+    #[error(transparent)]
+    Relation(#[from] ozzy_types::relations::RelationError),
+}
+
+fn touch_access_order(access_order: &mut VecDeque<Uuid>, registry_revision_id: Uuid) {
+    access_order.retain(|entry| *entry != registry_revision_id);
+    access_order.push_back(registry_revision_id);
 }
 
 pub async fn load_registry_snapshot(
@@ -217,12 +575,13 @@ pub async fn load_registry_snapshot(
     cache: &RegistrySnapshotCache,
     registry_revision_id: Uuid,
 ) -> Result<Arc<RegistrySnapshot>, RegistrySnapshotError> {
-    if let Some(snapshot) = cache.get(registry_revision_id).await {
-        return Ok(snapshot);
-    }
-
-    let loaded = Arc::new(load_registry_snapshot_uncached(db, registry_revision_id).await?);
-    Ok(cache.insert(registry_revision_id, loaded).await)
+    cache
+        .get_or_try_insert_with(registry_revision_id, || async move {
+            Ok(Arc::new(
+                load_registry_snapshot_uncached(db, registry_revision_id).await?,
+            ))
+        })
+        .await
 }
 
 pub async fn load_project_revision_snapshot_by_commit(
@@ -236,6 +595,25 @@ pub async fn load_project_revision_snapshot_by_commit(
         .ok_or(RegistrySnapshotError::UnknownProjectRevisionForCommit { commit_id })?;
     let snapshot = load_registry_snapshot(db, cache, project_revision.registry_revision_id).await?;
     Ok((project_revision, snapshot))
+}
+
+pub async fn bind_commit_state_to_snapshot(
+    db: &Database,
+    cache: &RegistrySnapshotCache,
+    commit_id: Uuid,
+    commit_state: &CommitState,
+) -> Result<
+    (
+        StoredProjectRevision,
+        Arc<RegistrySnapshot>,
+        BoundRuntimeDefinitions,
+    ),
+    RegistrySnapshotError,
+> {
+    let (project_revision, snapshot) =
+        load_project_revision_snapshot_by_commit(db, cache, commit_id).await?;
+    let bindings = snapshot.bind_runtime_definitions(commit_state)?;
+    Ok((project_revision, snapshot, bindings))
 }
 
 async fn load_registry_snapshot_uncached(
@@ -330,54 +708,56 @@ async fn load_registry_snapshot_uncached(
 
         let mut inputs = TypedPortSet::default();
         let mut outputs = TypedPortSet::default();
-        for port in ports_by_transform.remove(&stored.id).unwrap_or_default() {
-            let Some(type_version_id) = type_version_ids_by_row_id.get(&port.type_version_id)
-            else {
-                return Err(RegistrySnapshotError::MissingTypeForTransformPort {
-                    transform_name: stored.name.clone(),
-                    transform_version: stored.version.clone(),
-                    port_kind: port.port_kind.clone(),
-                    port_name: port.port_name.clone(),
-                    type_row_id: port.type_version_id,
-                });
-            };
-            let Some(type_row) = type_rows.get(type_version_id) else {
-                return Err(RegistrySnapshotError::MissingTypeForTransformPort {
-                    transform_name: stored.name.clone(),
-                    transform_version: stored.version.clone(),
-                    port_kind: port.port_kind.clone(),
-                    port_name: port.port_name.clone(),
-                    type_row_id: port.type_version_id,
-                });
-            };
-
-            let typed_port = TypedPort {
-                ty: TypeRefExpr::new(type_row.name.clone(), Some(type_row.version.clone())),
-                description: port.description.clone(),
-            };
-
-            let target_set = match port.port_kind.as_str() {
-                "input" => &mut inputs,
-                "output" => &mut outputs,
-                other => {
-                    return Err(RegistrySnapshotError::UnknownTransformPortKind {
+        if let Some(ports) = ports_by_transform.remove(&stored.id) {
+            for port in ports {
+                let Some(type_version_id) = type_version_ids_by_row_id.get(&port.type_version_id)
+                else {
+                    return Err(RegistrySnapshotError::MissingTypeForTransformPort {
                         transform_name: stored.name.clone(),
                         transform_version: stored.version.clone(),
-                        port_kind: other.to_string(),
+                        port_kind: port.port_kind.clone(),
+                        port_name: port.port_name.clone(),
+                        type_row_id: port.type_version_id,
+                    });
+                };
+                let Some(type_row) = type_rows.get(type_version_id) else {
+                    return Err(RegistrySnapshotError::MissingTypeForTransformPort {
+                        transform_name: stored.name.clone(),
+                        transform_version: stored.version.clone(),
+                        port_kind: port.port_kind.clone(),
+                        port_name: port.port_name.clone(),
+                        type_row_id: port.type_version_id,
+                    });
+                };
+
+                let typed_port = TypedPort {
+                    ty: TypeRefExpr::new(type_row.name.clone(), Some(type_row.version.clone())),
+                    description: port.description.clone(),
+                };
+
+                let target_set = match port.port_kind.as_str() {
+                    "input" => &mut inputs,
+                    "output" => &mut outputs,
+                    other => {
+                        return Err(RegistrySnapshotError::UnknownTransformPortKind {
+                            transform_name: stored.name.clone(),
+                            transform_version: stored.version.clone(),
+                            port_kind: other.to_string(),
+                        });
+                    }
+                };
+
+                if target_set
+                    .insert(port.port_name.clone(), typed_port)
+                    .is_some()
+                {
+                    return Err(RegistrySnapshotError::DuplicateTransformPort {
+                        transform_name: stored.name.clone(),
+                        transform_version: stored.version.clone(),
+                        port_kind: port.port_kind.clone(),
+                        port_name: port.port_name,
                     });
                 }
-            };
-
-            if target_set
-                .insert(port.port_name.clone(), typed_port)
-                .is_some()
-            {
-                return Err(RegistrySnapshotError::DuplicateTransformPort {
-                    transform_name: stored.name.clone(),
-                    transform_version: stored.version.clone(),
-                    port_kind: port.port_kind.clone(),
-                    port_name: port.port_name,
-                });
             }
         }
 
