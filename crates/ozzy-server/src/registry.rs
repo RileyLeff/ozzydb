@@ -52,12 +52,14 @@ pub struct SnapshotTransformVersion {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeTransformDef {
+    pub versioned_name: VersionedName,
+    pub row_id: Uuid,
     pub source: Option<String>,
     pub command: Option<String>,
-    pub environment: String,
+    pub environment: RuntimeEnvironmentDef,
     pub description: Option<String>,
-    pub input_names: Vec<String>,
-    pub output_names: Vec<String>,
+    pub inputs: TypedPortSet,
+    pub outputs: TypedPortSet,
     pub params_schema: Value,
     pub network: bool,
     pub secrets: Vec<String>,
@@ -292,26 +294,25 @@ impl RegistrySnapshot {
                     });
                 }
                 [single] => {
-                    let (_, transform) = single;
+                    let (transform_key, transform) = single;
+                    let (_, environment) = environments
+                        .get_key_value(expected_environment_key)
+                        .ok_or_else(|| {
+                            RegistrySnapshotError::MissingPublishedEnvironmentBinding {
+                                environment_name: authored_transform.environment.clone(),
+                            }
+                        })?;
                     transforms.insert(
                         authored_name.clone(),
                         RuntimeTransformDef {
+                            versioned_name: (*transform_key).clone(),
+                            row_id: transform.row.id,
                             source: transform.row.source_ref.clone(),
                             command: transform.row.command.clone(),
-                            environment: expected_environment_key.clone(),
+                            environment: environment.clone(),
                             description: transform.row.description.clone(),
-                            input_names: {
-                                let mut names =
-                                    transform.inputs.ports.keys().cloned().collect::<Vec<_>>();
-                                names.sort();
-                                names
-                            },
-                            output_names: {
-                                let mut names =
-                                    transform.outputs.ports.keys().cloned().collect::<Vec<_>>();
-                                names.sort();
-                                names
-                            },
+                            inputs: transform.inputs.clone(),
+                            outputs: transform.outputs.clone(),
                             params_schema: transform.row.params_schema.clone(),
                             network: transform.row.network_access,
                             secrets: transform.row.secrets.clone(),
@@ -1090,6 +1091,20 @@ mod tests {
             .expect("transform should exist");
         assert!(transform.inputs.ports.contains_key("raw"));
         assert!(transform.outputs.ports.contains_key("result"));
+        let runtime_transform = published
+            .runtime
+            .transforms
+            .get("clean_wp")
+            .expect("runtime transform binding should exist");
+        assert_eq!(runtime_transform.row_id, stored_transform.id);
+        assert_eq!(runtime_transform.versioned_name.to_string(), "clean_wp@1");
+        assert_eq!(runtime_transform.environment.row_id, stored_env.id);
+        assert_eq!(
+            runtime_transform.environment.versioned_name.to_string(),
+            "python_sci@1"
+        );
+        assert!(runtime_transform.inputs.ports.contains_key("raw"));
+        assert!(runtime_transform.outputs.ports.contains_key("result"));
 
         let environment = snapshot
             .environment("python_sci", "1")

@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::registry::{
-    RuntimeEnvironmentDef, RuntimeTransformDef, load_published_project_revision_by_commit,
+    RuntimeTransformDef, load_published_project_revision_by_commit,
 };
 
 /// Run a job to completion: load context, execute DAG in parallel waves, update status.
@@ -133,7 +133,6 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
             let platform_hash = platform_hash.clone();
             let platform = platform.clone();
             let transforms = published.runtime.transforms.clone();
-            let environments = published.runtime.environments.clone();
             let endpoint_def = endpoint_def.clone();
             let edge_map_for_node: Vec<(String, String)> = match edge_map.get(node_name.as_str()) {
                 Some(edges) => edges
@@ -154,7 +153,6 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
                     &node_name,
                     &endpoint_def,
                     &transforms,
-                    &environments,
                     &commit,
                     project_id,
                     &job_endpoint_name,
@@ -236,7 +234,6 @@ async fn execute_node(
     node_name: &str,
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
     transforms: &HashMap<String, RuntimeTransformDef>,
-    environments: &HashMap<String, RuntimeEnvironmentDef>,
     commit: &crate::db::Commit,
     project_id: Uuid,
     endpoint_name: &str,
@@ -265,6 +262,11 @@ async fn execute_node(
             node_name
         )
     })?;
+    super::super::api::v1::fetch::validate_node_input_bindings(
+        node_name,
+        transform_def,
+        edges_for_node.iter().map(|(name, _)| name.as_str()),
+    )?;
 
     // Resolve inputs
     let mut input_hashes: Vec<(String, String)> = Vec::new();
@@ -286,18 +288,12 @@ async fn execute_node(
     let secrets_hash = resolve_secrets_hash(state, project_id, transform_def).await?;
 
     // Resolve environment
-    let env_def = environments
-        .get(&transform_def.environment)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Environment '{}' not found for transform '{}'",
-                transform_def.environment,
-                node_def.transform,
-            )
-        })?;
-
     let (env_image, env_hash, lockfile_hash) =
-        super::super::api::v1::fetch::resolve_environment_image_anyhow(state, env_def).await?;
+        super::super::api::v1::fetch::resolve_environment_image_anyhow(
+            state,
+            &transform_def.environment,
+        )
+        .await?;
 
     // Compute source hash
     let (source_hash, function_name) =
@@ -359,14 +355,14 @@ async fn execute_node(
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "Environment '{}' has not been built yet",
-                transform_def.environment
+                transform_def.environment.versioned_name
             )
         })?;
 
     if env_image.as_ref().and_then(|img| img.built_at).is_none() {
         anyhow::bail!(
             "Environment '{}' is still building",
-            transform_def.environment
+            transform_def.environment.versioned_name
         );
     }
 
@@ -393,8 +389,9 @@ async fn execute_node(
         }
     } else if let Some(command) = &transform_def.command {
         let input_names: Vec<&str> = transform_def
-            .input_names
-            .iter()
+            .inputs
+            .ports
+            .keys()
             .map(String::as_str)
             .collect();
         crate::runners::command::generate_shell_wrapper(command, &input_names)
@@ -679,7 +676,7 @@ async fn execute_node(
             commit.id,
             endpoint_name,
             node_name,
-            &node_def.transform,
+            &transform_def.versioned_name.to_string(),
             &output_hash,
             &output_r2_key,
             &output_content_type,

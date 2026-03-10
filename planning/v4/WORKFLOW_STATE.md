@@ -1,7 +1,7 @@
 # v4 Workflow State
 
-## Current Phase: Phase 4 underway
-## Current Step: Phase 4.3 complete; ready for Phase 5 execution integration
+## Current Phase: Phase 5 underway
+## Current Step: Phase 5.1 complete; ready for Phase 5.2 fetch rewrite
 
 ## Completed Steps
 
@@ -238,6 +238,27 @@
 - Added test coverage for:
   - project revision payload persistence
   - published project revision loading from a pinned snapshot
+
+### Phase 5.1: Bind runtime execution to published transform and environment versions
+- Enriched `RuntimeTransformDef` so runtime bindings now carry:
+  - published `versioned_name`
+  - published `row_id`
+  - typed `inputs`
+  - typed `outputs`
+  - bound `RuntimeEnvironmentDef`
+- Bound authored runtime definitions to published snapshot rows using typed port
+  identity instead of only authored transform names.
+- Reworked cache planning and node execution to resolve environments directly
+  from the bound published environment on the runtime transform.
+- Added strict node input-binding validation before cache lookup and before
+  compute execution.
+- Persisted cache metadata now records the published transform versioned name
+  instead of the authored transform label.
+- Verification for this checkpoint:
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- External review degraded again for this checkpoint, so the milestone gate was
+  completed with direct self-review plus tests.
 
 ### Phase 3.1: `ozzy.toml` parser rewrite
 - Moved schema/witness helpers from `ozzy-core` into `ozzy-types` and removed the dependency-cycle blocker.

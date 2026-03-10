@@ -3,7 +3,7 @@
 //! `POST /v1/fetch/{owner}/{project}/{endpoint}` creates a job for endpoint execution.
 //! Returns 202 + job_id for async execution, or 200 if all nodes are cached.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use axum::{
     Json, Router,
@@ -148,7 +148,6 @@ async fn fetch_endpoint(
         &commit,
         endpoint_def,
         &published.runtime.transforms,
-        &published.runtime.environments,
         &resolved_params,
         &exec_order,
         project.id,
@@ -300,7 +299,6 @@ async fn check_all_node_caches(
     commit: &crate::db::Commit,
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
     transforms: &HashMap<String, RuntimeTransformDef>,
-    environments: &HashMap<String, RuntimeEnvironmentDef>,
     resolved_params: &serde_json::Value,
     exec_order: &[String],
     project_id: Uuid,
@@ -336,6 +334,13 @@ async fn check_all_node_caches(
                 node_name
             ))
         })?;
+        let bound_inputs = edge_map
+            .get(node_name.as_str())
+            .into_iter()
+            .flatten()
+            .map(|(name, _)| *name);
+        validate_node_input_bindings(node_name, transform_def, bound_inputs)
+            .map_err(ApiError::Internal)?;
 
         let mat_hash = compute_materialized_hash(
             state,
@@ -343,7 +348,6 @@ async fn check_all_node_caches(
             node_def,
             transform_def,
             endpoint_def,
-            environments,
             resolved_params,
             &edge_map,
             &node_outputs,
@@ -382,7 +386,6 @@ async fn compute_materialized_hash(
     node_def: &ozzy_core::toml_spec::NodeDef,
     transform_def: &RuntimeTransformDef,
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
-    environments: &HashMap<String, RuntimeEnvironmentDef>,
     resolved_params: &serde_json::Value,
     edge_map: &HashMap<&str, Vec<(&str, &str)>>,
     node_outputs: &HashMap<String, NodeOutput>,
@@ -411,17 +414,8 @@ async fn compute_materialized_hash(
     let secrets_hash = resolve_secrets_hash(state, project_id, transform_def).await?;
 
     // Resolve environment
-    let env_def = environments
-        .get(&transform_def.environment)
-        .ok_or_else(|| {
-            ApiError::Internal(anyhow::anyhow!(
-                "Environment '{}' not found for transform '{}'",
-                transform_def.environment,
-                node_def.transform,
-            ))
-        })?;
-
-    let (_env_image, env_hash, lockfile_hash) = resolve_environment_image(state, env_def).await?;
+    let (_env_image, env_hash, lockfile_hash) =
+        resolve_environment_image(state, &transform_def.environment).await?;
 
     // Compute source_hash
     let (source_hash, function_name) = compute_source_hash(transform_def, node_def, source_dir)?;
@@ -890,6 +884,51 @@ pub(crate) async fn retrieve_source_code(
     Ok(tmp)
 }
 
+pub(crate) fn validate_node_input_bindings<'a>(
+    node_name: &str,
+    transform_def: &RuntimeTransformDef,
+    bound_inputs: impl IntoIterator<Item = &'a str>,
+) -> Result<(), anyhow::Error> {
+    let expected = transform_def
+        .inputs
+        .ports
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let actual = bound_inputs
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+
+    if actual == expected {
+        return Ok(());
+    }
+
+    let missing = expected
+        .difference(&actual)
+        .cloned()
+        .collect::<Vec<_>>();
+    let unexpected = actual
+        .difference(&expected)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut problems = Vec::new();
+    if !missing.is_empty() {
+        problems.push(format!("missing inputs {:?}", missing));
+    }
+    if !unexpected.is_empty() {
+        problems.push(format!("unexpected inputs {:?}", unexpected));
+    }
+
+    anyhow::bail!(
+        "Node '{}' does not satisfy transform '{}' input ports: {}",
+        node_name,
+        transform_def.versioned_name,
+        problems.join(", ")
+    );
+}
+
 pub(crate) fn endpoint_requires_source_code(
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
     transforms: &HashMap<String, RuntimeTransformDef>,
@@ -1125,8 +1164,10 @@ pub(crate) fn content_type_to_extension(content_type: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::RuntimeTransformDef;
+    use crate::registry::{RuntimeEnvironmentDef, RuntimeTransformDef, VersionedName};
     use ozzy_core::toml_spec::{EdgeDef, EndpointDef, EndpointParamDef, NodeDef};
+    use ozzy_types::ports::{TypedPort, TypedPortSet};
+    use ozzy_types::syntax::TypeRefExpr;
 
     fn make_test_endpoint() -> EndpointDef {
         let mut nodes = HashMap::new();
@@ -1164,12 +1205,29 @@ mod tests {
 
     fn make_runtime_transform(source: Option<&str>, command: Option<&str>) -> RuntimeTransformDef {
         RuntimeTransformDef {
+            versioned_name: VersionedName::new("clean_wp", "1"),
+            row_id: Uuid::nil(),
             source: source.map(str::to_owned),
             command: command.map(str::to_owned),
-            environment: "python_sci@1".to_string(),
+            environment: RuntimeEnvironmentDef {
+                versioned_name: VersionedName::new("python_sci", "1"),
+                row_id: Uuid::nil(),
+                definition: ozzy_core::toml_spec::PublishedEnvironmentDef::BaseLockfile {
+                    base: "python".to_string(),
+                    installer: ozzy_core::toml_spec::BaseLockfileInstaller::PipRequirements,
+                    lockfile_content: "polars==1.0\n".to_string(),
+                },
+            },
             description: None,
-            input_names: Vec::new(),
-            output_names: vec!["result".to_string()],
+            inputs: TypedPortSet::default(),
+            outputs: {
+                let mut ports = TypedPortSet::default();
+                ports.insert(
+                    "result",
+                    TypedPort::new(TypeRefExpr::new("std/Result", Some("1".to_string()))),
+                );
+                ports
+            },
             params_schema: serde_json::json!({}),
             network: false,
             secrets: Vec::new(),
@@ -1256,6 +1314,25 @@ mod tests {
         let err = compute_source_hash(&transform, &node, &None).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("requires extracted source code"));
+    }
+
+    #[test]
+    fn test_validate_node_input_bindings_rejects_missing_and_unexpected_ports() {
+        let mut transform = make_runtime_transform(None, Some("python -m analyze"));
+        transform.inputs.insert(
+            "raw",
+            TypedPort::new(TypeRefExpr::new("std/Input", Some("1".to_string()))),
+        );
+        transform.inputs.insert(
+            "meta",
+            TypedPort::new(TypeRefExpr::new("std/Meta", Some("1".to_string()))),
+        );
+
+        let err =
+            validate_node_input_bindings("clean", &transform, ["raw", "extra"].into_iter()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing inputs [\"meta\"]"));
+        assert!(msg.contains("unexpected inputs [\"extra\"]"));
     }
 
     #[test]
