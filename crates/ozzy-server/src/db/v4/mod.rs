@@ -1,8 +1,7 @@
-//! Database layer for the registry server.
+//! v4 registry persistence models and query helpers.
 
 pub mod models;
 pub mod queries;
-pub mod v4;
 
 pub use models::*;
 pub use queries::*;

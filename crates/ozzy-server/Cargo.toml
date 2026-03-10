@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 # Internal
 ozzy-core.workspace = true
+ozzy-types.workspace = true
 blake3.workspace = true
 
 # Async runtime
@@ -89,4 +90,3 @@ tempfile.workspace = true
 rand.workspace = true
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
-

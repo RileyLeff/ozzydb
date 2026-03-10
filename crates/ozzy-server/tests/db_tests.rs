@@ -5,7 +5,7 @@
 //!
 //! Example using Docker:
 //! ```bash
-//! docker run -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=ozzy_test postgres:17-alpine
+//! docker run -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=ozzy_test postgres:18-alpine
 //! export DATABASE_URL=postgres://postgres:test@localhost/ozzy_test
 //! cargo test --package ozzy-server db_tests
 //! ```

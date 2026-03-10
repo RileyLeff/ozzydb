@@ -1,3 +1,5 @@
+#![recursion_limit = "4096"]
+
 //! OzzyDB Registry Server Library
 //!
 //! v2: The server stores data atoms, manages environments, orchestrates compute,

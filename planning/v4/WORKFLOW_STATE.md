@@ -1,7 +1,7 @@
 # v4 Workflow State
 
-## Current Phase: Phase 1 complete; Phase 2 next
-## Current Step: Phase 1 follow-up fix pass complete
+## Current Phase: Phase 2 underway
+## Current Step: Phase 2.1 registry persistence complete
 
 ## Completed Steps
 
@@ -137,8 +137,35 @@
 - Renamed conformance helpers so latest attempt and latest completed report/evidence are not conflated.
 - Updated the architecture doc to stage the remaining verifier-surface gap across Phases 2 through 5.
 
+### Phase 2.1: First-class registry persistence objects
+- Added a new additive PostgreSQL migration:
+  - `crates/ozzy-server/migrations/004_v4_registry.sql`
+- Introduced a dedicated v4 DB module:
+  - `crates/ozzy-server/src/db/v4/mod.rs`
+  - `crates/ozzy-server/src/db/v4/models.rs`
+  - `crates/ozzy-server/src/db/v4/queries.rs`
+- Added first-class persisted rows for:
+  - canonical types
+  - type versions
+  - environment versions
+  - transform versions
+  - transform ports
+  - registry revisions
+  - registry revision memberships
+  - project revisions
+  - invocations
+  - conformance records
+  - verification attempts
+- Scoped versioned registry objects by `project_id` and kept canonical types global.
+- Added project-to-registry revision integrity checks in the schema instead of relying on application convention.
+- Updated local Postgres references from `postgres:17-alpine` to `postgres:18-alpine` in the checked-in Docker Compose/test docs that would otherwise fail to run the new `uuidv7()` migration.
+- Added a DB-backed v4 round-trip test in the server lib test module. It is authored and compiled as part of the library surface, but it was not executed in this environment because `DATABASE_URL` is unset.
+- Verification for this checkpoint:
+  - `cargo check -p ozzy-server`
+  - `cargo test -p ozzy-types`
+
 ## Open Review Findings
-- None blocking for the Phase 1 library surface.
+- None blocking for Phase 2.1.
 - Review artifacts:
   - `planning/reviews/v4/01_phase1_1_review.md`
   - `planning/reviews/v4/02_phase1_2_review.md`
@@ -147,12 +174,13 @@
   - `planning/reviews/v4/05_phase1_5_review.md`
   - `planning/reviews/v4/06_phase1_consolidation_review.md`
   - `planning/reviews/v4/07_phase1_followup_fix_review.md`
+  - `planning/reviews/v4/08_phase2_1_review.md`
 
 ## Current Blockers
 - None.
 
 ## Next Recommended Steps
-1. Start Phase 2.1 and model first-class registry persistence objects.
+1. Start Phase 2.2 and load immutable `RegistrySnapshot`s from the new persisted revision objects.
 2. Keep `commit_state` out of the new runtime path entirely.
 3. Preserve the Phase 1 rule that semantic subsystems return typed errors instead of panicking or falling back.
 4. Extend the remaining unsupported builtin verifier surface only when the required registry/artifact/execution infrastructure exists.

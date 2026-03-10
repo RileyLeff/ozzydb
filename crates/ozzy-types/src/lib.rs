@@ -1,3 +1,5 @@
+#![recursion_limit = "4096"]
+
 //! OzzyDB Types - v4 type system foundation.
 //!
 //! This crate holds the core data model for the OzzyDB v4 type system:

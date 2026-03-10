@@ -115,6 +115,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Internal crates
 ozzy-core = { path = "crates/ozzy-core" }
+ozzy-types = { path = "crates/ozzy-types" }
 
 [profile.release]
 lto = true
