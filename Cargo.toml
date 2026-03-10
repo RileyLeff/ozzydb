@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ozzy-core",
+    "crates/ozzy-types",
     "crates/ozzy-cli",
     "crates/ozzy-server",
 ]
