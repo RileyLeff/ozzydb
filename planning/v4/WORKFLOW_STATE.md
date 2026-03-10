@@ -1,7 +1,7 @@
 # v4 Workflow State
 
 ## Current Phase: Phase 1 - Core Type System Foundation
-## Current Step: Step 1.1 complete (`crates/ozzy-types` scaffold); Step 1.2 next
+## Current Step: Step 1.2 complete (core type language); Step 1.3 next
 
 ## Completed Steps
 
@@ -31,19 +31,50 @@
 - Tightened `TypeRegistry` duplicate detection to reject duplicate `(name, version)` pairs.
 - Removed redundant embedded port names from `TypedPort`.
 
+### Phase 1.2: Implement the core type language
+- Added explicit builtin leaf types:
+  - `bytes`
+  - `utf8`
+  - `json`
+  - `parquet`
+  - `string`
+  - `bool`
+  - `int64`
+  - `float64`
+  - `date`
+  - `datetime`
+- Added explicit builtin constructors:
+  - `csv`
+  - `unit`
+  - `min`
+  - `max`
+  - `enum`
+  - `nullable`
+- Added `TypeDefinition` and `TypeDefinitions` for local named aliases before publication.
+- Added local expression validation for:
+  - unknown local refs
+  - invalid builtin version pins
+  - duplicate record fields
+  - constructor argument shape
+  - empty intersections
+- Changed `TypeExpr::Table` to wrap a row type expression, not just an inline record.
+- Changed float literals to `OrderedFloat<f64>` so the syntax layer can derive `Eq`/`Hash` ahead of canonicalization.
+
 ## Open Review Findings
-- None blocking for Phase 1.1.
-- Review artifact: `planning/reviews/v4/01_phase1_1_review.md`
+- None blocking for Phase 1.2.
+- Review artifacts:
+  - `planning/reviews/v4/01_phase1_1_review.md`
+  - `planning/reviews/v4/02_phase1_2_review.md`
 
 ## Current Blockers
 - None.
 
 ## Next Recommended Steps
-1. Start Step 1.2 and implement the v1 type language constructors and named aliases in `ozzy-types`.
-2. Keep the implementation narrow: AST and constructors first, no relation solver or planner work beyond the v1 baseline.
-3. Re-run the review loop after Step 1.2 lands.
+1. Start Step 1.3 and implement canonicalization, strict equivalence, conservative refinement, and `never`.
+2. Keep the implementation narrow: no planner logic and no server wiring yet.
+3. Re-run the review loop after Step 1.3 lands.
 
 ## Notes
 - Existing v3 planning and type-system notes remain background context only.
 - Frontend work remains intentionally deferred.
-- External review tooling degraded during the Phase 1.1 checkpoint; see `planning/reviews/v4/review_notes_README.md`.
+- External review tooling degraded during the Phase 1 checkpoint; see `planning/reviews/v4/review_notes_README.md`.

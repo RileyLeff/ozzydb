@@ -17,7 +17,10 @@ pub use conformance::{ConformanceRecord, ConformanceStatus};
 pub use ports::{TypedPort, TypedPortSet};
 pub use registry::{RegistryError, TypeRegistry, TypeVersion, TypeVersionId};
 pub use relations::{RelationQuery, RelationVerdict, TypeRelation};
-pub use syntax::{ConstructorExpr, Literal, RecordExpr, RecordField, TypeExpr, TypeRefExpr};
+pub use syntax::{
+    BuiltinConstructor, BuiltinType, ConstructorExpr, Literal, RecordExpr, RecordField,
+    TypeDefinition, TypeDefinitions, TypeExpr, TypeLanguageError, TypeRefExpr,
+};
 pub use verify::{VerificationReport, VerificationVerdict};
 
 #[cfg(test)]
@@ -35,13 +38,14 @@ mod tests {
             TypeExpr::intersection(vec![
                 TypeExpr::ref_("float64"),
                 TypeExpr::Constructor(ConstructorExpr {
-                    name: "unit".to_string(),
+                    name: BuiltinConstructor::Unit,
                     args: BTreeMap::from([(
                         "value".to_string(),
                         Literal::String("MPa".to_string()),
                     )]),
                 }),
-            ]),
+            ])
+            .expect("non-empty intersection"),
         );
         let type_id = type_version.id.clone();
 

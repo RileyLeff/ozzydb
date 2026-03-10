@@ -11,3 +11,7 @@ Gemini CLI currently emits MCP startup noise in this environment, and one-shot C
 ### Early v4 scaffolding should prefer deletion over speculative abstraction
 
 Phase 1 crate scaffolding is allowed to be narrow and incomplete. It should model the v4 architecture directly, avoid compatibility layers, and delete redundant fields or identifiers as soon as they are discovered.
+
+### The v1 constructor surface is intentionally closed
+
+`BuiltinConstructor` is a fixed enum in Phase 1. This is intentional. v4 should start with an explicit, auditable builtin constructor set rather than preserving stringly-typed extensibility before the canonicalization and verifier model are stable.

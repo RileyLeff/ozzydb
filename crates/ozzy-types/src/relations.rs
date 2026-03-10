@@ -35,7 +35,8 @@ mod tests {
             left: TypeExpr::intersection(vec![
                 TypeExpr::ref_("float64"),
                 TypeExpr::ref_("WaterPotential"),
-            ]),
+            ])
+            .expect("non-empty intersection"),
             relation: TypeRelation::Refines,
             right: TypeExpr::ref_("float64"),
         };
