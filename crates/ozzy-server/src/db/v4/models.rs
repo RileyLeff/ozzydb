@@ -145,6 +145,59 @@ pub struct StoredInvocation {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    Blob,
+    Manifest,
+}
+
+impl ArtifactKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blob => "blob",
+            Self::Manifest => "manifest",
+        }
+    }
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct StoredArtifact {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub artifact_kind: String,
+    pub content_hash: Option<String>,
+    pub manifest: Option<Value>,
+    pub source_invocation_id: Option<Uuid>,
+    pub created_by: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationArtifactBindingKind {
+    Input,
+    Output,
+}
+
+impl InvocationArtifactBindingKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+        }
+    }
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct StoredInvocationArtifact {
+    pub invocation_id: Uuid,
+    pub binding_kind: String,
+    pub port_name: String,
+    pub artifact_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct StoredConformanceRecord {
     pub id: Uuid,

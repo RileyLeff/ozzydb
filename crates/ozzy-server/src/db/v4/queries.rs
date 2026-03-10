@@ -10,7 +10,8 @@ use ozzy_types::registry::TypeVersion;
 use ozzy_types::verify::{VerificationReport, VerificationVerdict};
 
 use super::models::{
-    StoredCanonicalType, StoredConformanceRecord, StoredEnvironmentVersion, StoredInvocation,
+    ArtifactKind, InvocationArtifactBindingKind, StoredArtifact, StoredCanonicalType,
+    StoredConformanceRecord, StoredEnvironmentVersion, StoredInvocation, StoredInvocationArtifact,
     StoredProjectRevision, StoredRegistryRevision, StoredTransformPort, StoredTransformVersion,
     StoredTypeVersion, StoredVerificationAttempt, TransformPortKind,
 };
@@ -650,6 +651,121 @@ impl Database {
         Ok(row)
     }
 
+    pub async fn insert_v4_artifact(
+        &self,
+        project_id: Uuid,
+        artifact_kind: ArtifactKind,
+        content_hash: Option<&str>,
+        manifest: Option<Value>,
+        source_invocation_id: Option<Uuid>,
+        created_by: Uuid,
+    ) -> Result<StoredArtifact, V4QueryError> {
+        let row = sqlx::query_as::<_, StoredArtifact>(
+            r#"
+            INSERT INTO v4_artifacts (
+                project_id,
+                artifact_kind,
+                content_hash,
+                manifest,
+                source_invocation_id,
+                created_by
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING *
+            "#,
+        )
+        .bind(project_id)
+        .bind(artifact_kind.as_str())
+        .bind(content_hash)
+        .bind(manifest)
+        .bind(source_invocation_id)
+        .bind(created_by)
+        .fetch_one(self.pool())
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_v4_artifact(
+        &self,
+        artifact_id: Uuid,
+    ) -> Result<Option<StoredArtifact>, V4QueryError> {
+        let row = sqlx::query_as::<_, StoredArtifact>("SELECT * FROM v4_artifacts WHERE id = $1")
+            .bind(artifact_id)
+            .fetch_optional(self.pool())
+            .await?;
+        Ok(row)
+    }
+
+    pub async fn list_v4_artifacts(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<StoredArtifact>, V4QueryError> {
+        let rows = sqlx::query_as::<_, StoredArtifact>(
+            r#"
+            SELECT *
+            FROM v4_artifacts
+            WHERE project_id = $1
+            ORDER BY created_at DESC, id DESC
+            "#,
+        )
+        .bind(project_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn insert_v4_invocation_artifact(
+        &self,
+        invocation_id: Uuid,
+        binding_kind: InvocationArtifactBindingKind,
+        port_name: &str,
+        artifact_id: Uuid,
+    ) -> Result<StoredInvocationArtifact, V4QueryError> {
+        sqlx::query_as::<_, StoredInvocationArtifact>(
+            r#"
+            INSERT INTO v4_invocation_artifacts (
+                invocation_id,
+                binding_kind,
+                port_name,
+                artifact_id
+            )
+            VALUES ($1, $2, $3, $4)
+            RETURNING *
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(binding_kind.as_str())
+        .bind(port_name)
+        .bind(artifact_id)
+        .fetch_one(self.pool())
+        .await
+        .map_err(|err| {
+            map_duplicate(
+                err,
+                "invocation artifact binding",
+                format!("{invocation_id}/{}/{port_name}", binding_kind.as_str()),
+            )
+        })
+    }
+
+    pub async fn list_v4_invocation_artifacts(
+        &self,
+        invocation_id: Uuid,
+    ) -> Result<Vec<StoredInvocationArtifact>, V4QueryError> {
+        let rows = sqlx::query_as::<_, StoredInvocationArtifact>(
+            r#"
+            SELECT *
+            FROM v4_invocation_artifacts
+            WHERE invocation_id = $1
+            ORDER BY binding_kind, port_name
+            "#,
+        )
+        .bind(invocation_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
     pub async fn insert_v4_conformance_record(
         &self,
         artifact_id: Uuid,
@@ -956,9 +1072,64 @@ mod tests {
             .await
             .expect("insert invocation");
 
-        let artifact_id = uuid::Uuid::new_v4();
+        db.upsert_content_ref(
+            "artifact_hash_1",
+            "content/ar/ti/artifact_hash_1.bin",
+            "application/octet-stream",
+            42,
+        )
+        .await
+        .expect("upsert content ref");
+        let blob_artifact = db
+            .insert_v4_artifact(
+                project.id,
+                ArtifactKind::Blob,
+                Some("artifact_hash_1"),
+                None,
+                None,
+                user.id,
+            )
+            .await
+            .expect("insert blob artifact");
+        let manifest_artifact = db
+            .insert_v4_artifact(
+                project.id,
+                ArtifactKind::Manifest,
+                None,
+                Some(json!({
+                    "kind": "bundle",
+                    "members": ["artifact_hash_1"]
+                })),
+                Some(invocation.id),
+                user.id,
+            )
+            .await
+            .expect("insert manifest artifact");
+        let input_binding = db
+            .insert_v4_invocation_artifact(
+                invocation.id,
+                InvocationArtifactBindingKind::Input,
+                "raw",
+                blob_artifact.id,
+            )
+            .await
+            .expect("insert input artifact binding");
+        let output_binding = db
+            .insert_v4_invocation_artifact(
+                invocation.id,
+                InvocationArtifactBindingKind::Output,
+                "result",
+                manifest_artifact.id,
+            )
+            .await
+            .expect("insert output artifact binding");
+
         let conformance = db
-            .insert_v4_conformance_record(artifact_id, stored_type.id, ConformanceStatus::Declared)
+            .insert_v4_conformance_record(
+                manifest_artifact.id,
+                stored_type.id,
+                ConformanceStatus::Declared,
+            )
             .await
             .expect("insert conformance");
 
@@ -1002,8 +1173,21 @@ mod tests {
             .await
             .expect("load project revision")
             .expect("project revision exists");
+        let loaded_blob_artifact = db
+            .get_v4_artifact(blob_artifact.id)
+            .await
+            .expect("load blob artifact")
+            .expect("blob artifact exists");
+        let loaded_artifacts = db
+            .list_v4_artifacts(project.id)
+            .await
+            .expect("list v4 artifacts");
+        let loaded_invocation_artifacts = db
+            .list_v4_invocation_artifacts(invocation.id)
+            .await
+            .expect("list invocation artifacts");
         let loaded_conformance = db
-            .get_v4_conformance_record(artifact_id, stored_type.id)
+            .get_v4_conformance_record(manifest_artifact.id, stored_type.id)
             .await
             .expect("load conformance")
             .expect("conformance exists");
@@ -1032,6 +1216,15 @@ mod tests {
                 .is_some()
         );
         assert_eq!(loaded_project_revision.project_meta["owner"], "user");
+        assert_eq!(loaded_blob_artifact.artifact_kind, "blob");
+        assert_eq!(
+            loaded_blob_artifact.content_hash.as_deref(),
+            Some("artifact_hash_1")
+        );
+        assert_eq!(loaded_artifacts.len(), 2);
+        assert_eq!(loaded_invocation_artifacts.len(), 2);
+        assert_eq!(input_binding.binding_kind, "input");
+        assert_eq!(output_binding.binding_kind, "output");
         assert_eq!(loaded_conformance.status, "declared");
     }
 

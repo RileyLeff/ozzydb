@@ -323,7 +323,7 @@
   - `planning/reviews/v4/16_phase3_3_env_identity_fix_review.md`
 
 ## Open Review Findings
-- None blocking for Phase 3.3.
+- None blocking for Phase 4.1.
 - Residual legacy debt to delete later:
   - `commit_state` helpers in the DB/test surface
   - `register_commit_atomically(...)` in legacy tests
@@ -344,12 +344,13 @@
 - `planning/reviews/v4/14_phase3_2_review.md`
 - `planning/reviews/v4/15_phase3_3_review.md`
 - `planning/reviews/v4/16_phase3_3_env_identity_fix_review.md`
+- `planning/reviews/v4/17_phase4_1_review.md`
 
 ## Current Blockers
 - None.
 
 ## Next Recommended Steps
-1. Start Phase 4.1 and introduce the first-class `Artifact` model.
+1. Start Phase 4.2 and replace the dedicated collection ontology with typed bundle/collection artifacts.
 2. Remove the remaining dead `commit_state`/legacy publication helpers once the old DB/e2e tests are moved onto the v4 publication path.
 3. Preserve the Phase 1 rule that semantic subsystems return typed errors instead of panicking or falling back.
 4. Extend the remaining unsupported builtin verifier surface only when the required registry/artifact/execution infrastructure exists.
@@ -358,3 +359,20 @@
 - Existing v3 planning and type-system notes remain background context only.
 - Frontend work remains intentionally deferred.
 - External review tooling degraded during the Phase 1 checkpoint; see `planning/reviews/v4/review_notes_README.md`.
+
+### Phase 4.1: First-class `Artifact` foundation
+- Added additive v4 persistence for `Artifact` in `migrations/007_v4_artifacts.sql`.
+- Introduced:
+  - `v4_artifacts`
+  - `v4_invocation_artifacts`
+- Added Rust models and query helpers for:
+  - blob artifacts backed by `content_refs`
+  - manifest artifacts
+  - invocation input/output artifact bindings
+- Kept the old `DataAtom` / `Collection` runtime surface untouched for now; this phase is foundation only.
+- Deliberately deferred the `v4_conformance_records.artifact_id` foreign key to Phase 4.3 so the artifact-backed conformance migration can happen explicitly instead of being forced indirectly by schema timing.
+- Verification for this checkpoint:
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/17_phase4_1_review.md`
