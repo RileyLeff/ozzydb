@@ -347,6 +347,7 @@
 - `planning/reviews/v4/17_phase4_1_review.md`
 - `planning/reviews/v4/18_phase4_2_review.md`
 - `planning/reviews/v4/19_phase4_3_review.md`
+- `planning/reviews/v4/20_pre_phase5_source_fallback_fix_review.md`
 
 ## Current Blockers
 - None.
@@ -422,3 +423,18 @@
   - `cargo check -p ozzy-server --tests`
 - Review artifact:
   - `planning/reviews/v4/19_phase4_3_review.md`
+
+### Pre-Phase 5.1 cleanup: eliminate source fallback
+- Removed the remaining degraded source path before execution integration work.
+- `retrieve_source_code(...)` now returns explicit errors instead of warning and returning `None`.
+- Added `endpoint_requires_source_code(...)` so source retrieval is only required for endpoints that actually contain source-backed transforms.
+- Source-backed transforms now fail if extracted source is missing instead of hashing `transform_name:commit_sha`.
+- Cache checking now propagates materialization/source errors instead of treating them as cache misses.
+- Added fetch-level unit tests covering:
+  - source-required endpoint detection
+  - source-transform hashing failure when extracted source is absent
+- Verification for this checkpoint:
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/20_pre_phase5_source_fallback_fix_review.md`

@@ -62,7 +62,14 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
     // Safety: source_dir TempDir lives for the duration of run_job_inner. Spawned tasks
     // receive PathBuf clones, not TempDir refs. All tasks are awaited per-wave before
     // the function returns, so the TempDir outlives all tasks.
-    let source_dir = super::super::api::v1::fetch::retrieve_source_code(state, &commit).await;
+    let source_dir = if super::super::api::v1::fetch::endpoint_requires_source_code(
+        endpoint_def,
+        &published.runtime.transforms,
+    )? {
+        Some(super::super::api::v1::fetch::retrieve_source_code(state, &commit).await?)
+    } else {
+        None
+    };
     let edge_map = super::super::api::v1::fetch::build_edge_map(endpoint_def);
     let platform = ozzy_core::platform::PlatformFingerprint::detect();
     let platform_hash = platform.hash();
@@ -294,7 +301,7 @@ async fn execute_node(
 
     // Compute source hash
     let (source_hash, function_name) =
-        compute_source_hash(transform_def, node_def, commit, source_dir)?;
+        compute_source_hash(transform_def, node_def, source_dir)?;
 
     let params_schema_hash =
         super::super::api::v1::fetch::compute_params_schema_hash(transform_def)?;
@@ -839,7 +846,6 @@ async fn resolve_edge_source(
 fn compute_source_hash(
     transform_def: &RuntimeTransformDef,
     node_def: &ozzy_core::toml_spec::NodeDef,
-    commit: &crate::db::Commit,
     source_dir: Option<&std::path::Path>,
 ) -> Result<(String, String), anyhow::Error> {
     if let Some(source) = &transform_def.source {
@@ -851,36 +857,36 @@ fn compute_source_hash(
             )
         })?;
         let file_path_str = source.split(':').next().unwrap_or(source);
-        let hash = if let Some(sd) = source_dir {
-            let source_root = sd
-                .canonicalize()
-                .map_err(|e| anyhow::anyhow!("Failed to canonicalize source dir: {}", e))?;
-            let full_path = sd.join(file_path_str);
-            let canonical = full_path.canonicalize().map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to canonicalize source path '{}' for transform '{}': {}",
-                    file_path_str,
-                    node_def.transform,
-                    e
-                )
-            })?;
-            if !canonical.starts_with(&source_root) {
-                anyhow::bail!("Source path '{}' escapes source directory", file_path_str);
-            }
-            let bytes = std::fs::read(&canonical).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to read source file '{}' for transform '{}': {}",
-                    file_path_str,
-                    node_def.transform,
-                    e
-                )
-            })?;
-            ozzy_core::hash::blake3_hash(&bytes)
-        } else {
-            ozzy_core::hash::blake3_hash(
-                format!("{}:{}", node_def.transform, commit.git_commit_sha).as_bytes(),
+        let sd = source_dir.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Source transform '{}' requires extracted source code, but none was loaded",
+                node_def.transform
             )
-        };
+        })?;
+        let source_root = sd
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("Failed to canonicalize source dir: {}", e))?;
+        let full_path = sd.join(file_path_str);
+        let canonical = full_path.canonicalize().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to canonicalize source path '{}' for transform '{}': {}",
+                file_path_str,
+                node_def.transform,
+                e
+            )
+        })?;
+        if !canonical.starts_with(&source_root) {
+            anyhow::bail!("Source path '{}' escapes source directory", file_path_str);
+        }
+        let bytes = std::fs::read(&canonical).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to read source file '{}' for transform '{}': {}",
+                file_path_str,
+                node_def.transform,
+                e
+            )
+        })?;
+        let hash = ozzy_core::hash::blake3_hash(&bytes);
         Ok((hash, func.to_owned()))
     } else if let Some(command) = &transform_def.command {
         Ok((

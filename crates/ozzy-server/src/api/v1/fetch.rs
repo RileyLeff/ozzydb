@@ -305,7 +305,17 @@ async fn check_all_node_caches(
     exec_order: &[String],
     project_id: Uuid,
 ) -> Result<(bool, HashMap<String, NodeOutput>), ApiError> {
-    let source_dir = retrieve_source_code(state, commit).await;
+    let source_dir = if endpoint_requires_source_code(endpoint_def, transforms)
+        .map_err(ApiError::Internal)?
+    {
+        Some(
+            retrieve_source_code(state, commit)
+                .await
+                .map_err(ApiError::Internal)?,
+        )
+    } else {
+        None
+    };
     let platform = ozzy_core::platform::PlatformFingerprint::detect();
     let platform_hash = platform.hash();
     let edge_map = build_edge_map(endpoint_def);
@@ -327,9 +337,8 @@ async fn check_all_node_caches(
             ))
         })?;
 
-        let mat_hash = match compute_materialized_hash(
+        let mat_hash = compute_materialized_hash(
             state,
-            commit,
             node_name,
             node_def,
             transform_def,
@@ -342,11 +351,7 @@ async fn check_all_node_caches(
             &platform_hash,
             project_id,
         )
-        .await
-        {
-            Ok(h) => h,
-            Err(_) => return Ok((false, node_outputs)),
-        };
+        .await?;
 
         if let Some(cached) = state.db.get_materialized_cache(&mat_hash).await? {
             state.db.touch_materialized_cache(&mat_hash).await?;
@@ -373,7 +378,6 @@ async fn check_all_node_caches(
 /// Resolves inputs, computes transform hash, and combines into materialized hash.
 async fn compute_materialized_hash(
     state: &AppState,
-    commit: &crate::db::Commit,
     node_name: &str,
     node_def: &ozzy_core::toml_spec::NodeDef,
     transform_def: &RuntimeTransformDef,
@@ -420,8 +424,7 @@ async fn compute_materialized_hash(
     let (_env_image, env_hash, lockfile_hash) = resolve_environment_image(state, env_def).await?;
 
     // Compute source_hash
-    let (source_hash, function_name) =
-        compute_source_hash(transform_def, node_def, commit, source_dir)?;
+    let (source_hash, function_name) = compute_source_hash(transform_def, node_def, source_dir)?;
 
     let params_schema_hash =
         compute_params_schema_hash(transform_def).map_err(|e| ApiError::Internal(e.into()))?;
@@ -452,7 +455,6 @@ async fn compute_materialized_hash(
 fn compute_source_hash(
     transform_def: &RuntimeTransformDef,
     node_def: &ozzy_core::toml_spec::NodeDef,
-    commit: &crate::db::Commit,
     source_dir: &Option<tempfile::TempDir>,
 ) -> Result<(String, String), ApiError> {
     if let Some(source) = &transform_def.source {
@@ -464,39 +466,39 @@ fn compute_source_hash(
             ))
         })?;
         let file_path_str = source.split(':').next().unwrap_or(source);
-        let hash = if let Some(sd) = source_dir {
-            let source_root = sd.path().canonicalize().map_err(|e| {
-                ApiError::Internal(anyhow::anyhow!("Failed to canonicalize source dir: {}", e))
-            })?;
-            let full_path = sd.path().join(file_path_str);
-            let canonical = full_path.canonicalize().map_err(|e| {
-                ApiError::Internal(anyhow::anyhow!(
-                    "Failed to canonicalize source path '{}' for transform '{}': {}",
-                    file_path_str,
-                    node_def.transform,
-                    e
-                ))
-            })?;
-            if !canonical.starts_with(&source_root) {
-                return Err(ApiError::BadRequest(format!(
-                    "Source path '{}' escapes source directory",
-                    file_path_str,
-                )));
-            }
-            let bytes = std::fs::read(&canonical).map_err(|e| {
-                ApiError::Internal(anyhow::anyhow!(
-                    "Failed to read source file '{}' for transform '{}': {}",
-                    file_path_str,
-                    node_def.transform,
-                    e
-                ))
-            })?;
-            ozzy_core::hash::blake3_hash(&bytes)
-        } else {
-            ozzy_core::hash::blake3_hash(
-                format!("{}:{}", node_def.transform, commit.git_commit_sha).as_bytes(),
-            )
-        };
+        let sd = source_dir.as_ref().ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!(
+                "Source transform '{}' requires extracted source code, but none was loaded",
+                node_def.transform
+            ))
+        })?;
+        let source_root = sd.path().canonicalize().map_err(|e| {
+            ApiError::Internal(anyhow::anyhow!("Failed to canonicalize source dir: {}", e))
+        })?;
+        let full_path = sd.path().join(file_path_str);
+        let canonical = full_path.canonicalize().map_err(|e| {
+            ApiError::Internal(anyhow::anyhow!(
+                "Failed to canonicalize source path '{}' for transform '{}': {}",
+                file_path_str,
+                node_def.transform,
+                e
+            ))
+        })?;
+        if !canonical.starts_with(&source_root) {
+            return Err(ApiError::BadRequest(format!(
+                "Source path '{}' escapes source directory",
+                file_path_str,
+            )));
+        }
+        let bytes = std::fs::read(&canonical).map_err(|e| {
+            ApiError::Internal(anyhow::anyhow!(
+                "Failed to read source file '{}' for transform '{}': {}",
+                file_path_str,
+                node_def.transform,
+                e
+            ))
+        })?;
+        let hash = ozzy_core::hash::blake3_hash(&bytes);
         Ok((hash, func.to_owned()))
     } else if let Some(command) = &transform_def.command {
         Ok((
@@ -840,44 +842,31 @@ async fn resolve_edge_source_inner(
 pub(crate) async fn retrieve_source_code(
     state: &AppState,
     commit: &crate::db::Commit,
-) -> Option<tempfile::TempDir> {
-    let source_storage =
-        match crate::storage::ContentStorage::from_config_with_prefix(&state.config, "source") {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("Failed to create source storage: {}", e);
-                return None;
-            }
-        };
+) -> Result<tempfile::TempDir, anyhow::Error> {
+    let source_storage = crate::storage::ContentStorage::from_config_with_prefix(&state.config, "source")
+        .map_err(|e| anyhow::anyhow!("Failed to create source storage: {}", e))?;
 
-    let tarball_bytes = match source_storage.get(&commit.git_commit_sha, "tar.gz").await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::warn!(
+    let tarball_bytes = source_storage
+        .get(&commit.git_commit_sha, "tar.gz")
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
                 "Source tarball not found for commit {} (sha {}): {}",
                 commit.id,
                 commit.git_commit_sha,
                 e
-            );
-            return None;
-        }
-    };
+            )
+        })?;
 
-    let tmp = match tempfile::tempdir() {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!("Failed to create temp dir for source extraction: {}", e);
-            return None;
-        }
-    };
+    let tmp = tempfile::tempdir()
+        .map_err(|e| anyhow::anyhow!("Failed to create temp dir for source extraction: {}", e))?;
 
     let tarball_path = tmp.path().join("source.tar.gz");
-    if let Err(e) = tokio::fs::write(&tarball_path, &tarball_bytes).await {
-        tracing::warn!("Failed to write source tarball: {}", e);
-        return None;
-    }
+    tokio::fs::write(&tarball_path, &tarball_bytes)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to write source tarball: {}", e))?;
 
-    let output = match tokio::process::Command::new("tar")
+    let output = tokio::process::Command::new("tar")
         .arg("xzf")
         .arg(&tarball_path)
         .arg("-C")
@@ -885,25 +874,40 @@ pub(crate) async fn retrieve_source_code(
         .arg("--strip-components=1")
         .output()
         .await
-    {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!("Failed to run tar for source extraction: {}", e);
-            return None;
-        }
-    };
+        .map_err(|e| anyhow::anyhow!("Failed to run tar for source extraction: {}", e))?;
 
     if !output.status.success() {
-        tracing::warn!(
+        anyhow::bail!(
             "tar extraction failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        return None;
     }
 
-    tokio::fs::remove_file(&tarball_path).await.ok();
+    tokio::fs::remove_file(&tarball_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to remove temporary source tarball: {}", e))?;
 
-    Some(tmp)
+    Ok(tmp)
+}
+
+pub(crate) fn endpoint_requires_source_code(
+    endpoint_def: &ozzy_core::toml_spec::EndpointDef,
+    transforms: &HashMap<String, RuntimeTransformDef>,
+) -> Result<bool, anyhow::Error> {
+    for (node_name, node_def) in &endpoint_def.nodes {
+        let transform_def = transforms.get(&node_def.transform).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Transform '{}' not found for node '{}'",
+                node_def.transform,
+                node_name
+            )
+        })?;
+        if transform_def.source.is_some() {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 /// Resolve the environment image for a transform.
@@ -1121,6 +1125,7 @@ pub(crate) fn content_type_to_extension(content_type: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::RuntimeTransformDef;
     use ozzy_core::toml_spec::{EdgeDef, EndpointDef, EndpointParamDef, NodeDef};
 
     fn make_test_endpoint() -> EndpointDef {
@@ -1154,6 +1159,20 @@ mod tests {
                     to: "step2.input".to_string(),
                 },
             ],
+        }
+    }
+
+    fn make_runtime_transform(source: Option<&str>, command: Option<&str>) -> RuntimeTransformDef {
+        RuntimeTransformDef {
+            source: source.map(str::to_owned),
+            command: command.map(str::to_owned),
+            environment: "python_sci@1".to_string(),
+            description: None,
+            input_names: Vec::new(),
+            output_names: vec!["result".to_string()],
+            params_schema: serde_json::json!({}),
+            network: false,
+            secrets: Vec::new(),
         }
     }
 
@@ -1207,6 +1226,36 @@ mod tests {
 
         assert_eq!(map.get("step2").unwrap().len(), 1);
         assert_eq!(map.get("step2").unwrap()[0], ("input", "step1"));
+    }
+
+    #[test]
+    fn test_endpoint_requires_source_code_when_any_node_uses_source() {
+        let endpoint = make_test_endpoint();
+        let transforms = HashMap::from([
+            (
+                "qc".to_string(),
+                make_runtime_transform(Some("transforms/qc.py:run"), None),
+            ),
+            (
+                "analyze".to_string(),
+                make_runtime_transform(None, Some("python -m analyze")),
+            ),
+        ]);
+
+        assert!(endpoint_requires_source_code(&endpoint, &transforms).unwrap());
+    }
+
+    #[test]
+    fn test_compute_source_hash_requires_extracted_source_for_source_transforms() {
+        let transform = make_runtime_transform(Some("transforms/qc.py:run"), None);
+        let node = NodeDef {
+            transform: "qc".to_string(),
+            params: HashMap::new(),
+        };
+
+        let err = compute_source_hash(&transform, &node, &None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("requires extracted source code"));
     }
 
     #[test]
