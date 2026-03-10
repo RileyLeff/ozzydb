@@ -13,6 +13,7 @@ pub mod config;
 pub mod db;
 pub mod environments;
 pub mod git;
+mod publication;
 pub mod registry;
 pub mod runners;
 pub mod storage;

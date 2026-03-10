@@ -1,7 +1,7 @@
 # v4 Workflow State
 
 ## Current Phase: Phase 3 underway
-## Current Step: Phase 3.1 complete; ready for Phase 3.2 publication bundle rewrite
+## Current Step: Phase 3.2 complete; ready for Phase 3.3 environment publication/realization split
 
 ## Completed Steps
 
@@ -264,8 +264,39 @@
   - `cargo check -p ozzy-server`
   - `cargo test -p ozzy-types`
 
+### Phase 3.2: Atomic publication bundle rewrite
+- Added `crates/ozzy-server/src/publication.rs` as the dedicated v4 publication subsystem.
+- Replaced the live push write path so `POST /v1/push` now publishes:
+  - versioned type rows
+  - versioned environment rows
+  - versioned transform rows and typed ports
+  - a new registry revision
+  - a new project revision
+  in one transaction
+- Made the publication transaction lock the project row so per-project auto-version assignment is serialized.
+- Added numeric auto-version assignment for:
+  - `TypeVersion`
+  - `EnvironmentVersion`
+  - `TransformVersion`
+  with reuse of existing equivalent definitions instead of duplicate republishing
+- Rewrote published transform payloads so transform port type refs are stored as explicit published version pins.
+- Tightened authored transform-port validation so direct builtin refs are rejected; ports must use:
+  - a named local type from `[types]`, or
+  - a published version-pinned type ref
+- Tightened duplicate push handling so an existing same-SHA commit without a published v4 project revision is treated as an internal error, not a valid idempotent success case.
+- Kept provider-specific environment building as post-publication async work; this remains a Phase 3.3 concern.
+- Verification for this checkpoint:
+  - `cargo test -p ozzy-core`
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/14_phase3_2_review.md`
+
 ## Open Review Findings
-- None blocking for Phase 2.3.
+- None blocking for Phase 3.2.
+- Residual legacy debt to delete later:
+  - `commit_state` helpers in the DB/test surface
+  - `register_commit_atomically(...)` in legacy tests
 - Review artifacts:
   - `planning/reviews/v4/01_phase1_1_review.md`
   - `planning/reviews/v4/02_phase1_2_review.md`
@@ -278,13 +309,16 @@
   - `planning/reviews/v4/09_phase2_2_review.md`
   - `planning/reviews/v4/10_phase2_2_cleanup_review.md`
   - `planning/reviews/v4/11_phase2_3_review.md`
+  - `planning/reviews/v4/12_phase2_3_cleanup_review.md`
+  - `planning/reviews/v4/13_phase3_1_review.md`
+  - `planning/reviews/v4/14_phase3_2_review.md`
 
 ## Current Blockers
 - None.
 
 ## Next Recommended Steps
-1. Start Phase 3.1 and replace the remaining v3 parser/control structures with a v4-oriented `ozzy.toml` ingestion surface.
-2. Rewrite push so it publishes `PublishedProjectRevision` payloads directly instead of leaving them as manual/test-only objects.
+1. Start Phase 3.3 and separate logical `EnvironmentVersion` publication from provider-specific realization more explicitly.
+2. Remove the remaining dead `commit_state`/legacy publication helpers once the old DB/e2e tests are moved onto the v4 publication path.
 3. Preserve the Phase 1 rule that semantic subsystems return typed errors instead of panicking or falling back.
 4. Extend the remaining unsupported builtin verifier surface only when the required registry/artifact/execution infrastructure exists.
 

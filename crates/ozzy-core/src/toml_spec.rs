@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use ozzy_types::parse::{TypeParseError, parse_type_expr, parse_type_ref};
+use ozzy_types::parse::{parse_type_expr, parse_type_ref, TypeParseError};
 use ozzy_types::ports::{TypedPort, TypedPortSet};
 use ozzy_types::syntax::{BuiltinType, TypeDefinition, TypeDefinitions};
 use serde::{Deserialize, Serialize};
@@ -608,15 +608,24 @@ impl OzzyToml {
         }
 
         if type_ref.version.is_none() {
-            if BuiltinType::parse(&type_ref.name).is_some()
-                || self.types.get(&type_ref.name).is_some()
-            {
+            if self.types.get(&type_ref.name).is_some() {
+                return;
+            }
+            if BuiltinType::parse(&type_ref.name).is_some() {
+                errors.push(ValidationError {
+                    location: location.to_string(),
+                    message: format!(
+                        "Builtin type \"{}\" cannot be used directly on transform ports; define it in [types] and reference that named type instead.",
+                        type_ref.name
+                    ),
+                    suggestion: None,
+                });
                 return;
             }
             errors.push(ValidationError {
                 location: location.to_string(),
                 message: format!(
-                    "Type reference \"{}\" is not a builtin and not defined in [types].",
+                    "Type reference \"{}\" is not defined in [types] and is not a published version-pinned type reference.",
                     type_ref.name
                 ),
                 suggestion: suggest_name(
@@ -1072,7 +1081,7 @@ type = "float64"
     }
 
     #[test]
-    fn validate_requires_local_or_builtin_input_types() {
+    fn validate_requires_local_or_published_input_types() {
         let toml = r#"
 [project]
 name = "test"
@@ -1090,15 +1099,13 @@ environment = "default"
 type = "UnknownLocalType"
 
 [transforms.t.outputs.result]
-type = "parquet"
+type = "PublishedThing@1"
 "#;
         let doc = OzzyToml::parse(toml).expect("toml should parse");
         let errors = doc.validate();
-        assert!(
-            errors
-                .iter()
-                .any(|err| err.location == "transforms.t.inputs.raw")
-        );
+        assert!(errors
+            .iter()
+            .any(|err| err.location == "transforms.t.inputs.raw"));
     }
 
     #[test]
@@ -1124,12 +1131,41 @@ type = "parquet"
 "#;
         let doc = OzzyToml::parse(toml).expect("toml should parse");
         let errors = doc.validate();
-        assert!(
-            errors
-                .iter()
-                .any(|err| err.location == "transforms.t.inputs.raw"
-                    && err.message.contains("cannot be version-pinned"))
-        );
+        assert!(errors
+            .iter()
+            .any(|err| err.location == "transforms.t.inputs.raw"
+                && err.message.contains("cannot be version-pinned")));
+    }
+
+    #[test]
+    fn validate_rejects_unversioned_builtin_port_types() {
+        let toml = r#"
+[project]
+name = "test"
+owner = "user"
+
+[environments.default]
+base = "ozzydb/python:3.12"
+lockfile = "uv.lock"
+
+[transforms.t]
+source = "t.py:run"
+environment = "default"
+
+[transforms.t.inputs.raw]
+type = "parquet"
+
+[transforms.t.outputs.result]
+type = "PublishedThing@1"
+"#;
+        let doc = OzzyToml::parse(toml).expect("toml should parse");
+        let errors = doc.validate();
+        assert!(errors.iter().any(|err| {
+            err.location == "transforms.t.inputs.raw"
+                && err
+                    .message
+                    .contains("cannot be used directly on transform ports")
+        }));
     }
 
     #[test]
@@ -1161,11 +1197,9 @@ type = "Csv"
 "#;
         let doc = OzzyToml::parse(toml).expect("toml should parse");
         let errors = doc.validate();
-        assert!(
-            errors
-                .iter()
-                .any(|err| err.location == "transforms.t.outputs")
-        );
+        assert!(errors
+            .iter()
+            .any(|err| err.location == "transforms.t.outputs"));
     }
 
     #[test]
@@ -1203,10 +1237,8 @@ to = "n.wrong"
 "#;
         let doc = OzzyToml::parse(toml).expect("toml should parse");
         let errors = doc.validate();
-        assert!(
-            errors
-                .iter()
-                .any(|err| err.location == "endpoints.ep.edges[0].to")
-        );
+        assert!(errors
+            .iter()
+            .any(|err| err.location == "endpoints.ep.edges[0].to"));
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! `POST /v1/push` receives a git commit reference, fetches and validates
 //! the `ozzy.toml` from the repository, caches the source tarball, and
-//! stores the parsed commit state.
+//! publishes a new v4 project revision.
 
 use axum::{Json, Router, extract::State, routing::post};
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,7 @@ use super::access::enforce_write_access;
 use super::auth::ApiError;
 use crate::AppState;
 use crate::auth::middleware::AuthUser;
+use crate::publication::{PublishCommitInput, PublishOutcome, publish_v4_commit_atomically};
 
 /// Build the push router.
 pub fn router() -> Router<AppState> {
@@ -70,7 +71,7 @@ fn is_valid_sha(sha: &str) -> bool {
 /// 3. Parse and validate ozzy.toml
 /// 4. Verify referenced source files exist at the commit
 /// 5. Cache source tarball
-/// 6. Insert commit + commit_state records
+/// 6. Publish a v4 registry revision + project revision atomically
 /// 7. Upsert ref if specified
 async fn push(
     State(state): State<AppState>,
@@ -172,6 +173,19 @@ async fn push(
         .get_commit_by_sha(project.id, &git_commit_sha)
         .await?
     {
+        if state
+            .db
+            .get_v4_project_revision_by_commit(existing.id)
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?
+            .is_none()
+        {
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "commit {} exists without a published v4 project revision",
+                existing.id
+            )));
+        }
+
         // Still update the ref if a new one was specified
         if let Some(ref ref_name) = req.ref_name {
             state
@@ -298,44 +312,44 @@ async fn push(
         );
     }
 
-    // ── Compute ozzy.toml hash and store commit atomically ───────
+    // ── Compute ozzy.toml hash and publish atomically ────────────
     let toml_hash = ozzy_core::hash::blake3_hash(toml_str.as_bytes());
+    let publish_outcome = publish_v4_commit_atomically(
+        &state.db,
+        PublishCommitInput {
+            project_id: project.id,
+            pushed_by: auth.user.id,
+            git_provider: &req.git_provider,
+            git_repo: &req.git_repo,
+            git_commit_sha: &git_commit_sha,
+            ozzy_toml_hash: &toml_hash,
+            message: req.message.as_deref(),
+            ref_name: req.ref_name.as_deref(),
+            ozzy_toml_raw: &toml_str,
+            ozzy_toml: &ozzy_toml,
+        },
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.into()))?;
 
-    let environments_json =
-        serde_json::to_value(&ozzy_toml.environments).map_err(|e| ApiError::Internal(e.into()))?;
-    let transforms_json =
-        serde_json::to_value(&ozzy_toml.transforms).map_err(|e| ApiError::Internal(e.into()))?;
-    let endpoints_json =
-        serde_json::to_value(&ozzy_toml.endpoints).map_err(|e| ApiError::Internal(e.into()))?;
-    let project_meta_json =
-        serde_json::to_value(&ozzy_toml.project).map_err(|e| ApiError::Internal(e.into()))?;
-
-    let commit = state
-        .db
-        .register_commit_atomically(
-            project.id,
-            &req.git_provider,
-            &req.git_repo,
-            &git_commit_sha,
-            &toml_hash,
-            auth.user.id,
-            req.message.as_deref(),
-            &toml_str,
-            &environments_json,
-            &transforms_json,
-            &endpoints_json,
-            &project_meta_json,
-            req.ref_name.as_deref(),
-        )
-        .await
-        .map_err(ApiError::Internal)?;
+    let (commit, created_new_revision) = match publish_outcome {
+        PublishOutcome::Created { commit, bundle } => {
+            let _published_object_counts = (
+                bundle.types.len(),
+                bundle.environments.len(),
+                bundle.transforms.len(),
+            );
+            (commit, true)
+        }
+        PublishOutcome::Existing { commit } => (commit, false),
+    };
 
     // ── Spawn environment builds ───────────────────────────────
     // Environment builds run asynchronously — don't block the push response.
     // Report initial status as "building" (or "disabled" if compute is off).
     let mut env_statuses = Vec::new();
 
-    if state.compute.is_enabled() {
+    if created_new_revision && state.compute.is_enabled() {
         for (env_name, env_def) in &ozzy_toml.environments {
             let status = match env_def.tier() {
                 Some(ozzy_core::toml_spec::EnvironmentTier::Prebuilt { .. }) => "ready".to_string(),
@@ -357,7 +371,7 @@ async fn push(
             build_environments_async(&build_state, &build_envs, &build_git_repo, &build_git_sha)
                 .await;
         });
-    } else {
+    } else if created_new_revision {
         for env_name in ozzy_toml.environments.keys() {
             env_statuses.push(EnvironmentStatus {
                 name: env_name.clone(),
