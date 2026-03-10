@@ -13,6 +13,7 @@ pub mod config;
 pub mod db;
 pub mod environments;
 pub mod git;
+pub mod registry;
 pub mod runners;
 pub mod storage;
 
@@ -21,6 +22,7 @@ use std::sync::Arc;
 pub use config::Config;
 pub use db::Database;
 pub use git::GitHubProvider;
+pub use registry::{RegistrySnapshot, RegistrySnapshotCache};
 pub use storage::ContentStorage;
 
 /// Application state shared across handlers.
@@ -30,6 +32,7 @@ pub struct AppState {
     pub db: Database,
     pub storage: ContentStorage,
     pub git: GitHubProvider,
+    pub registry_snapshots: RegistrySnapshotCache,
     /// Compute provider registry (may be empty when compute is disabled).
     pub compute: compute::ComputeRegistry,
 }

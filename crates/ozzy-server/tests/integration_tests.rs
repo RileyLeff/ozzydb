@@ -129,6 +129,7 @@ impl TestServer {
             db: db.clone(),
             storage,
             git,
+            registry_snapshots: ozzy_server::registry::RegistrySnapshotCache::default(),
             compute,
         };
 

@@ -74,6 +74,7 @@ async fn build_test_app() -> Option<Router> {
         db,
         storage,
         git,
+        registry_snapshots: ozzy_server::registry::RegistrySnapshotCache::default(),
         compute,
     };
 

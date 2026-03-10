@@ -126,6 +126,7 @@ async fn main() -> Result<()> {
         db,
         storage,
         git,
+        registry_snapshots: ozzy_server::registry::RegistrySnapshotCache::default(),
         compute,
     };
 

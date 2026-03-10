@@ -1,7 +1,7 @@
 # v4 Workflow State
 
 ## Current Phase: Phase 2 underway
-## Current Step: Phase 2.1 registry persistence complete
+## Current Step: Phase 2.2 registry snapshots complete
 
 ## Completed Steps
 
@@ -164,6 +164,29 @@
   - `cargo check -p ozzy-server`
   - `cargo test -p ozzy-types`
 
+### Phase 2.2: Immutable registry snapshots
+- Added `crates/ozzy-server/src/registry.rs` as the server-side v4 snapshot layer.
+- Added immutable snapshot loading for pinned registry revisions.
+- Added a small in-memory `RegistrySnapshotCache` to `AppState`, keyed by registry revision ID.
+- Added snapshot loader entry points for:
+  - direct registry revision lookup
+  - project revision lookup by source commit
+- Added batch DB query helpers to load:
+  - registry revisions
+  - canonical types for a revision
+  - transform ports for all transforms in a revision
+- Reconstructed the following into immutable snapshot state:
+  - canonical types
+  - published type versions
+  - canonical-equivalence classes
+  - environment versions
+  - transform versions with typed input/output ports
+- Added a DB-gated server test that loads and reuses cached snapshots for one registry revision.
+- Verification for this checkpoint:
+  - `cargo check -p ozzy-server`
+  - `cargo test -p ozzy-types`
+  - the new DB-gated server snapshot test was authored, but the `cargo test -p ozzy-server ...` link/run step remained a poor checkpoint signal in this harness
+
 ## Open Review Findings
 - None blocking for Phase 2.1.
 - Review artifacts:
@@ -175,13 +198,14 @@
   - `planning/reviews/v4/06_phase1_consolidation_review.md`
   - `planning/reviews/v4/07_phase1_followup_fix_review.md`
   - `planning/reviews/v4/08_phase2_1_review.md`
+  - `planning/reviews/v4/09_phase2_2_review.md`
 
 ## Current Blockers
 - None.
 
 ## Next Recommended Steps
-1. Start Phase 2.2 and load immutable `RegistrySnapshot`s from the new persisted revision objects.
-2. Keep `commit_state` out of the new runtime path entirely.
+1. Start Phase 2.3 and make `v4_project_revisions` the server-visible replacement for "what a pushed commit means".
+2. Keep `commit_state` out of the new runtime path entirely when Phase 3/5 move push and fetch onto the v4 objects.
 3. Preserve the Phase 1 rule that semantic subsystems return typed errors instead of panicking or falling back.
 4. Extend the remaining unsupported builtin verifier surface only when the required registry/artifact/execution infrastructure exists.
 

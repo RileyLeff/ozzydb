@@ -89,6 +89,19 @@ impl Database {
         Ok(row)
     }
 
+    pub async fn get_v4_registry_revision(
+        &self,
+        registry_revision_id: Uuid,
+    ) -> Result<Option<StoredRegistryRevision>, V4QueryError> {
+        let row = sqlx::query_as::<_, StoredRegistryRevision>(
+            "SELECT * FROM v4_registry_revisions WHERE id = $1",
+        )
+        .bind(registry_revision_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row)
+    }
+
     pub async fn insert_v4_type_version(
         &self,
         project_id: Uuid,
@@ -478,6 +491,45 @@ impl Database {
             JOIN v4_transform_versions tv ON tv.id = rrtv.transform_version_id
             WHERE rrtv.registry_revision_id = $1
             ORDER BY tv.name, tv.version
+            "#,
+        )
+        .bind(registry_revision_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn list_v4_registry_revision_canonical_types(
+        &self,
+        registry_revision_id: Uuid,
+    ) -> Result<Vec<StoredCanonicalType>, V4QueryError> {
+        let rows = sqlx::query_as::<_, StoredCanonicalType>(
+            r#"
+            SELECT DISTINCT ct.*
+            FROM v4_registry_revision_type_versions rrtv
+            JOIN v4_type_versions tv ON tv.id = rrtv.type_version_id
+            JOIN v4_canonical_types ct ON ct.id = tv.canonical_type_id
+            WHERE rrtv.registry_revision_id = $1
+            ORDER BY ct.canonical_key
+            "#,
+        )
+        .bind(registry_revision_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn list_v4_registry_revision_transform_ports(
+        &self,
+        registry_revision_id: Uuid,
+    ) -> Result<Vec<StoredTransformPort>, V4QueryError> {
+        let rows = sqlx::query_as::<_, StoredTransformPort>(
+            r#"
+            SELECT tp.*
+            FROM v4_registry_revision_transform_versions rrtv
+            JOIN v4_transform_ports tp ON tp.transform_version_id = rrtv.transform_version_id
+            WHERE rrtv.registry_revision_id = $1
+            ORDER BY tp.transform_version_id, tp.port_kind, tp.port_name
             "#,
         )
         .bind(registry_revision_id)

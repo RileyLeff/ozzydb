@@ -58,7 +58,7 @@ pub enum RegistryError {
 }
 
 /// Minimal in-memory registry surface for Phase 1.1 scaffolding.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct TypeRegistry {
     types: BTreeMap<TypeVersionId, TypeVersion>,
 }
@@ -88,6 +88,14 @@ impl TypeRegistry {
         self.types
             .values()
             .find(|type_version| type_version.name == name && type_version.version == version)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&TypeVersionId, &TypeVersion)> {
+        self.types.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.types.len()
     }
 
     pub fn resolve_ref(&self, type_ref: &TypeRefExpr) -> Result<&TypeVersion, RegistryError> {
