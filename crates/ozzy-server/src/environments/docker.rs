@@ -1,7 +1,7 @@
 //! Docker-based environment builder.
 //!
-//! Builds Docker images from environment definitions using `docker build`.
-//! Images are tagged as `ozzydb-env:{env_hash}` for local use.
+//! Builds Docker images from published environment definitions using
+//! `docker build`. Images are tagged as `ozzydb-env:{env_hash}` for local use.
 
 use std::path::Path;
 use std::time::Instant;
@@ -12,10 +12,11 @@ use tokio::process::Command;
 use crate::config::ComputeConfig;
 use crate::db::Database;
 
-use super::hash::{EnvironmentContent, compute_env_hash};
 use super::{BuiltEnvironment, generate_dockerfile, image_tag};
 
-use ozzy_core::toml_spec::EnvironmentTier;
+use ozzy_core::toml_spec::PublishedEnvironmentDef;
+
+use super::hash::compute_env_hash;
 
 /// Build (or resolve) an environment image from its tier definition.
 ///
@@ -28,14 +29,13 @@ pub async fn build_environment(
     db: &Database,
     config: &ComputeConfig,
     env_name: &str,
-    tier: &EnvironmentTier,
-    content: &EnvironmentContent,
+    definition: &PublishedEnvironmentDef,
 ) -> Result<BuiltEnvironment> {
-    match tier {
-        EnvironmentTier::Prebuilt { image } => {
+    match definition {
+        PublishedEnvironmentDef::Prebuilt { image } => {
             // No build needed — use the image reference directly.
             // We still record it in the DB for tracking.
-            let env_hash = ozzy_core::hash::blake3_hash(image.as_bytes());
+            let env_hash = compute_env_hash(definition);
             if let Some(existing) = db.get_environment_image(&env_hash).await? {
                 return Ok(BuiltEnvironment {
                     env_hash,
@@ -61,8 +61,12 @@ pub async fn build_environment(
             })
         }
 
-        EnvironmentTier::BaseLockfile { base, lockfile } => {
-            let env_hash = compute_env_hash(tier, content);
+        PublishedEnvironmentDef::BaseLockfile {
+            base,
+            lockfile_path,
+            lockfile_content,
+        } => {
+            let env_hash = compute_env_hash(definition);
 
             // Check if already built
             if let Some(existing) = db.get_environment_image(&env_hash).await? {
@@ -84,9 +88,9 @@ pub async fn build_environment(
             }
 
             let tag = image_tag(&env_hash);
-            let dockerfile_content = generate_dockerfile(base, lockfile)
+            let dockerfile_content = generate_dockerfile(base, lockfile_path)
                 .map_err(|e| anyhow::anyhow!("Invalid environment definition: {}", e))?;
-            let lockfile_bytes = content.lockfile_content.as_deref().unwrap_or("").as_bytes();
+            let lockfile_bytes = lockfile_content.as_bytes();
 
             // Record pending build
             // Use upsert pattern: ignore conflict if another task already inserted
@@ -119,8 +123,11 @@ pub async fn build_environment(
             })
         }
 
-        EnvironmentTier::Dockerfile { dockerfile: _ } => {
-            let env_hash = compute_env_hash(tier, content);
+        PublishedEnvironmentDef::Dockerfile {
+            dockerfile_path: _,
+            dockerfile_content,
+        } => {
+            let env_hash = compute_env_hash(definition);
 
             // Check if already built
             if let Some(existing) = db.get_environment_image(&env_hash).await? {
@@ -142,10 +149,6 @@ pub async fn build_environment(
             }
 
             let tag = image_tag(&env_hash);
-            let dockerfile_content = content
-                .dockerfile_content
-                .as_deref()
-                .context("Dockerfile content required for Dockerfile tier")?;
 
             // Record pending build
             if db.get_environment_image(&env_hash).await?.is_none() {
@@ -249,6 +252,7 @@ pub async fn image_exists(tag: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::environments::build_type_str;
+    use ozzy_core::toml_spec::EnvironmentTier;
 
     #[test]
     fn test_image_tag_format() {

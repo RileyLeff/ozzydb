@@ -846,7 +846,12 @@ mod tests {
                 user.id,
                 "python_sci",
                 "1",
-                json!({ "base": "python", "lockfile": "uv.lock" }),
+                json!({
+                    "kind": "base_lockfile",
+                    "base": "python",
+                    "lockfile_path": "uv.lock",
+                    "lockfile_content": "polars==1.0\n"
+                }),
             )
             .await
             .expect("insert environment version");
@@ -903,11 +908,16 @@ mod tests {
                 registry_revision.id,
                 "test_ozzy_toml_hash",
                 "[types]\nWaterPotential = 'float64'\n",
-                json!({ "python_sci": { "base": "python", "lockfile": "uv.lock" } }),
+                json!({
+                    "python_sci": {
+                        "name": "python_sci",
+                        "version": "1"
+                    }
+                }),
                 json!({
                     "clean_wp": {
                         "source": "transforms/clean.py:clean",
-                        "environment": "python_sci",
+                        "environment": "python_sci@1",
                         "params": {},
                         "network": false,
                         "secrets": []
@@ -1004,12 +1014,16 @@ mod tests {
         assert_eq!(loaded_ports.len(), 1);
         assert_eq!(loaded_project_revision.id, project_revision.id);
         assert_eq!(
-            loaded_project_revision.environments["python_sci"]["base"],
-            "python"
+            loaded_project_revision.environments["python_sci"]["name"],
+            "python_sci"
+        );
+        assert_eq!(
+            loaded_project_revision.environments["python_sci"]["version"],
+            "1"
         );
         assert_eq!(
             loaded_project_revision.transforms["clean_wp"]["environment"],
-            "python_sci"
+            "python_sci@1"
         );
         assert!(
             loaded_project_revision

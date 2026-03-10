@@ -13,7 +13,9 @@ use base64::Engine as _;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::registry::{RuntimeTransformDef, load_published_project_revision_by_commit};
+use crate::registry::{
+    RuntimeEnvironmentDef, RuntimeTransformDef, load_published_project_revision_by_commit,
+};
 
 /// Run a job to completion: load context, execute DAG in parallel waves, update status.
 pub async fn run_job(state: AppState, job_id: Uuid) {
@@ -227,7 +229,7 @@ async fn execute_node(
     node_name: &str,
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
     transforms: &HashMap<String, RuntimeTransformDef>,
-    environments: &HashMap<String, ozzy_core::toml_spec::EnvironmentDef>,
+    environments: &HashMap<String, RuntimeEnvironmentDef>,
     commit: &crate::db::Commit,
     project_id: Uuid,
     endpoint_name: &str,
@@ -288,13 +290,7 @@ async fn execute_node(
         })?;
 
     let (env_image, env_hash, lockfile_hash) =
-        super::super::api::v1::fetch::resolve_environment_image_anyhow(
-            state,
-            env_def,
-            &commit.git_repo,
-            &commit.git_commit_sha,
-        )
-        .await?;
+        super::super::api::v1::fetch::resolve_environment_image_anyhow(state, env_def).await?;
 
     // Compute source hash
     let (source_hash, function_name) =

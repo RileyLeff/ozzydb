@@ -229,6 +229,14 @@ Rewrite push so it:
 
 Push should publish `EnvironmentVersion`s.
 
+Those published environment versions should be **content-bound**:
+
+- authored lockfile and Dockerfile paths are resolved at push time
+- the resulting published environment definition stores the resolved content
+- provider-specific build and mirror state is derived later from that published definition
+
+Project revision payloads should store versioned environment bindings, not raw authored environment path specs.
+
 Provider-specific image pushes and mirrors should be treated as realization/indexing work, not as part of the logical publication model.
 
 **Tests for Phase 3:**

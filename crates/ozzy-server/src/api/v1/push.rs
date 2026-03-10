@@ -4,6 +4,8 @@
 //! the `ozzy.toml` from the repository, caches the source tarball, and
 //! publishes a new v4 project revision.
 
+use std::collections::BTreeMap;
+
 use axum::{Json, Router, extract::State, routing::post};
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +13,9 @@ use super::access::enforce_write_access;
 use super::auth::ApiError;
 use crate::AppState;
 use crate::auth::middleware::AuthUser;
+use crate::db::v4::StoredEnvironmentVersion;
 use crate::publication::{PublishCommitInput, PublishOutcome, publish_v4_commit_atomically};
+use ozzy_core::toml_spec::{EnvironmentDef, EnvironmentTier, PublishedEnvironmentDef};
 
 /// Build the push router.
 pub fn router() -> Router<AppState> {
@@ -256,6 +260,14 @@ async fn push(
         )));
     }
 
+    let published_environments = resolve_published_environments(
+        &state,
+        &ozzy_toml.environments,
+        &req.git_repo,
+        &git_commit_sha,
+    )
+    .await?;
+
     // ── Verify referenced source files exist ─────────────────────
     for (name, transform) in &ozzy_toml.transforms {
         if let Some(source) = &transform.source {
@@ -327,21 +339,15 @@ async fn push(
             ref_name: req.ref_name.as_deref(),
             ozzy_toml_raw: &toml_str,
             ozzy_toml: &ozzy_toml,
+            published_environments: &published_environments,
         },
     )
     .await
     .map_err(|e| ApiError::Internal(e.into()))?;
 
-    let (commit, created_new_revision) = match publish_outcome {
-        PublishOutcome::Created { commit, bundle } => {
-            let _published_object_counts = (
-                bundle.types.len(),
-                bundle.environments.len(),
-                bundle.transforms.len(),
-            );
-            (commit, true)
-        }
-        PublishOutcome::Existing { commit } => (commit, false),
+    let (commit, created_new_revision, published_environment_versions) = match publish_outcome {
+        PublishOutcome::Created { commit, bundle } => (commit, true, Some(bundle.environments)),
+        PublishOutcome::Existing { commit } => (commit, false, None),
     };
 
     // ── Spawn environment builds ───────────────────────────────
@@ -350,11 +356,18 @@ async fn push(
     let mut env_statuses = Vec::new();
 
     if created_new_revision && state.compute.is_enabled() {
-        for (env_name, env_def) in &ozzy_toml.environments {
-            let status = match env_def.tier() {
-                Some(ozzy_core::toml_spec::EnvironmentTier::Prebuilt { .. }) => "ready".to_string(),
-                Some(_) => "building".to_string(),
-                None => "invalid".to_string(),
+        let published_environment_versions = published_environment_versions.ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!(
+                "created publication is missing published environments"
+            ))
+        })?;
+        for (env_name, env_row) in &published_environment_versions {
+            let definition: PublishedEnvironmentDef =
+                serde_json::from_value(env_row.definition.clone())
+                    .map_err(|err| ApiError::Internal(err.into()))?;
+            let status = match definition {
+                PublishedEnvironmentDef::Prebuilt { .. } => "ready".to_string(),
+                _ => "building".to_string(),
             };
             env_statuses.push(EnvironmentStatus {
                 name: env_name.clone(),
@@ -364,15 +377,12 @@ async fn push(
 
         // Spawn async build tasks for each environment
         let build_state = state.clone();
-        let build_envs = ozzy_toml.environments.clone();
-        let build_git_repo = req.git_repo.clone();
-        let build_git_sha = git_commit_sha.clone();
+        let build_envs = published_environment_versions;
         tokio::spawn(async move {
-            build_environments_async(&build_state, &build_envs, &build_git_repo, &build_git_sha)
-                .await;
+            build_environments_async(&build_state, &build_envs).await;
         });
     } else if created_new_revision {
-        for env_name in ozzy_toml.environments.keys() {
+        for env_name in published_environments.keys() {
             env_statuses.push(EnvironmentStatus {
                 name: env_name.clone(),
                 status: "disabled".to_string(),
@@ -441,87 +451,148 @@ async fn cache_source_tarball(
     Ok(())
 }
 
-/// Asynchronously build all environments declared in an `ozzy.toml`.
-///
-/// Fetches lockfile/Dockerfile content from git as needed, then delegates
-/// to the Docker builder. Errors are logged but don't propagate — the push
-/// has already succeeded.
-async fn build_environments_async(
+async fn resolve_published_environments(
     state: &AppState,
-    environments: &std::collections::HashMap<String, ozzy_core::toml_spec::EnvironmentDef>,
+    environments: &std::collections::HashMap<String, EnvironmentDef>,
     git_repo: &str,
     git_commit_sha: &str,
-) {
-    use crate::environments::docker::build_environment;
-    use crate::environments::hash::EnvironmentContent;
+) -> Result<BTreeMap<String, PublishedEnvironmentDef>, ApiError> {
+    let mut published = BTreeMap::new();
 
     for (env_name, env_def) in environments {
-        let tier = match env_def.tier() {
-            Some(t) => t,
-            None => {
-                tracing::warn!("Environment '{}' has invalid tier configuration", env_name);
-                continue;
-            }
-        };
+        let tier = env_def.tier().ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "Environment '{}' has invalid tier configuration",
+                env_name
+            ))
+        })?;
 
-        // Fetch content from git as needed
-        let content = match &tier {
-            ozzy_core::toml_spec::EnvironmentTier::BaseLockfile { lockfile, .. } => {
-                match state.git.get_file(git_repo, git_commit_sha, lockfile).await {
-                    Ok(bytes) => EnvironmentContent {
-                        lockfile_content: Some(String::from_utf8_lossy(&bytes).to_string()),
-                        ..Default::default()
-                    },
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to fetch lockfile '{}' for env '{}': {}",
-                            lockfile,
-                            env_name,
-                            e
-                        );
-                        continue;
-                    }
+        let definition = resolve_published_environment_definition(
+            state,
+            env_name,
+            &tier,
+            git_repo,
+            git_commit_sha,
+        )
+        .await?;
+        published.insert(env_name.clone(), definition);
+    }
+
+    Ok(published)
+}
+
+async fn resolve_published_environment_definition(
+    state: &AppState,
+    env_name: &str,
+    tier: &EnvironmentTier,
+    git_repo: &str,
+    git_commit_sha: &str,
+) -> Result<PublishedEnvironmentDef, ApiError> {
+    match tier {
+        EnvironmentTier::BaseLockfile { base, lockfile } => {
+            let bytes = state
+                .git
+                .get_file(git_repo, git_commit_sha, lockfile)
+                .await
+                .map_err(|e| map_environment_file_error(env_name, lockfile, e))?;
+            let lockfile_content = String::from_utf8(bytes).map_err(|_| {
+                ApiError::BadRequest(format!(
+                    "Environment '{}' lockfile '{}' is not valid UTF-8",
+                    env_name, lockfile
+                ))
+            })?;
+
+            Ok(PublishedEnvironmentDef::BaseLockfile {
+                base: base.clone(),
+                lockfile_path: lockfile.clone(),
+                lockfile_content,
+            })
+        }
+        EnvironmentTier::Dockerfile { dockerfile } => {
+            let bytes = state
+                .git
+                .get_file(git_repo, git_commit_sha, dockerfile)
+                .await
+                .map_err(|e| map_environment_file_error(env_name, dockerfile, e))?;
+            let dockerfile_content = String::from_utf8(bytes).map_err(|_| {
+                ApiError::BadRequest(format!(
+                    "Environment '{}' Dockerfile '{}' is not valid UTF-8",
+                    env_name, dockerfile
+                ))
+            })?;
+
+            Ok(PublishedEnvironmentDef::Dockerfile {
+                dockerfile_path: dockerfile.clone(),
+                dockerfile_content,
+            })
+        }
+        EnvironmentTier::Prebuilt { image } => Ok(PublishedEnvironmentDef::Prebuilt {
+            image: image.clone(),
+        }),
+    }
+}
+
+fn map_environment_file_error(env_name: &str, file_path: &str, err: anyhow::Error) -> ApiError {
+    if let Some(crate::git::github::GitError::FileNotFound { .. }) =
+        err.downcast_ref::<crate::git::github::GitError>()
+    {
+        ApiError::BadRequest(format!(
+            "Environment '{}' references '{}' which does not exist at commit",
+            env_name, file_path
+        ))
+    } else {
+        ApiError::Internal(err)
+    }
+}
+
+/// Asynchronously build all environments declared in an `ozzy.toml`.
+///
+/// Uses published environment versions, not authored `ozzy.toml` path specs.
+/// Errors are logged but don't propagate — the push has already succeeded.
+async fn build_environments_async(
+    state: &AppState,
+    environments: &BTreeMap<String, StoredEnvironmentVersion>,
+) {
+    use crate::environments::docker::build_environment;
+
+    for (env_name, env_row) in environments {
+        let definition: PublishedEnvironmentDef =
+            match serde_json::from_value(env_row.definition.clone()) {
+                Ok(definition) => definition,
+                Err(err) => {
+                    tracing::error!(
+                        "Failed to deserialize published environment '{}@{}' for '{}': {}",
+                        env_row.name,
+                        env_row.version,
+                        env_name,
+                        err
+                    );
+                    continue;
                 }
-            }
-            ozzy_core::toml_spec::EnvironmentTier::Dockerfile { dockerfile } => {
-                match state
-                    .git
-                    .get_file(git_repo, git_commit_sha, dockerfile)
-                    .await
-                {
-                    Ok(bytes) => EnvironmentContent {
-                        dockerfile_content: Some(String::from_utf8_lossy(&bytes).to_string()),
-                        ..Default::default()
-                    },
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to fetch Dockerfile '{}' for env '{}': {}",
-                            dockerfile,
-                            env_name,
-                            e
-                        );
-                        continue;
-                    }
-                }
-            }
-            ozzy_core::toml_spec::EnvironmentTier::Prebuilt { .. } => EnvironmentContent::default(),
-        };
+            };
 
-        // Pre-compute env hash so we can clean up on failure
-        let env_hash = crate::environments::hash::compute_env_hash(&tier, &content);
+        let env_hash = crate::environments::hash::compute_env_hash(&definition);
 
-        match build_environment(&state.db, &state.config.compute, env_name, &tier, &content).await {
+        match build_environment(&state.db, &state.config.compute, env_name, &definition).await {
             Ok(result) => {
                 tracing::info!(
-                    "Environment '{}' ready: {} (type={}, {}ms)",
+                    "Environment '{}' ({}@{}) ready: {} (type={}, {}ms)",
                     env_name,
+                    env_row.name,
+                    env_row.version,
                     result.image_ref,
                     result.build_type,
                     result.build_duration_ms.unwrap_or(0)
                 );
             }
             Err(e) => {
-                tracing::error!("Failed to build environment '{}': {}", env_name, e);
+                tracing::error!(
+                    "Failed to build environment '{}@{}' for '{}': {}",
+                    env_row.name,
+                    env_row.version,
+                    env_name,
+                    e
+                );
                 // Delete the pending row so a subsequent push can retry the build
                 if let Err(del_err) = state.db.delete_pending_environment_image(&env_hash).await {
                     tracing::error!(

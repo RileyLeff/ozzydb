@@ -11,7 +11,7 @@ use sqlx::{Postgres, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
-use ozzy_core::toml_spec::{EnvironmentDef, OzzyToml, TransformDef};
+use ozzy_core::toml_spec::{OzzyToml, PublishedEnvironmentDef, TransformDef};
 use ozzy_types::canonical::{CanonicalType, CanonicalizationError};
 use ozzy_types::ports::{TypedPort, TypedPortSet};
 use ozzy_types::registry::TypeVersion;
@@ -23,6 +23,7 @@ use crate::db::v4::{
     StoredCanonicalType, StoredEnvironmentVersion, StoredProjectRevision, StoredTransformPort,
     StoredTransformVersion, StoredTypeVersion,
 };
+use crate::registry::VersionedName;
 
 #[derive(Debug)]
 pub struct PublicationBundle {
@@ -121,6 +122,7 @@ pub struct PublishCommitInput<'a> {
     pub ref_name: Option<&'a str>,
     pub ozzy_toml_raw: &'a str,
     pub ozzy_toml: &'a OzzyToml,
+    pub published_environments: &'a BTreeMap<String, PublishedEnvironmentDef>,
 }
 
 pub async fn publish_v4_commit_atomically(
@@ -174,9 +176,14 @@ pub async fn publish_v4_commit_atomically(
     )
     .await?;
 
-    let bundle =
-        compile_publication_bundle(&mut tx, input.project_id, input.pushed_by, input.ozzy_toml)
-            .await?;
+    let bundle = compile_publication_bundle(
+        &mut tx,
+        input.project_id,
+        input.pushed_by,
+        input.ozzy_toml,
+        input.published_environments,
+    )
+    .await?;
 
     let registry_revision =
         insert_registry_revision_tx(&mut tx, input.project_id, input.pushed_by).await?;
@@ -220,11 +227,12 @@ async fn compile_publication_bundle(
     project_id: Uuid,
     published_by: Uuid,
     ozzy_toml: &OzzyToml,
+    published_environments: &BTreeMap<String, PublishedEnvironmentDef>,
 ) -> Result<PublicationBundle, PublicationError> {
     let local_types =
         resolve_or_publish_types(tx, project_id, published_by, &ozzy_toml.types).await?;
     let environments =
-        resolve_or_publish_environments(tx, project_id, published_by, &ozzy_toml.environments)
+        resolve_or_publish_environments(tx, project_id, published_by, published_environments)
             .await?;
     let (transforms, rewritten_transforms, referenced_external_types) =
         resolve_or_publish_transforms(
@@ -243,7 +251,7 @@ async fn compile_publication_bundle(
     }
 
     Ok(PublicationBundle {
-        environments_payload: serde_json::to_value(&ozzy_toml.environments)?,
+        environments_payload: build_environment_bindings_payload(&environments)?,
         transforms_payload: serde_json::to_value(&rewritten_transforms)?,
         endpoints_payload: serde_json::to_value(&ozzy_toml.endpoints)?,
         project_meta_payload: serde_json::to_value(&ozzy_toml.project)?,
@@ -306,7 +314,7 @@ async fn resolve_or_publish_environments(
     tx: &mut Transaction<'_, Postgres>,
     project_id: Uuid,
     published_by: Uuid,
-    authored: &std::collections::HashMap<String, EnvironmentDef>,
+    authored: &BTreeMap<String, PublishedEnvironmentDef>,
 ) -> Result<BTreeMap<String, StoredEnvironmentVersion>, PublicationError> {
     let mut published = BTreeMap::new();
 
@@ -340,6 +348,21 @@ async fn resolve_or_publish_environments(
     }
 
     Ok(published)
+}
+
+fn build_environment_bindings_payload(
+    environments: &BTreeMap<String, StoredEnvironmentVersion>,
+) -> Result<Value, serde_json::Error> {
+    let bindings = environments
+        .iter()
+        .map(|(authored_name, row)| {
+            (
+                authored_name.clone(),
+                VersionedName::new(row.name.clone(), row.version.clone()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    serde_json::to_value(bindings)
 }
 
 type ExternalTypeRowMap = BTreeMap<String, StoredTypeVersion>;
@@ -427,7 +450,7 @@ async fn resolve_or_publish_transforms(
         let rewritten_transform = TransformDef {
             source: transform.source.clone(),
             command: transform.command.clone(),
-            environment: transform.environment.clone(),
+            environment: format!("{}@{}", environment.name, environment.version),
             description: transform.description.clone(),
             inputs: rewritten_inputs,
             outputs: rewritten_outputs,
@@ -1368,6 +1391,12 @@ transform = "clean"
 
         let ozzy_toml = OzzyToml::parse(&toml).expect("parse ozzy.toml");
         assert!(ozzy_toml.validate().is_empty(), "validation should pass");
+        let published_environments = BTreeMap::from([(
+            "python".to_string(),
+            PublishedEnvironmentDef::Prebuilt {
+                image: "python:3.12-slim".to_string(),
+            },
+        )]);
 
         let input_1 = PublishCommitInput {
             project_id: project.id,
@@ -1380,6 +1409,7 @@ transform = "clean"
             ref_name: Some("main"),
             ozzy_toml_raw: &toml,
             ozzy_toml: &ozzy_toml,
+            published_environments: &published_environments,
         };
         let first = publish_v4_commit_atomically(&db, input_1)
             .await
@@ -1403,6 +1433,7 @@ transform = "clean"
             ref_name: Some("main"),
             ozzy_toml_raw: &toml,
             ozzy_toml: &ozzy_toml,
+            published_environments: &published_environments,
         };
         let second = publish_v4_commit_atomically(&db, input_2)
             .await

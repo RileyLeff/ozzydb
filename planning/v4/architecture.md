@@ -81,6 +81,8 @@ An `EnvironmentVersion` may be defined from:
 
 But those are construction modes, not the conceptual center. The important thing is that the environment is a reproducible execution substrate with stable identity.
 
+In practice, v4 should publish **content-bound environment definitions**, not authored path specs. If an authored environment points at `uv.lock` or `Dockerfile`, publication should resolve those files at the pushed source commit and store the resulting published environment definition as the `EnvironmentVersion` payload. Provider-specific image builds then realize that published definition later.
+
 ### 3. `TransformVersion`
 
 A versioned typed transform implementation.
@@ -690,6 +692,8 @@ The transaction should:
 If anything fails before commit, nothing is published.
 
 Provider-specific environment realization work such as image building or registry mirroring happens only after this transaction commits.
+
+Project revision payloads should bind authored environment names to published versioned environments. They should not store raw authored environment path specs as runtime control-plane truth.
 
 ### Version conflict rules
 

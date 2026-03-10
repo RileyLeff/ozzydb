@@ -19,7 +19,9 @@ use super::auth::ApiError;
 use crate::AppState;
 use crate::auth::middleware::MaybeAuthUser;
 use crate::compute::orchestrator::NodeOutput;
-use crate::registry::{RuntimeTransformDef, load_published_project_revision_by_commit};
+use crate::registry::{
+    RuntimeEnvironmentDef, RuntimeTransformDef, load_published_project_revision_by_commit,
+};
 
 /// Build the fetch router.
 pub fn router() -> Router<AppState> {
@@ -298,7 +300,7 @@ async fn check_all_node_caches(
     commit: &crate::db::Commit,
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
     transforms: &HashMap<String, RuntimeTransformDef>,
-    environments: &HashMap<String, ozzy_core::toml_spec::EnvironmentDef>,
+    environments: &HashMap<String, RuntimeEnvironmentDef>,
     resolved_params: &serde_json::Value,
     exec_order: &[String],
     project_id: Uuid,
@@ -376,7 +378,7 @@ async fn compute_materialized_hash(
     node_def: &ozzy_core::toml_spec::NodeDef,
     transform_def: &RuntimeTransformDef,
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
-    environments: &HashMap<String, ozzy_core::toml_spec::EnvironmentDef>,
+    environments: &HashMap<String, RuntimeEnvironmentDef>,
     resolved_params: &serde_json::Value,
     edge_map: &HashMap<&str, Vec<(&str, &str)>>,
     node_outputs: &HashMap<String, NodeOutput>,
@@ -415,8 +417,7 @@ async fn compute_materialized_hash(
             ))
         })?;
 
-    let (_env_image, env_hash, lockfile_hash) =
-        resolve_environment_image(state, env_def, &commit.git_repo, &commit.git_commit_sha).await?;
+    let (_env_image, env_hash, lockfile_hash) = resolve_environment_image(state, env_def).await?;
 
     // Compute source_hash
     let (source_hash, function_name) =
@@ -908,37 +909,27 @@ pub(crate) async fn retrieve_source_code(
 /// Resolve the environment image for a transform.
 async fn resolve_environment_image(
     state: &AppState,
-    env_def: &ozzy_core::toml_spec::EnvironmentDef,
-    git_repo: &str,
-    git_commit_sha: &str,
+    env_def: &RuntimeEnvironmentDef,
 ) -> Result<(Option<crate::db::EnvironmentImage>, String, String), ApiError> {
-    resolve_environment_image_inner(state, env_def, git_repo, git_commit_sha)
+    resolve_environment_image_inner(state, env_def)
         .await
         .map_err(ApiError::Internal)
 }
 
 pub(crate) async fn resolve_environment_image_anyhow(
     state: &AppState,
-    env_def: &ozzy_core::toml_spec::EnvironmentDef,
-    git_repo: &str,
-    git_commit_sha: &str,
+    env_def: &RuntimeEnvironmentDef,
 ) -> Result<(Option<crate::db::EnvironmentImage>, String, String), anyhow::Error> {
-    resolve_environment_image_inner(state, env_def, git_repo, git_commit_sha).await
+    resolve_environment_image_inner(state, env_def).await
 }
 
 async fn resolve_environment_image_inner(
     state: &AppState,
-    env_def: &ozzy_core::toml_spec::EnvironmentDef,
-    git_repo: &str,
-    git_commit_sha: &str,
+    env_def: &RuntimeEnvironmentDef,
 ) -> Result<(Option<crate::db::EnvironmentImage>, String, String), anyhow::Error> {
-    let tier = env_def
-        .tier()
-        .ok_or_else(|| anyhow::anyhow!("Environment has invalid tier configuration"))?;
-
-    match &tier {
-        ozzy_core::toml_spec::EnvironmentTier::Prebuilt { image } => {
-            let env_hash = ozzy_core::hash::blake3_hash(image.as_bytes());
+    match &env_def.definition {
+        ozzy_core::toml_spec::PublishedEnvironmentDef::Prebuilt { image } => {
+            let env_hash = crate::environments::hash::compute_env_hash(&env_def.definition);
             let env_image = crate::db::EnvironmentImage {
                 id: Uuid::nil(),
                 env_hash: env_hash.clone(),
@@ -950,39 +941,16 @@ async fn resolve_environment_image_inner(
                 built_at: Some(chrono::Utc::now()),
                 created_at: chrono::Utc::now(),
             };
-            let lockfile_hash = ozzy_core::hash::blake3_hash(b"");
+            let lockfile_hash =
+                crate::environments::hash::compute_lockfile_hash(&env_def.definition);
             Ok((Some(env_image), env_hash, lockfile_hash))
         }
-        ozzy_core::toml_spec::EnvironmentTier::BaseLockfile { lockfile, .. } => {
-            let lockfile_bytes = state
-                .git
-                .get_file(git_repo, git_commit_sha, lockfile)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to fetch lockfile '{}': {}", lockfile, e))?;
-            let lockfile_hash = ozzy_core::hash::blake3_hash(&lockfile_bytes);
-            let content = crate::environments::hash::EnvironmentContent {
-                lockfile_content: Some(String::from_utf8_lossy(&lockfile_bytes).to_string()),
-                ..Default::default()
-            };
-            let env_hash = crate::environments::hash::compute_env_hash(&tier, &content);
+        ozzy_core::toml_spec::PublishedEnvironmentDef::BaseLockfile { .. }
+        | ozzy_core::toml_spec::PublishedEnvironmentDef::Dockerfile { .. } => {
+            let env_hash = crate::environments::hash::compute_env_hash(&env_def.definition);
             let env_image = state.db.get_environment_image(&env_hash).await?;
-            Ok((env_image, env_hash, lockfile_hash))
-        }
-        ozzy_core::toml_spec::EnvironmentTier::Dockerfile { dockerfile } => {
-            let dockerfile_bytes = state
-                .git
-                .get_file(git_repo, git_commit_sha, dockerfile)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("Failed to fetch Dockerfile '{}': {}", dockerfile, e)
-                })?;
-            let content = crate::environments::hash::EnvironmentContent {
-                dockerfile_content: Some(String::from_utf8_lossy(&dockerfile_bytes).to_string()),
-                ..Default::default()
-            };
-            let env_hash = crate::environments::hash::compute_env_hash(&tier, &content);
-            let env_image = state.db.get_environment_image(&env_hash).await?;
-            let lockfile_hash = ozzy_core::hash::blake3_hash(b"");
+            let lockfile_hash =
+                crate::environments::hash::compute_lockfile_hash(&env_def.definition);
             Ok((env_image, env_hash, lockfile_hash))
         }
     }

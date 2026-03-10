@@ -1,45 +1,41 @@
-//! Environment hash computation.
+//! Published environment hash computation.
 //!
-//! Environment hashes are content-addressed identifiers for built images:
-//! - Tier 1 (BaseLockfile): `blake3(base_image + lockfile_content)`
-//! - Tier 2 (Dockerfile): `blake3(dockerfile_content)`
-//! - Tier 3 (Prebuilt): The image reference itself is used as-is (no hash computed)
+//! Environment realization is keyed by the fully resolved published definition,
+//! not by authored `ozzy.toml` path references. This keeps `EnvironmentVersion`
+//! identity separate from provider-specific image realization while still
+//! producing stable content-addressed build keys.
 
 use ozzy_core::hash::blake3_hash_components;
-use ozzy_core::toml_spec::EnvironmentTier;
+use ozzy_core::toml_spec::PublishedEnvironmentDef;
 
-/// Compute the environment hash for a given tier.
-///
-/// All tiers produce a blake3 hash:
-/// - BaseLockfile: `blake3(base_image + lockfile_content)`
-/// - Dockerfile: `blake3(dockerfile_content)`
-/// - Prebuilt: `blake3(image_reference)`
-pub fn compute_env_hash(tier: &EnvironmentTier, content: &EnvironmentContent) -> String {
-    match tier {
-        EnvironmentTier::BaseLockfile { base, .. } => {
-            let lockfile_content = content.lockfile_content.as_deref().unwrap_or("");
-            blake3_hash_components(&[base, lockfile_content])
+/// Compute the realization hash for a published environment definition.
+pub fn compute_env_hash(definition: &PublishedEnvironmentDef) -> String {
+    match definition {
+        PublishedEnvironmentDef::BaseLockfile {
+            base,
+            lockfile_path,
+            lockfile_content,
+        } => blake3_hash_components(&[base, lockfile_path, lockfile_content]),
+        PublishedEnvironmentDef::Dockerfile {
+            dockerfile_path,
+            dockerfile_content,
+        } => blake3_hash_components(&[dockerfile_path, dockerfile_content]),
+        PublishedEnvironmentDef::Prebuilt { image } => {
+            ozzy_core::hash::blake3_hash(image.as_bytes())
         }
-        EnvironmentTier::Dockerfile { .. } => {
-            let dockerfile_content = content.dockerfile_content.as_deref().unwrap_or("");
-            ozzy_core::hash::blake3_hash(dockerfile_content.as_bytes())
-        }
-        EnvironmentTier::Prebuilt { image } => ozzy_core::hash::blake3_hash(image.as_bytes()),
     }
 }
 
-/// Content needed for environment hash computation.
-///
-/// Depending on the tier, different fields are populated:
-/// - BaseLockfile: `lockfile_content` is required
-/// - Dockerfile: `dockerfile_content` is required
-/// - Prebuilt: no content needed
-#[derive(Debug, Default)]
-pub struct EnvironmentContent {
-    /// The raw lockfile content (for BaseLockfile tier).
-    pub lockfile_content: Option<String>,
-    /// The raw Dockerfile content (for Dockerfile tier).
-    pub dockerfile_content: Option<String>,
+/// Compute the lockfile hash contribution for transform hashing.
+pub fn compute_lockfile_hash(definition: &PublishedEnvironmentDef) -> String {
+    match definition {
+        PublishedEnvironmentDef::BaseLockfile {
+            lockfile_content, ..
+        } => ozzy_core::hash::blake3_hash(lockfile_content.as_bytes()),
+        PublishedEnvironmentDef::Dockerfile { .. } | PublishedEnvironmentDef::Prebuilt { .. } => {
+            ozzy_core::hash::blake3_hash(b"")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -48,142 +44,84 @@ mod tests {
 
     #[test]
     fn test_base_lockfile_hash_stable() {
-        let tier = EnvironmentTier::BaseLockfile {
+        let definition = PublishedEnvironmentDef::BaseLockfile {
             base: "ozzydb/python:3.12".to_string(),
-            lockfile: "uv.lock".to_string(),
-        };
-        let content = EnvironmentContent {
-            lockfile_content: Some("polars==1.0\npyarrow==17.0\n".to_string()),
-            ..Default::default()
+            lockfile_path: "uv.lock".to_string(),
+            lockfile_content: "polars==1.0\npyarrow==17.0\n".to_string(),
         };
 
-        let h1 = compute_env_hash(&tier, &content);
-        let h2 = compute_env_hash(&tier, &content);
+        let h1 = compute_env_hash(&definition);
+        let h2 = compute_env_hash(&definition);
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64);
     }
 
     #[test]
-    fn test_base_lockfile_hash_changes_with_base() {
-        let content = EnvironmentContent {
-            lockfile_content: Some("polars==1.0\n".to_string()),
-            ..Default::default()
-        };
-
-        let tier1 = EnvironmentTier::BaseLockfile {
+    fn test_base_lockfile_hash_changes_with_path() {
+        let d1 = PublishedEnvironmentDef::BaseLockfile {
             base: "ozzydb/python:3.12".to_string(),
-            lockfile: "uv.lock".to_string(),
+            lockfile_path: "requirements.txt".to_string(),
+            lockfile_content: "polars==1.0\n".to_string(),
         };
-        let tier2 = EnvironmentTier::BaseLockfile {
-            base: "ozzydb/python:3.11".to_string(),
-            lockfile: "uv.lock".to_string(),
-        };
-
-        let h1 = compute_env_hash(&tier1, &content);
-        let h2 = compute_env_hash(&tier2, &content);
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
-    fn test_base_lockfile_hash_changes_with_lockfile_content() {
-        let tier = EnvironmentTier::BaseLockfile {
+        let d2 = PublishedEnvironmentDef::BaseLockfile {
             base: "ozzydb/python:3.12".to_string(),
-            lockfile: "uv.lock".to_string(),
+            lockfile_path: "constraints.txt".to_string(),
+            lockfile_content: "polars==1.0\n".to_string(),
         };
 
-        let content1 = EnvironmentContent {
-            lockfile_content: Some("polars==1.0\n".to_string()),
-            ..Default::default()
-        };
-        let content2 = EnvironmentContent {
-            lockfile_content: Some("polars==2.0\n".to_string()),
-            ..Default::default()
-        };
-
-        let h1 = compute_env_hash(&tier, &content1);
-        let h2 = compute_env_hash(&tier, &content2);
-        assert_ne!(h1, h2);
+        assert_ne!(compute_env_hash(&d1), compute_env_hash(&d2));
     }
 
     #[test]
     fn test_dockerfile_hash_stable() {
-        let tier = EnvironmentTier::Dockerfile {
-            dockerfile: "Dockerfile".to_string(),
-        };
-        let content = EnvironmentContent {
-            dockerfile_content: Some("FROM python:3.12\nRUN pip install polars\n".to_string()),
-            ..Default::default()
+        let definition = PublishedEnvironmentDef::Dockerfile {
+            dockerfile_path: "Dockerfile".to_string(),
+            dockerfile_content: "FROM python:3.12\nRUN pip install polars\n".to_string(),
         };
 
-        let h1 = compute_env_hash(&tier, &content);
-        let h2 = compute_env_hash(&tier, &content);
+        let h1 = compute_env_hash(&definition);
+        let h2 = compute_env_hash(&definition);
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64);
     }
 
     #[test]
-    fn test_dockerfile_hash_changes_with_content() {
-        let tier = EnvironmentTier::Dockerfile {
-            dockerfile: "Dockerfile".to_string(),
-        };
-
-        let c1 = EnvironmentContent {
-            dockerfile_content: Some("FROM python:3.12\n".to_string()),
-            ..Default::default()
-        };
-        let c2 = EnvironmentContent {
-            dockerfile_content: Some("FROM python:3.11\n".to_string()),
-            ..Default::default()
-        };
-
-        let h1 = compute_env_hash(&tier, &c1);
-        let h2 = compute_env_hash(&tier, &c2);
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
     fn test_prebuilt_returns_hash() {
-        let tier = EnvironmentTier::Prebuilt {
+        let definition = PublishedEnvironmentDef::Prebuilt {
             image: "ghcr.io/user/image:v1".to_string(),
         };
-        let content = EnvironmentContent::default();
 
-        let h = compute_env_hash(&tier, &content);
+        let h = compute_env_hash(&definition);
         assert_eq!(h.len(), 64);
         assert_eq!(h, ozzy_core::hash::blake3_hash(b"ghcr.io/user/image:v1"));
     }
 
     #[test]
-    fn test_golden_base_lockfile_hash() {
-        // blake3_hash_components(["ozzydb/python:3.12", "polars==1.0\n"])
-        // = blake3("ozzydb/python:3.12\0polars==1.0\n")
-        let tier = EnvironmentTier::BaseLockfile {
+    fn test_lockfile_hash_for_base_lockfile() {
+        let definition = PublishedEnvironmentDef::BaseLockfile {
             base: "ozzydb/python:3.12".to_string(),
-            lockfile: "uv.lock".to_string(),
-        };
-        let content = EnvironmentContent {
-            lockfile_content: Some("polars==1.0\n".to_string()),
-            ..Default::default()
+            lockfile_path: "requirements.txt".to_string(),
+            lockfile_content: "polars==1.0\n".to_string(),
         };
 
-        let h = compute_env_hash(&tier, &content);
-        let expected = blake3_hash_components(&["ozzydb/python:3.12", "polars==1.0\n"]);
-        assert_eq!(h, expected);
+        assert_eq!(
+            compute_lockfile_hash(&definition),
+            ozzy_core::hash::blake3_hash(b"polars==1.0\n")
+        );
     }
 
     #[test]
-    fn test_golden_dockerfile_hash() {
-        // blake3_hash("FROM python:3.12\n")
-        let tier = EnvironmentTier::Dockerfile {
-            dockerfile: "Dockerfile".to_string(),
+    fn test_lockfile_hash_empty_for_non_lockfile_tiers() {
+        let dockerfile = PublishedEnvironmentDef::Dockerfile {
+            dockerfile_path: "Dockerfile".to_string(),
+            dockerfile_content: "FROM python:3.12\n".to_string(),
         };
-        let content = EnvironmentContent {
-            dockerfile_content: Some("FROM python:3.12\n".to_string()),
-            ..Default::default()
+        let prebuilt = PublishedEnvironmentDef::Prebuilt {
+            image: "ghcr.io/user/image:v1".to_string(),
         };
 
-        let h = compute_env_hash(&tier, &content);
-        let expected = ozzy_core::hash::blake3_hash(b"FROM python:3.12\n");
-        assert_eq!(h, expected);
+        let expected = ozzy_core::hash::blake3_hash(b"");
+        assert_eq!(compute_lockfile_hash(&dockerfile), expected);
+        assert_eq!(compute_lockfile_hash(&prebuilt), expected);
     }
 }

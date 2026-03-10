@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
 
-use ozzy_core::toml_spec::{EnvironmentDef, TransformDef};
+use ozzy_core::toml_spec::{PublishedEnvironmentDef, TransformDef};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify};
@@ -65,8 +65,15 @@ pub struct RuntimeTransformDef {
 
 #[derive(Debug, Clone)]
 pub struct BoundRuntimeDefinitions {
-    pub environments: HashMap<String, EnvironmentDef>,
+    pub environments: HashMap<String, RuntimeEnvironmentDef>,
     pub transforms: HashMap<String, RuntimeTransformDef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeEnvironmentDef {
+    pub versioned_name: VersionedName,
+    pub row_id: Uuid,
+    pub definition: PublishedEnvironmentDef,
 }
 
 #[derive(Debug, Clone)]
@@ -168,56 +175,36 @@ impl RegistrySnapshot {
 
     pub fn bind_runtime_definitions(
         &self,
-        authored_environments: &HashMap<String, EnvironmentDef>,
+        authored_environment_bindings: &HashMap<String, VersionedName>,
         authored_transforms: &HashMap<String, TransformDef>,
     ) -> Result<BoundRuntimeDefinitions, RegistrySnapshotError> {
         let mut environments = HashMap::new();
-        let mut environment_keys_by_authored_name = HashMap::new();
-        for (authored_name, authored_env) in authored_environments {
-            let authored_def = serde_json::to_value(authored_env)?;
-            let matches = self
-                .environments
-                .iter()
-                .filter(|(key, stored)| {
-                    key.name == *authored_name && stored.definition == authored_def
-                })
-                .collect::<Vec<_>>();
-
-            match matches.as_slice() {
-                [] => {
-                    return Err(RegistrySnapshotError::MissingPublishedEnvironmentBinding {
-                        environment_name: authored_name.clone(),
-                    });
+        for (authored_name, versioned_name) in authored_environment_bindings {
+            let stored = self.environments.get(versioned_name).ok_or_else(|| {
+                RegistrySnapshotError::MissingPublishedEnvironmentBinding {
+                    environment_name: authored_name.clone(),
                 }
-                [single] => {
-                    let (versioned_name, stored) = single;
-                    let runtime_key = versioned_name.to_string();
-                    let env_def: EnvironmentDef =
-                        serde_json::from_value(stored.definition.clone())?;
-                    environment_keys_by_authored_name
-                        .insert(authored_name.clone(), runtime_key.clone());
-                    environments.insert(runtime_key, env_def);
-                }
-                many => {
-                    return Err(
-                        RegistrySnapshotError::AmbiguousPublishedEnvironmentBinding {
-                            environment_name: authored_name.clone(),
-                            candidates: many.iter().map(|(key, _)| key.to_string()).collect(),
-                        },
-                    );
-                }
-            }
+            })?;
+            let definition: PublishedEnvironmentDef =
+                serde_json::from_value(stored.definition.clone())?;
+            environments.insert(
+                versioned_name.to_string(),
+                RuntimeEnvironmentDef {
+                    versioned_name: versioned_name.clone(),
+                    row_id: stored.id,
+                    definition,
+                },
+            );
         }
 
         let mut transforms = HashMap::new();
         for (authored_name, authored_transform) in authored_transforms {
-            let expected_environment_key = environment_keys_by_authored_name
-                .get(&authored_transform.environment)
-                .ok_or_else(
-                    || RegistrySnapshotError::MissingPublishedEnvironmentBinding {
-                        environment_name: authored_transform.environment.clone(),
-                    },
-                )?;
+            let expected_environment_key = &authored_transform.environment;
+            if !environments.contains_key(expected_environment_key) {
+                return Err(RegistrySnapshotError::MissingPublishedEnvironmentBinding {
+                    environment_name: authored_transform.environment.clone(),
+                });
+            }
             let expected_params_schema = serde_json::to_value(&authored_transform.params)?;
             let mut authored_input_names = authored_transform
                 .inputs
@@ -609,13 +596,6 @@ pub enum RegistrySnapshotError {
     )]
     MissingPublishedEnvironmentBinding { environment_name: String },
     #[error(
-        "published project revision environment '{environment_name}' matches multiple snapshot environments: {candidates:?}"
-    )]
-    AmbiguousPublishedEnvironmentBinding {
-        environment_name: String,
-        candidates: Vec<String>,
-    },
-    #[error(
         "published project revision transform '{transform_name}' has no matching snapshot transform"
     )]
     MissingPublishedTransformBinding { transform_name: String },
@@ -671,7 +651,7 @@ pub async fn load_published_project_revision_by_commit(
 ) -> Result<PublishedProjectRevision, RegistrySnapshotError> {
     let (project_revision, snapshot) =
         load_project_revision_snapshot_by_commit(db, cache, commit_id).await?;
-    let environments: HashMap<String, EnvironmentDef> =
+    let environments: HashMap<String, VersionedName> =
         serde_json::from_value(project_revision.environments.clone())?;
     let transforms: HashMap<String, TransformDef> =
         serde_json::from_value(project_revision.transforms.clone())?;
@@ -968,7 +948,12 @@ mod tests {
                 user.id,
                 "python_sci",
                 "1",
-                json!({ "base": "python", "lockfile": "uv.lock" }),
+                json!({
+                    "kind": "base_lockfile",
+                    "base": "python",
+                    "lockfile_path": "uv.lock",
+                    "lockfile_content": "polars==1.0\n"
+                }),
             )
             .await
             .expect("insert environment");
@@ -1027,11 +1012,16 @@ mod tests {
                 revision.id,
                 "snapshot_ozzy_toml_hash",
                 "[types]\nWaterPotential = 'float64'\n",
-                json!({ "python_sci": { "base": "python", "lockfile": "uv.lock" } }),
+                json!({
+                    "python_sci": {
+                        "name": "python_sci",
+                        "version": "1"
+                    }
+                }),
                 json!({
                     "clean_wp": {
                         "source": "transforms/clean.py:clean",
-                        "environment": "python_sci",
+                        "environment": "python_sci@1",
                         "params": {},
                         "network": false,
                         "secrets": []

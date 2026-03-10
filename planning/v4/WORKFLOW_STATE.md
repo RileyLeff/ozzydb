@@ -1,7 +1,7 @@
 # v4 Workflow State
 
 ## Current Phase: Phase 3 underway
-## Current Step: Phase 3.2 complete; ready for Phase 3.3 environment publication/realization split
+## Current Step: Phase 3.3 complete; ready for Phase 4 artifact model rewrite
 
 ## Completed Steps
 
@@ -292,8 +292,24 @@
 - Review artifact:
   - `planning/reviews/v4/14_phase3_2_review.md`
 
+### Phase 3.3: Environment publication / realization split
+- Added `PublishedEnvironmentDef` as the content-bound published environment payload shape.
+- Changed environment publication so authored lockfile and Dockerfile paths are resolved at push time and persisted as published environment definitions.
+- Changed transform publication so stored transform payloads refer to version-pinned environments like `python_sci@1`, not authored environment names.
+- Changed project revision environment payloads to store authored-name -> published-version bindings instead of raw authored environment path specs.
+- Reworked runtime binding so fetch/orchestrator resolve environments from published environment rows in the pinned snapshot.
+- Reworked environment hashing and build resolution so provider realization is keyed off the published environment definition, not ad hoc git fetches at execution time.
+- Reworked async post-push environment builds so they consume published environment rows directly.
+- Tightened environment source handling so invalid/missing lockfiles and Dockerfiles fail publication-time validation instead of degrading at build/runtime.
+- Verification for this checkpoint:
+  - `cargo test -p ozzy-core`
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/15_phase3_3_review.md`
+
 ## Open Review Findings
-- None blocking for Phase 3.2.
+- None blocking for Phase 3.3.
 - Residual legacy debt to delete later:
   - `commit_state` helpers in the DB/test surface
   - `register_commit_atomically(...)` in legacy tests
@@ -312,12 +328,13 @@
   - `planning/reviews/v4/12_phase2_3_cleanup_review.md`
   - `planning/reviews/v4/13_phase3_1_review.md`
   - `planning/reviews/v4/14_phase3_2_review.md`
+  - `planning/reviews/v4/15_phase3_3_review.md`
 
 ## Current Blockers
 - None.
 
 ## Next Recommended Steps
-1. Start Phase 3.3 and separate logical `EnvironmentVersion` publication from provider-specific realization more explicitly.
+1. Start Phase 4.1 and introduce the first-class `Artifact` model.
 2. Remove the remaining dead `commit_state`/legacy publication helpers once the old DB/e2e tests are moved onto the v4 publication path.
 3. Preserve the Phase 1 rule that semantic subsystems return typed errors instead of panicking or falling back.
 4. Extend the remaining unsupported builtin verifier surface only when the required registry/artifact/execution infrastructure exists.

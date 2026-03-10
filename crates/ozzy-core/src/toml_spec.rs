@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use ozzy_types::parse::{parse_type_expr, parse_type_ref, TypeParseError};
+use ozzy_types::parse::{TypeParseError, parse_type_expr, parse_type_ref};
 use ozzy_types::ports::{TypedPort, TypedPortSet};
 use ozzy_types::syntax::{BuiltinType, TypeDefinition, TypeDefinitions};
 use serde::{Deserialize, Serialize};
@@ -90,6 +90,23 @@ pub enum EnvironmentTier {
     BaseLockfile { base: String, lockfile: String },
     Dockerfile { dockerfile: String },
     Prebuilt { image: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PublishedEnvironmentDef {
+    BaseLockfile {
+        base: String,
+        lockfile_path: String,
+        lockfile_content: String,
+    },
+    Dockerfile {
+        dockerfile_path: String,
+        dockerfile_content: String,
+    },
+    Prebuilt {
+        image: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1103,9 +1120,11 @@ type = "PublishedThing@1"
 "#;
         let doc = OzzyToml::parse(toml).expect("toml should parse");
         let errors = doc.validate();
-        assert!(errors
-            .iter()
-            .any(|err| err.location == "transforms.t.inputs.raw"));
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.location == "transforms.t.inputs.raw")
+        );
     }
 
     #[test]
@@ -1131,10 +1150,12 @@ type = "parquet"
 "#;
         let doc = OzzyToml::parse(toml).expect("toml should parse");
         let errors = doc.validate();
-        assert!(errors
-            .iter()
-            .any(|err| err.location == "transforms.t.inputs.raw"
-                && err.message.contains("cannot be version-pinned")));
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.location == "transforms.t.inputs.raw"
+                    && err.message.contains("cannot be version-pinned"))
+        );
     }
 
     #[test]
@@ -1197,9 +1218,11 @@ type = "Csv"
 "#;
         let doc = OzzyToml::parse(toml).expect("toml should parse");
         let errors = doc.validate();
-        assert!(errors
-            .iter()
-            .any(|err| err.location == "transforms.t.outputs"));
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.location == "transforms.t.outputs")
+        );
     }
 
     #[test]
@@ -1237,8 +1260,10 @@ to = "n.wrong"
 "#;
         let doc = OzzyToml::parse(toml).expect("toml should parse");
         let errors = doc.validate();
-        assert!(errors
-            .iter()
-            .any(|err| err.location == "endpoints.ep.edges[0].to"));
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.location == "endpoints.ep.edges[0].to")
+        );
     }
 }
