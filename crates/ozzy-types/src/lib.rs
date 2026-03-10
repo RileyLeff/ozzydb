@@ -13,7 +13,9 @@ pub mod syntax;
 pub mod verify;
 
 pub use canonical::{CanonicalType, CanonicalTypeId};
-pub use conformance::{ConformanceRecord, ConformanceStatus};
+pub use conformance::{
+    ConformanceRecord, ConformanceStatus, VerificationAttempt, VerificationFailure,
+};
 pub use ports::{TypedPort, TypedPortSet};
 pub use registry::{RegistryError, TypeRegistry, TypeVersion, TypeVersionId};
 pub use relations::{RelationQuery, RelationVerdict, TypeRelation};

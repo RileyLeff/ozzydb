@@ -1,7 +1,7 @@
 # v4 Workflow State
 
 ## Current Phase: Phase 1 - Core Type System Foundation
-## Current Step: Step 1.4 complete (verification planning and witnesses); Step 1.5 next
+## Current Step: Step 1.5 complete (conformance model); Phase 1 consolidation checkpoint
 
 ## Completed Steps
 
@@ -104,22 +104,41 @@
   - table-schema verification
   - malformed constructor regression
 
+### Phase 1.5: Conformance model
+- Replaced the placeholder top-level evidence field with an explicit append-only verification attempt log.
+- Added:
+  - `VerificationFailure`
+  - `VerificationAttempt`
+  - `ConformanceRecord::declared(...)`
+  - `record_report(...)`
+  - `record_failure(...)`
+  - `latest_report()` / `latest_evidence()`
+- Kept semantic conformance state constrained to:
+  - `declared`
+  - `verified`
+  - `rejected`
+- Added unit coverage proving that:
+  - declared records start empty
+  - completed verification updates semantic state
+  - failed verification attempts do not mutate semantic state
+  - rejected reports set `rejected`
+
 ## Open Review Findings
-- None blocking for Phase 1.4.
+- None blocking for Phase 1.
 - Review artifacts:
   - `planning/reviews/v4/01_phase1_1_review.md`
   - `planning/reviews/v4/02_phase1_2_review.md`
   - `planning/reviews/v4/03_phase1_3_review.md`
   - `planning/reviews/v4/04_phase1_4_review.md`
+  - `planning/reviews/v4/05_phase1_5_review.md`
 
 ## Current Blockers
 - None.
 
 ## Next Recommended Steps
-1. Start Step 1.5 and make `ConformanceRecord` reflect the new verifier surface more concretely.
-2. Keep semantic state and verification-attempt details separate.
-3. Do not wire any server/runtime paths until the Phase 1 crate surface is internally coherent.
-4. Re-run the review loop after Step 1.5 lands.
+1. Run a Phase 1 consolidation review over `crates/ozzy-types` before starting Phase 2.
+2. If that review is clean, start Phase 2.1 registry persistence and snapshot modeling.
+3. Keep server/runtime rewrites deferred until the new persistence model exists.
 
 ## Notes
 - Existing v3 planning and type-system notes remain background context only.

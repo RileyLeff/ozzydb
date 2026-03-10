@@ -23,3 +23,7 @@ The first `refines(...)` implementation does not attempt structural merge of int
 ### Verification should error on malformed semantic constraints
 
 Verification code must not assume malformed constructor state is impossible and then panic or implicitly reject. If verification receives an invalid semantic constraint shape, it should return a structured verifier error. Rejection is reserved for artifacts that fail a valid check, not for malformed verifier inputs.
+
+### Conformance semantic state stays small; attempt history carries operational noise
+
+`ConformanceRecord` semantic state is limited to `declared`, `verified`, and `rejected`. Verifier crashes, missing backends, and other execution failures belong in append-only verification attempts and must not introduce an extra semantic state or silently mutate an existing verified/rejected claim.
