@@ -308,6 +308,20 @@
 - Review artifact:
   - `planning/reviews/v4/15_phase3_3_review.md`
 
+### Phase 3.3 follow-up: Environment identity normalization
+- Removed authored path strings from the logical published environment identity:
+  - `BaseLockfile` now stores normalized installer strategy + resolved content
+  - `Dockerfile` now stores resolved content only
+- Changed environment hashing and publication dedup so path renames no longer create new logical `EnvironmentVersion`s or rebuild keys.
+- Moved base-lockfile installer classification to publication time so build-time realization no longer infers semantics from authored file paths.
+- Updated DB-backed fixture payloads and snapshot tests to use the normalized published environment shape.
+- Verification for this checkpoint:
+  - `cargo test -p ozzy-core`
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/16_phase3_3_env_identity_fix_review.md`
+
 ## Open Review Findings
 - None blocking for Phase 3.3.
 - Residual legacy debt to delete later:
@@ -326,9 +340,10 @@
   - `planning/reviews/v4/10_phase2_2_cleanup_review.md`
   - `planning/reviews/v4/11_phase2_3_review.md`
   - `planning/reviews/v4/12_phase2_3_cleanup_review.md`
-  - `planning/reviews/v4/13_phase3_1_review.md`
-  - `planning/reviews/v4/14_phase3_2_review.md`
-  - `planning/reviews/v4/15_phase3_3_review.md`
+- `planning/reviews/v4/13_phase3_1_review.md`
+- `planning/reviews/v4/14_phase3_2_review.md`
+- `planning/reviews/v4/15_phase3_3_review.md`
+- `planning/reviews/v4/16_phase3_3_env_identity_fix_review.md`
 
 ## Current Blockers
 - None.

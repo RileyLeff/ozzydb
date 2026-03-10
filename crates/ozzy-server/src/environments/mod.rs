@@ -9,7 +9,7 @@
 pub mod docker;
 pub mod hash;
 
-use ozzy_core::toml_spec::EnvironmentTier;
+use ozzy_core::toml_spec::{BaseLockfileInstaller, EnvironmentTier};
 
 /// Result of building (or resolving) an environment image.
 #[derive(Debug, Clone)]
@@ -39,32 +39,20 @@ pub fn build_type_str(tier: &EnvironmentTier) -> &'static str {
 
 /// Generate a Dockerfile for a BaseLockfile environment.
 ///
-/// Detects lockfile type from the filename and uses the appropriate installer:
-/// - `requirements.txt` → `pip install`
-/// - Other pip-compatible → `pip install -r` (best-effort fallback)
-/// - `uv.lock` → rejected (needs export to requirements.txt)
-/// - `poetry.lock` → rejected (needs pyproject.toml + export to requirements.txt)
-pub fn generate_dockerfile(base_image: &str, lockfile_name: &str) -> Result<String, &'static str> {
+/// The installer strategy is resolved at publication time and becomes part of
+/// the published environment definition. Build-time realization should not
+/// inspect authored file paths.
+pub fn generate_dockerfile(
+    base_image: &str,
+    installer: &BaseLockfileInstaller,
+) -> Result<String, &'static str> {
     // Validate base_image: reject newlines and other Dockerfile injection vectors
     if base_image.contains('\n') || base_image.contains('\r') {
         return Err("base_image must not contain newlines");
     }
 
-    let install_cmd = if lockfile_name == "uv.lock" || lockfile_name.ends_with("/uv.lock") {
-        // uv.lock is a TOML-based lockfile that is not pip-installable.
-        // Use `uv export > requirements.txt` and reference that instead.
-        return Err(
-            "uv.lock is not directly installable. Export it to requirements.txt with `uv export --no-hashes > requirements.txt` and set lockfile = \"requirements.txt\" in ozzy.toml",
-        );
-    } else if lockfile_name == "poetry.lock" || lockfile_name.ends_with("/poetry.lock") {
-        // poetry.lock requires pyproject.toml for installation, which the BaseLockfile
-        // tier doesn't support (single file only). Export to requirements.txt instead.
-        return Err(
-            "poetry.lock is not directly installable without pyproject.toml. Export it to requirements.txt with `poetry export -f requirements.txt -o requirements.txt` and set lockfile = \"requirements.txt\" in ozzy.toml",
-        );
-    } else {
-        // requirements.txt or any pip-compatible lockfile
-        "RUN pip install --no-cache-dir -r /tmp/lockfile"
+    let install_cmd = match installer {
+        BaseLockfileInstaller::PipRequirements => "RUN pip install --no-cache-dir -r /tmp/lockfile",
     };
 
     Ok(format!(
@@ -93,33 +81,20 @@ mod tests {
     // -- generate_dockerfile --
 
     #[test]
-    fn test_dockerfile_requirements_txt() {
-        let df = generate_dockerfile("python:3.12-slim", "requirements.txt").unwrap();
+    fn test_dockerfile_pip_requirements_installer() {
+        let df = generate_dockerfile("python:3.12-slim", &BaseLockfileInstaller::PipRequirements)
+            .unwrap();
         assert!(df.starts_with("FROM python:3.12-slim\n"));
         assert!(df.contains("pip install --no-cache-dir -r /tmp/lockfile"));
         assert!(df.contains("COPY lockfile /tmp/lockfile"));
     }
 
     #[test]
-    fn test_dockerfile_rejects_poetry_lock() {
-        let result = generate_dockerfile("python:3.12", "poetry.lock");
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .contains("poetry.lock is not directly installable")
-        );
-    }
-
-    #[test]
-    fn test_dockerfile_unknown_lockfile_falls_back_to_pip() {
-        let df = generate_dockerfile("python:3.12", "Pipfile.lock").unwrap();
-        assert!(df.contains("pip install --no-cache-dir -r /tmp/lockfile"));
-    }
-
-    #[test]
     fn test_dockerfile_rejects_newline_in_base_image() {
-        let result = generate_dockerfile("python:3.12\nRUN curl evil.com", "requirements.txt");
+        let result = generate_dockerfile(
+            "python:3.12\nRUN curl evil.com",
+            &BaseLockfileInstaller::PipRequirements,
+        );
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "base_image must not contain newlines");
     }

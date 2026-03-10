@@ -13,13 +13,12 @@ pub fn compute_env_hash(definition: &PublishedEnvironmentDef) -> String {
     match definition {
         PublishedEnvironmentDef::BaseLockfile {
             base,
-            lockfile_path,
+            installer,
             lockfile_content,
-        } => blake3_hash_components(&[base, lockfile_path, lockfile_content]),
-        PublishedEnvironmentDef::Dockerfile {
-            dockerfile_path,
-            dockerfile_content,
-        } => blake3_hash_components(&[dockerfile_path, dockerfile_content]),
+        } => blake3_hash_components(&[base, installer.as_identity_str(), lockfile_content]),
+        PublishedEnvironmentDef::Dockerfile { dockerfile_content } => {
+            blake3_hash_components(&[dockerfile_content])
+        }
         PublishedEnvironmentDef::Prebuilt { image } => {
             ozzy_core::hash::blake3_hash(image.as_bytes())
         }
@@ -46,7 +45,7 @@ mod tests {
     fn test_base_lockfile_hash_stable() {
         let definition = PublishedEnvironmentDef::BaseLockfile {
             base: "ozzydb/python:3.12".to_string(),
-            lockfile_path: "uv.lock".to_string(),
+            installer: ozzy_core::toml_spec::BaseLockfileInstaller::PipRequirements,
             lockfile_content: "polars==1.0\npyarrow==17.0\n".to_string(),
         };
 
@@ -57,25 +56,24 @@ mod tests {
     }
 
     #[test]
-    fn test_base_lockfile_hash_changes_with_path() {
+    fn test_base_lockfile_hash_ignores_authored_path() {
         let d1 = PublishedEnvironmentDef::BaseLockfile {
             base: "ozzydb/python:3.12".to_string(),
-            lockfile_path: "requirements.txt".to_string(),
+            installer: ozzy_core::toml_spec::BaseLockfileInstaller::PipRequirements,
             lockfile_content: "polars==1.0\n".to_string(),
         };
         let d2 = PublishedEnvironmentDef::BaseLockfile {
             base: "ozzydb/python:3.12".to_string(),
-            lockfile_path: "constraints.txt".to_string(),
+            installer: ozzy_core::toml_spec::BaseLockfileInstaller::PipRequirements,
             lockfile_content: "polars==1.0\n".to_string(),
         };
 
-        assert_ne!(compute_env_hash(&d1), compute_env_hash(&d2));
+        assert_eq!(compute_env_hash(&d1), compute_env_hash(&d2));
     }
 
     #[test]
     fn test_dockerfile_hash_stable() {
         let definition = PublishedEnvironmentDef::Dockerfile {
-            dockerfile_path: "Dockerfile".to_string(),
             dockerfile_content: "FROM python:3.12\nRUN pip install polars\n".to_string(),
         };
 
@@ -100,7 +98,7 @@ mod tests {
     fn test_lockfile_hash_for_base_lockfile() {
         let definition = PublishedEnvironmentDef::BaseLockfile {
             base: "ozzydb/python:3.12".to_string(),
-            lockfile_path: "requirements.txt".to_string(),
+            installer: ozzy_core::toml_spec::BaseLockfileInstaller::PipRequirements,
             lockfile_content: "polars==1.0\n".to_string(),
         };
 
@@ -113,7 +111,6 @@ mod tests {
     #[test]
     fn test_lockfile_hash_empty_for_non_lockfile_tiers() {
         let dockerfile = PublishedEnvironmentDef::Dockerfile {
-            dockerfile_path: "Dockerfile".to_string(),
             dockerfile_content: "FROM python:3.12\n".to_string(),
         };
         let prebuilt = PublishedEnvironmentDef::Prebuilt {

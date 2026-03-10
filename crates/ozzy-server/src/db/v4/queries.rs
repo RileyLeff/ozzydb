@@ -849,7 +849,7 @@ mod tests {
                 json!({
                     "kind": "base_lockfile",
                     "base": "python",
-                    "lockfile_path": "uv.lock",
+                    "installer": "pip_requirements",
                     "lockfile_content": "polars==1.0\n"
                 }),
             )

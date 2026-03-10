@@ -15,7 +15,9 @@ use crate::AppState;
 use crate::auth::middleware::AuthUser;
 use crate::db::v4::StoredEnvironmentVersion;
 use crate::publication::{PublishCommitInput, PublishOutcome, publish_v4_commit_atomically};
-use ozzy_core::toml_spec::{EnvironmentDef, EnvironmentTier, PublishedEnvironmentDef};
+use ozzy_core::toml_spec::{
+    BaseLockfileInstaller, EnvironmentDef, EnvironmentTier, PublishedEnvironmentDef,
+};
 
 /// Build the push router.
 pub fn router() -> Router<AppState> {
@@ -501,10 +503,12 @@ async fn resolve_published_environment_definition(
                     env_name, lockfile
                 ))
             })?;
+            let installer = classify_base_lockfile_installer(lockfile)
+                .map_err(|message| ApiError::BadRequest(message.to_string()))?;
 
             Ok(PublishedEnvironmentDef::BaseLockfile {
                 base: base.clone(),
-                lockfile_path: lockfile.clone(),
+                installer,
                 lockfile_content,
             })
         }
@@ -521,15 +525,30 @@ async fn resolve_published_environment_definition(
                 ))
             })?;
 
-            Ok(PublishedEnvironmentDef::Dockerfile {
-                dockerfile_path: dockerfile.clone(),
-                dockerfile_content,
-            })
+            Ok(PublishedEnvironmentDef::Dockerfile { dockerfile_content })
         }
         EnvironmentTier::Prebuilt { image } => Ok(PublishedEnvironmentDef::Prebuilt {
             image: image.clone(),
         }),
     }
+}
+
+fn classify_base_lockfile_installer(
+    lockfile_path: &str,
+) -> Result<BaseLockfileInstaller, &'static str> {
+    if lockfile_path == "uv.lock" || lockfile_path.ends_with("/uv.lock") {
+        return Err(
+            "uv.lock is not directly installable. Export it to requirements.txt with `uv export --no-hashes > requirements.txt` and set lockfile = \"requirements.txt\" in ozzy.toml",
+        );
+    }
+
+    if lockfile_path == "poetry.lock" || lockfile_path.ends_with("/poetry.lock") {
+        return Err(
+            "poetry.lock is not directly installable without pyproject.toml. Export it to requirements.txt with `poetry export -f requirements.txt -o requirements.txt` and set lockfile = \"requirements.txt\" in ozzy.toml",
+        );
+    }
+
+    Ok(BaseLockfileInstaller::PipRequirements)
 }
 
 fn map_environment_file_error(env_name: &str, file_path: &str, err: anyhow::Error) -> ApiError {

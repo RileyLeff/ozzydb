@@ -63,7 +63,7 @@ pub async fn build_environment(
 
         PublishedEnvironmentDef::BaseLockfile {
             base,
-            lockfile_path,
+            installer,
             lockfile_content,
         } => {
             let env_hash = compute_env_hash(definition);
@@ -88,7 +88,7 @@ pub async fn build_environment(
             }
 
             let tag = image_tag(&env_hash);
-            let dockerfile_content = generate_dockerfile(base, lockfile_path)
+            let dockerfile_content = generate_dockerfile(base, installer)
                 .map_err(|e| anyhow::anyhow!("Invalid environment definition: {}", e))?;
             let lockfile_bytes = lockfile_content.as_bytes();
 
@@ -123,10 +123,7 @@ pub async fn build_environment(
             })
         }
 
-        PublishedEnvironmentDef::Dockerfile {
-            dockerfile_path: _,
-            dockerfile_content,
-        } => {
+        PublishedEnvironmentDef::Dockerfile { dockerfile_content } => {
             let env_hash = compute_env_hash(definition);
 
             // Check if already built

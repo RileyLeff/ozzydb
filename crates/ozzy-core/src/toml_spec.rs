@@ -97,16 +97,29 @@ pub enum EnvironmentTier {
 pub enum PublishedEnvironmentDef {
     BaseLockfile {
         base: String,
-        lockfile_path: String,
+        installer: BaseLockfileInstaller,
         lockfile_content: String,
     },
     Dockerfile {
-        dockerfile_path: String,
         dockerfile_content: String,
     },
     Prebuilt {
         image: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BaseLockfileInstaller {
+    PipRequirements,
+}
+
+impl BaseLockfileInstaller {
+    pub fn as_identity_str(&self) -> &'static str {
+        match self {
+            Self::PipRequirements => "pip_requirements",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
