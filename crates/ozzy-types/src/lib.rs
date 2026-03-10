@@ -21,7 +21,11 @@ pub use syntax::{
     BuiltinConstructor, BuiltinType, ConstructorExpr, Literal, RecordExpr, RecordField,
     TypeDefinition, TypeDefinitions, TypeExpr, TypeLanguageError, TypeRefExpr,
 };
-pub use verify::{VerificationReport, VerificationVerdict};
+pub use verify::{
+    BuiltinVerifierRegistry, CsvWitness, RecordFieldPlan, RecordWitness, TableColumnWitness,
+    TableWitness, VerificationError, VerificationInput, VerificationPlan, VerificationReport,
+    VerificationVerdict, WitnessError,
+};
 
 #[cfg(test)]
 mod tests {

@@ -1,7 +1,7 @@
 # v4 Workflow State
 
 ## Current Phase: Phase 1 - Core Type System Foundation
-## Current Step: Step 1.3 complete (canonicalization and relations); Step 1.4 next
+## Current Step: Step 1.4 complete (verification planning and witnesses); Step 1.5 next
 
 ## Completed Steps
 
@@ -81,21 +81,45 @@
   - builtin constructor families
 - Replaced the temporary serde-driven canonical hash path with an explicit deterministic AST fingerprint.
 
+### Phase 1.4: Verification planning and witnesses
+- Added verifier compilation from canonical type expressions into executable `VerificationPlan`s.
+- Added the first verification execution surface:
+  - `VerificationInput`
+  - `VerificationPlan`
+  - `BuiltinVerifierRegistry`
+  - `VerificationError`
+  - `VerificationReport`
+- Implemented the first builtin verification paths for:
+  - scalar builtin types
+  - `csv(...)`
+  - `min(...)`, `max(...)`, and `enum(...)`
+  - record verification against record values and table schemas
+  - collection verification
+  - table verification
+- Narrowly reused `ozzy-core::schema` to derive `TableWitness` values from Parquet files.
+- Tightened verification error handling so malformed semantic constraints return typed verifier errors instead of panicking or silently degrading into rejection.
+- Expanded test coverage for:
+  - plan compilation
+  - CSV witness rejection
+  - table-schema verification
+  - malformed constructor regression
+
 ## Open Review Findings
-- None blocking for Phase 1.3.
+- None blocking for Phase 1.4.
 - Review artifacts:
   - `planning/reviews/v4/01_phase1_1_review.md`
   - `planning/reviews/v4/02_phase1_2_review.md`
   - `planning/reviews/v4/03_phase1_3_review.md`
+  - `planning/reviews/v4/04_phase1_4_review.md`
 
 ## Current Blockers
 - None.
 
 ## Next Recommended Steps
-1. Start Step 1.4 and wire verification planning around the existing witness/report types.
-2. Reuse `ozzy-core/src/schema.rs` narrowly as tabular witness and schema-checking support.
-3. Keep the implementation narrow: no server wiring yet.
-4. Re-run the review loop after Step 1.4 lands.
+1. Start Step 1.5 and make `ConformanceRecord` reflect the new verifier surface more concretely.
+2. Keep semantic state and verification-attempt details separate.
+3. Do not wire any server/runtime paths until the Phase 1 crate surface is internally coherent.
+4. Re-run the review loop after Step 1.5 lands.
 
 ## Notes
 - Existing v3 planning and type-system notes remain background context only.

@@ -19,3 +19,7 @@ Phase 1 crate scaffolding is allowed to be narrow and incomplete. It should mode
 ### Phase 1 refinement is intentionally conservative
 
 The first `refines(...)` implementation does not attempt structural merge of intersected records or theorem-prover-style inference. It is allowed to return `false` in cases that may become provable later, as long as it does not return incorrect `true` results.
+
+### Verification should error on malformed semantic constraints
+
+Verification code must not assume malformed constructor state is impossible and then panic or implicitly reject. If verification receives an invalid semantic constraint shape, it should return a structured verifier error. Rejection is reserved for artifacts that fail a valid check, not for malformed verifier inputs.
