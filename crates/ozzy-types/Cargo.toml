@@ -10,8 +10,9 @@ categories = ["science"]
 
 [dependencies]
 blake3.workspace = true
+arrow.workspace = true
 ordered-float.workspace = true
-ozzy-core.workspace = true
+parquet.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -4,10 +4,6 @@
 //! OzzyDB owns data, wires everything together, orchestrates compute, and caches results.
 
 pub mod canon;
-pub mod error;
 pub mod hash;
 pub mod platform;
-pub mod schema;
 pub mod toml_spec;
-
-pub use error::{Error, Result};

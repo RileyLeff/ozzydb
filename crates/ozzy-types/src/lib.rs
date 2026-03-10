@@ -8,9 +8,11 @@
 
 pub mod canonical;
 pub mod conformance;
+pub mod parse;
 pub mod ports;
 pub mod registry;
 pub mod relations;
+pub mod schema;
 pub mod syntax;
 pub mod verify;
 
@@ -18,9 +20,13 @@ pub use canonical::{CanonicalType, CanonicalTypeId};
 pub use conformance::{
     ConformanceRecord, ConformanceStatus, VerificationAttempt, VerificationFailure,
 };
+pub use parse::{TypeParseError, parse_type_expr, parse_type_ref};
 pub use ports::{TypedPort, TypedPortSet};
 pub use registry::{RegistryError, TypeRegistry, TypeVersion, TypeVersionId};
 pub use relations::{RelationQuery, RelationVerdict, TypeRelation};
+pub use schema::{
+    FieldInfo, SchemaError, SchemaInfo, extract_parquet_schema, get_parquet_row_count,
+};
 pub use syntax::{
     BuiltinConstructor, BuiltinType, ConstructorExpr, Literal, RecordExpr, RecordField,
     TypeDefinition, TypeDefinitions, TypeExpr, TypeLanguageError, TypeRefExpr,

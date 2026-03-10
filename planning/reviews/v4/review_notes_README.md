@@ -39,3 +39,11 @@ The verifier is no longer allowed to treat versioned type refs as opaque externa
 ### Layered conjunctive verification uses derived witness inputs
 
 Phase 1 follow-up introduced `VerificationInput::Derived(...)` so one artifact can satisfy a conjunctive type through multiple witness views. This is an explicit bridge until Phase 4/5 artifact-backed witness generation makes those views first-class in the wider platform.
+
+### Phase 3.1 authors types at the top level and ports by reference only
+
+The authored `ozzy.toml` surface now has a top-level `[types]` section whose values are full v1 type expressions. Transform input and output ports do not accept arbitrary type expressions inline; they accept type references only. This keeps authored graphs auditable and prevents the port layer from becoming a second, ad hoc type-definition surface.
+
+### Phase 3.1 keeps authored transforms to one output port until endpoint edges can address outputs
+
+`TransformDef.outputs` is now a typed port set, but authored validation currently requires exactly one output port. This is intentional. Endpoint edges still address inputs as `node.input` and do not yet name output ports, so allowing multiple authored outputs now would create an ambiguous contract. Relax this only when the endpoint graph syntax and runtime can address output ports explicitly.

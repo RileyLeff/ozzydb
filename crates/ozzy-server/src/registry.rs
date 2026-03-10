@@ -57,6 +57,7 @@ pub struct RuntimeTransformDef {
     pub environment: String,
     pub description: Option<String>,
     pub input_names: Vec<String>,
+    pub output_names: Vec<String>,
     pub params_schema: Value,
     pub network: bool,
     pub secrets: Vec<String>,
@@ -220,10 +221,36 @@ impl RegistrySnapshot {
             let expected_params_schema = serde_json::to_value(&authored_transform.params)?;
             let mut authored_input_names = authored_transform
                 .inputs
+                .ports
                 .keys()
                 .cloned()
                 .collect::<Vec<_>>();
             authored_input_names.sort();
+            let mut authored_output_names = authored_transform
+                .outputs
+                .ports
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            authored_output_names.sort();
+            let authored_input_type_ids = authored_transform
+                .inputs
+                .ports
+                .iter()
+                .map(|(name, port)| {
+                    let (_, stored) = self.resolve_type_ref(&port.ty)?;
+                    Ok((name.clone(), stored.id))
+                })
+                .collect::<Result<BTreeMap<_, _>, RegistrySnapshotError>>()?;
+            let authored_output_type_ids = authored_transform
+                .outputs
+                .ports
+                .iter()
+                .map(|(name, port)| {
+                    let (_, stored) = self.resolve_type_ref(&port.ty)?;
+                    Ok((name.clone(), stored.id))
+                })
+                .collect::<Result<BTreeMap<_, _>, RegistrySnapshotError>>()?;
 
             let matches = self
                 .transforms
@@ -232,6 +259,25 @@ impl RegistrySnapshot {
                     let mut snapshot_input_names =
                         transform.inputs.ports.keys().cloned().collect::<Vec<_>>();
                     snapshot_input_names.sort();
+                    let mut snapshot_output_names =
+                        transform.outputs.ports.keys().cloned().collect::<Vec<_>>();
+                    snapshot_output_names.sort();
+                    let snapshot_input_type_ids =
+                        transform.inputs.ports.iter().all(|(name, port)| {
+                            self.resolve_type_ref(&port.ty)
+                                .ok()
+                                .map(|(_, stored)| stored.id)
+                                .as_ref()
+                                == authored_input_type_ids.get(name)
+                        });
+                    let snapshot_output_type_ids =
+                        transform.outputs.ports.iter().all(|(name, port)| {
+                            self.resolve_type_ref(&port.ty)
+                                .ok()
+                                .map(|(_, stored)| stored.id)
+                                .as_ref()
+                                == authored_output_type_ids.get(name)
+                        });
                     key.name == *authored_name
                         && transform.row.source_ref == authored_transform.source
                         && transform.row.command == authored_transform.command
@@ -246,6 +292,9 @@ impl RegistrySnapshot {
                             .as_deref()
                             == Some(expected_environment_key.as_str())
                         && snapshot_input_names == authored_input_names
+                        && snapshot_output_names == authored_output_names
+                        && snapshot_input_type_ids
+                        && snapshot_output_type_ids
                 })
                 .collect::<Vec<_>>();
 
@@ -267,6 +316,12 @@ impl RegistrySnapshot {
                             input_names: {
                                 let mut names =
                                     transform.inputs.ports.keys().cloned().collect::<Vec<_>>();
+                                names.sort();
+                                names
+                            },
+                            output_names: {
+                                let mut names =
+                                    transform.outputs.ports.keys().cloned().collect::<Vec<_>>();
                                 names.sort();
                                 names
                             },

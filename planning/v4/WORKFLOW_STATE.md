@@ -1,7 +1,7 @@
 # v4 Workflow State
 
-## Current Phase: Phase 2 underway
-## Current Step: Phase 2.3 project revisions complete; ready for Phase 3.1
+## Current Phase: Phase 3 underway
+## Current Step: Phase 3.1 complete; ready for Phase 3.2 publication bundle rewrite
 
 ## Completed Steps
 
@@ -238,6 +238,28 @@
 - Added test coverage for:
   - project revision payload persistence
   - published project revision loading from a pinned snapshot
+
+### Phase 3.1: `ozzy.toml` parser rewrite
+- Moved schema/witness helpers from `ozzy-core` into `ozzy-types` and removed the dependency-cycle blocker.
+- Added `ozzy-types::parse` with a minimal v1 parser for:
+  - full top-level type expressions
+  - port-level type references
+- Rewrote `ozzy_core::toml_spec` around:
+  - top-level `[types]`
+  - typed transform `inputs` and `outputs`
+  - removal of `output` and `output_schema`
+- Constrained authored transforms to exactly one output port until endpoint edges can address output ports explicitly.
+- Tightened validation so:
+  - ports cannot inline arbitrary type expressions
+  - builtin type refs cannot be version-pinned
+  - transform binding to published snapshot rows compares both port names and resolved type identities
+- Removed the old silent schema fallback behavior when moving witness/schema parsing into `ozzy-types`.
+- Verification for this checkpoint:
+  - `cargo test -p ozzy-core`
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/13_phase3_1_review.md`
 - Verification for this checkpoint:
   - `cargo check -p ozzy-server`
   - `cargo test -p ozzy-types`

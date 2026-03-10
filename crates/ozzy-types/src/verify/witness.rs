@@ -2,9 +2,10 @@
 
 use std::path::Path;
 
-use ozzy_core::schema::{SchemaInfo, extract_parquet_schema, get_parquet_row_count};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::schema::{SchemaError, SchemaInfo, extract_parquet_schema, get_parquet_row_count};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CsvWitness {
@@ -47,7 +48,7 @@ impl From<SchemaInfo> for TableWitness {
 #[derive(Debug, Error)]
 pub enum WitnessError {
     #[error(transparent)]
-    Core(#[from] ozzy_core::Error),
+    Schema(#[from] SchemaError),
 }
 
 impl TableWitness {
@@ -71,7 +72,7 @@ pub struct RecordWitness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ozzy_core::schema::{FieldInfo, SchemaInfo};
+    use crate::schema::{FieldInfo, SchemaInfo};
 
     #[test]
     fn csv_witness_tracks_header_and_columns() {
