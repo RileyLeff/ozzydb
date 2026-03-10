@@ -13,7 +13,7 @@ pub mod secrets;
 pub mod types;
 
 pub use types::{
-    ComputeBackend, ComputeRequest, ComputeResult, InputSpec, build_input_manifest,
+    ComputeBackend, ComputeRequest, ComputeResult, InputLoader, InputSpec, build_input_manifest,
     build_param_env_vars,
 };
 

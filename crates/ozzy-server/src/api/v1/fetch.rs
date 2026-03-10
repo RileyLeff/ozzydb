@@ -3,11 +3,11 @@
 //! `POST /v1/fetch/{owner}/{project}/{endpoint}` creates a job for endpoint execution.
 //! Returns 202 + job_id for async execution, or 200 if all nodes are cached.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::post,
@@ -20,7 +20,8 @@ use crate::AppState;
 use crate::auth::middleware::MaybeAuthUser;
 use crate::compute::orchestrator::NodeOutput;
 use crate::registry::{
-    RuntimeEnvironmentDef, RuntimeTransformDef, load_published_project_revision_by_commit,
+    RegistrySnapshot, RuntimeEnvironmentDef, RuntimeTransformDef,
+    load_published_project_revision_by_commit,
 };
 
 /// Build the fetch router.
@@ -29,14 +30,16 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Debug, Deserialize)]
-struct FetchQuery {
+struct FetchRequest {
     #[serde(rename = "ref")]
     ref_name: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     format: Option<String>,
-    #[serde(flatten)]
-    params: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    params: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    inputs: BTreeMap<String, Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,12 +52,18 @@ struct FetchResponse {
     output_hash: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedEndpointInput {
+    pub artifact: crate::db::v4::StoredArtifact,
+    pub type_ref: ozzy_types::syntax::TypeRefExpr,
+}
+
 /// Fetch endpoint: validate, check cache, create job, return immediately.
 async fn fetch_endpoint(
     State(state): State<AppState>,
     Path((owner, slug, endpoint_name)): Path<(String, String, String)>,
-    Query(query): Query<FetchQuery>,
     auth: MaybeAuthUser,
+    Json(request): Json<FetchRequest>,
 ) -> Result<Response, ApiError> {
     // ── 1. Resolve project → ref → commit ───────────────────────
     let project =
@@ -64,7 +73,7 @@ async fn fetch_endpoint(
 
     super::access::enforce_read_access(&state, &project, &owner, &slug, &auth).await?;
 
-    let commit = if let Some(ref ref_name) = query.ref_name {
+    let commit = if let Some(ref ref_name) = request.ref_name {
         let r = state
             .db
             .resolve_ref(project.id, ref_name)
@@ -112,17 +121,37 @@ async fn fetch_endpoint(
     }
 
     // ── 4. Validate consumer params ─────────────────────────────
-    let resolved_params = validate_and_resolve_params(endpoint_def, &query.params)?;
+    let request_params = request.params.into_iter().collect::<HashMap<_, _>>();
+    let resolved_params = validate_and_resolve_params(endpoint_def, &request_params)?;
+    let resolved_inputs = validate_and_resolve_endpoint_inputs(
+        &state,
+        project.id,
+        published.snapshot.as_ref(),
+        endpoint_def,
+        &request.inputs,
+    )
+    .await?;
 
     // Compute canonical params hash for dedup
     let canonical_params =
         serde_json::to_string(&resolved_params).map_err(|e| ApiError::Internal(e.into()))?;
     let params_hash = ozzy_core::hash::blake3_hash(canonical_params.as_bytes());
+    let input_bindings =
+        build_job_input_bindings(&resolved_inputs).map_err(|e| ApiError::Internal(e.into()))?;
+    let canonical_input_bindings =
+        serde_json::to_string(&input_bindings).map_err(|e| ApiError::Internal(e.into()))?;
+    let input_bindings_hash = ozzy_core::hash::blake3_hash(canonical_input_bindings.as_bytes());
 
     // ── 5. Check dedup (return existing active job) ─────────────
     if let Some(existing) = state
         .db
-        .find_active_job(project.id, &endpoint_name, commit.id, &params_hash)
+        .find_active_job(
+            project.id,
+            &endpoint_name,
+            commit.id,
+            &params_hash,
+            &input_bindings_hash,
+        )
         .await?
     {
         return Ok((
@@ -149,6 +178,7 @@ async fn fetch_endpoint(
         endpoint_def,
         &published.runtime.transforms,
         &resolved_params,
+        &resolved_inputs,
         &exec_order,
         project.id,
     )
@@ -188,6 +218,8 @@ async fn fetch_endpoint(
                 commit.id,
                 &resolved_params,
                 &params_hash,
+                &input_bindings,
+                &input_bindings_hash,
                 &node_status_map,
                 auth_user_id,
             )
@@ -257,6 +289,8 @@ async fn fetch_endpoint(
             commit.id,
             &resolved_params,
             &params_hash,
+            &input_bindings,
+            &input_bindings_hash,
             &node_status_map,
             auth_user_id,
         )
@@ -300,20 +334,20 @@ async fn check_all_node_caches(
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
     transforms: &HashMap<String, RuntimeTransformDef>,
     resolved_params: &serde_json::Value,
+    endpoint_inputs: &BTreeMap<String, ResolvedEndpointInput>,
     exec_order: &[String],
     project_id: Uuid,
 ) -> Result<(bool, HashMap<String, NodeOutput>), ApiError> {
-    let source_dir = if endpoint_requires_source_code(endpoint_def, transforms)
-        .map_err(ApiError::Internal)?
-    {
-        Some(
-            retrieve_source_code(state, commit)
-                .await
-                .map_err(ApiError::Internal)?,
-        )
-    } else {
-        None
-    };
+    let source_dir =
+        if endpoint_requires_source_code(endpoint_def, transforms).map_err(ApiError::Internal)? {
+            Some(
+                retrieve_source_code(state, commit)
+                    .await
+                    .map_err(ApiError::Internal)?,
+            )
+        } else {
+            None
+        };
     let platform = ozzy_core::platform::PlatformFingerprint::detect();
     let platform_hash = platform.hash();
     let edge_map = build_edge_map(endpoint_def);
@@ -349,6 +383,7 @@ async fn check_all_node_caches(
             transform_def,
             endpoint_def,
             resolved_params,
+            endpoint_inputs,
             &edge_map,
             &node_outputs,
             &source_dir,
@@ -388,6 +423,7 @@ async fn compute_materialized_hash(
     transform_def: &RuntimeTransformDef,
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
     resolved_params: &serde_json::Value,
+    endpoint_inputs: &BTreeMap<String, ResolvedEndpointInput>,
     edge_map: &HashMap<&str, Vec<(&str, &str)>>,
     node_outputs: &HashMap<String, NodeOutput>,
     source_dir: &Option<tempfile::TempDir>,
@@ -399,7 +435,8 @@ async fn compute_materialized_hash(
     let empty_vec = vec![];
     let edges_for_node = edge_map.get(node_name).unwrap_or(&empty_vec);
     for (input_name, source) in edges_for_node {
-        let hash = resolve_edge_source(source, state, project_id, node_outputs).await?;
+        let hash =
+            resolve_edge_source(source, state, project_id, endpoint_inputs, node_outputs).await?;
         input_hashes.push((input_name, hash));
     }
 
@@ -561,6 +598,116 @@ fn validate_and_resolve_params(
     }
 
     Ok(serde_json::Value::Object(resolved))
+}
+
+pub(crate) async fn validate_and_resolve_endpoint_inputs(
+    state: &AppState,
+    project_id: Uuid,
+    snapshot: &RegistrySnapshot,
+    endpoint: &ozzy_core::toml_spec::EndpointDef,
+    requested_inputs: &BTreeMap<String, Uuid>,
+) -> Result<BTreeMap<String, ResolvedEndpointInput>, ApiError> {
+    let expected = endpoint
+        .inputs
+        .ports
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let actual = requested_inputs.keys().cloned().collect::<BTreeSet<_>>();
+
+    if actual != expected {
+        let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
+        let unexpected = actual.difference(&expected).cloned().collect::<Vec<_>>();
+
+        let mut problems = Vec::new();
+        if !missing.is_empty() {
+            problems.push(format!("missing inputs {:?}", missing));
+        }
+        if !unexpected.is_empty() {
+            problems.push(format!("unexpected inputs {:?}", unexpected));
+        }
+
+        return Err(ApiError::BadRequest(format!(
+            "Endpoint input bindings are invalid: {}",
+            problems.join(", ")
+        )));
+    }
+
+    let mut resolved = BTreeMap::new();
+    for (input_name, port) in &endpoint.inputs.ports {
+        let artifact_id = *requested_inputs.get(input_name).ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "Endpoint input '{}' is missing from the fetch request",
+                input_name
+            ))
+        })?;
+
+        let artifact = state
+            .db
+            .get_v4_artifact(artifact_id)
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?
+            .ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "Artifact '{}' bound to endpoint input '{}' does not exist",
+                    artifact_id, input_name
+                ))
+            })?;
+
+        if artifact.project_id != project_id {
+            return Err(ApiError::BadRequest(format!(
+                "Artifact '{}' cannot be bound to endpoint input '{}' because it belongs to another project",
+                artifact.id, input_name
+            )));
+        }
+
+        let (_, stored_type) = snapshot
+            .resolve_type_ref(&port.ty)
+            .map_err(|e| ApiError::Internal(e.into()))?;
+        let conformance = state
+            .db
+            .get_v4_conformance_record(artifact.id, stored_type.id)
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?
+            .ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "Artifact '{}' has no conformance record for required endpoint input type '{}'",
+                    artifact.id, port.ty.name
+                ))
+            })?;
+
+        if conformance.status == "rejected" {
+            return Err(ApiError::BadRequest(format!(
+                "Artifact '{}' was rejected for required endpoint input type '{}'",
+                artifact.id, port.ty.name
+            )));
+        }
+
+        resolved.insert(
+            input_name.clone(),
+            ResolvedEndpointInput {
+                artifact,
+                type_ref: port.ty.clone(),
+            },
+        );
+    }
+
+    Ok(resolved)
+}
+
+fn build_job_input_bindings(
+    inputs: &BTreeMap<String, ResolvedEndpointInput>,
+) -> Result<serde_json::Value, anyhow::Error> {
+    let object = inputs
+        .iter()
+        .map(|(name, binding)| {
+            Ok((
+                name.clone(),
+                serde_json::Value::String(binding.artifact.id.to_string()),
+            ))
+        })
+        .collect::<Result<serde_json::Map<String, serde_json::Value>, anyhow::Error>>()?;
+    Ok(serde_json::Value::Object(object))
 }
 
 /// Coerce a query-string parameter value to the declared type.
@@ -780,46 +927,26 @@ pub(crate) fn build_edge_map<'a>(
 /// Resolve an edge source to a content hash.
 async fn resolve_edge_source(
     source: &str,
-    state: &AppState,
-    project_id: Uuid,
+    _state: &AppState,
+    _project_id: Uuid,
+    endpoint_inputs: &BTreeMap<String, ResolvedEndpointInput>,
     node_outputs: &HashMap<String, NodeOutput>,
 ) -> Result<String, ApiError> {
-    resolve_edge_source_inner(source, state, project_id, node_outputs)
+    resolve_edge_source_inner(source, endpoint_inputs, node_outputs)
         .await
         .map_err(ApiError::Internal)
 }
 
 async fn resolve_edge_source_inner(
     source: &str,
-    state: &AppState,
-    project_id: Uuid,
+    endpoint_inputs: &BTreeMap<String, ResolvedEndpointInput>,
     node_outputs: &HashMap<String, NodeOutput>,
 ) -> Result<String, anyhow::Error> {
-    if let Some(data_name) = source.strip_prefix("data:") {
-        let atom = state
-            .db
-            .get_data_atom(project_id, data_name)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Data atom '{}' not found", data_name))?;
-        if atom.yanked {
-            anyhow::bail!("Data atom '{}' has been yanked", data_name);
-        }
-        Ok(atom.hash)
-    } else if let Some(coll_name) = source.strip_prefix("collection:") {
-        let collection = state
-            .db
-            .get_collection(project_id, coll_name)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Collection '{}' not found", coll_name))?;
-        if collection.yanked {
-            anyhow::bail!("Collection '{}' has been yanked", coll_name);
-        }
-        let version = state
-            .db
-            .get_latest_collection_version(collection.id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Collection '{}' has no versions", coll_name))?;
-        Ok(version.hash)
+    if let Some(input_name) = source.strip_prefix("input:") {
+        let binding = endpoint_inputs.get(input_name).ok_or_else(|| {
+            anyhow::anyhow!("Endpoint input '{}' is not bound for execution", input_name)
+        })?;
+        Ok(format!("artifact:{}", binding.artifact.id))
     } else if source.starts_with("endpoint:") {
         anyhow::bail!("Cross-project endpoint dependencies ('{source}') are not yet implemented")
     } else {
@@ -838,8 +965,9 @@ pub(crate) async fn retrieve_source_code(
     state: &AppState,
     commit: &crate::db::Commit,
 ) -> Result<tempfile::TempDir, anyhow::Error> {
-    let source_storage = crate::storage::ContentStorage::from_config_with_prefix(&state.config, "source")
-        .map_err(|e| anyhow::anyhow!("Failed to create source storage: {}", e))?;
+    let source_storage =
+        crate::storage::ContentStorage::from_config_with_prefix(&state.config, "source")
+            .map_err(|e| anyhow::anyhow!("Failed to create source storage: {}", e))?;
 
     let tarball_bytes = source_storage
         .get(&commit.git_commit_sha, "tar.gz")
@@ -905,14 +1033,8 @@ pub(crate) fn validate_node_input_bindings<'a>(
         return Ok(());
     }
 
-    let missing = expected
-        .difference(&actual)
-        .cloned()
-        .collect::<Vec<_>>();
-    let unexpected = actual
-        .difference(&expected)
-        .cloned()
-        .collect::<Vec<_>>();
+    let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
+    let unexpected = actual.difference(&expected).cloned().collect::<Vec<_>>();
 
     let mut problems = Vec::new();
     if !missing.is_empty() {
@@ -1172,6 +1294,11 @@ mod tests {
 
     fn make_test_endpoint() -> EndpointDef {
         let mut nodes = HashMap::new();
+        let mut inputs = TypedPortSet::default();
+        inputs.insert(
+            "raw",
+            TypedPort::new(TypeRefExpr::new("std/Input", Some("1".to_string()))),
+        );
         nodes.insert(
             "step1".to_string(),
             NodeDef {
@@ -1190,10 +1317,11 @@ mod tests {
         EndpointDef {
             description: Some("test endpoint".to_string()),
             params: HashMap::new(),
+            inputs,
             nodes,
             edges: vec![
                 EdgeDef {
-                    from: "data:raw".to_string(),
+                    from: "input:raw".to_string(),
                     to: "step1.data".to_string(),
                 },
                 EdgeDef {
@@ -1265,9 +1393,10 @@ mod tests {
         let endpoint = EndpointDef {
             description: None,
             params: HashMap::new(),
+            inputs: TypedPortSet::default(),
             nodes,
             edges: vec![EdgeDef {
-                from: "data:input".to_string(),
+                from: "input:input".to_string(),
                 to: "only.data".to_string(),
             }],
         };
@@ -1281,7 +1410,7 @@ mod tests {
         let map = build_edge_map(&endpoint);
 
         assert_eq!(map.get("step1").unwrap().len(), 1);
-        assert_eq!(map.get("step1").unwrap()[0], ("data", "data:raw"));
+        assert_eq!(map.get("step1").unwrap()[0], ("data", "input:raw"));
 
         assert_eq!(map.get("step2").unwrap().len(), 1);
         assert_eq!(map.get("step2").unwrap()[0], ("input", "step1"));
@@ -1329,8 +1458,8 @@ mod tests {
             TypedPort::new(TypeRefExpr::new("std/Meta", Some("1".to_string()))),
         );
 
-        let err =
-            validate_node_input_bindings("clean", &transform, ["raw", "extra"].into_iter()).unwrap_err();
+        let err = validate_node_input_bindings("clean", &transform, ["raw", "extra"].into_iter())
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("missing inputs [\"meta\"]"));
         assert!(msg.contains("unexpected inputs [\"extra\"]"));
@@ -1354,6 +1483,7 @@ mod tests {
         let endpoint = EndpointDef {
             description: None,
             params,
+            inputs: TypedPortSet::default(),
             nodes: HashMap::new(),
             edges: vec![],
         };
@@ -1380,6 +1510,7 @@ mod tests {
         let endpoint = EndpointDef {
             description: None,
             params,
+            inputs: TypedPortSet::default(),
             nodes: HashMap::new(),
             edges: vec![],
         };
@@ -1408,6 +1539,7 @@ mod tests {
         let endpoint = EndpointDef {
             description: None,
             params,
+            inputs: TypedPortSet::default(),
             nodes: HashMap::new(),
             edges: vec![],
         };
@@ -1436,6 +1568,7 @@ mod tests {
         let endpoint = EndpointDef {
             description: None,
             params,
+            inputs: TypedPortSet::default(),
             nodes: HashMap::new(),
             edges: vec![],
         };
@@ -1526,6 +1659,7 @@ mod tests {
                 );
                 p
             },
+            inputs: TypedPortSet::default(),
             edges: vec![],
         };
 
@@ -1599,6 +1733,7 @@ mod tests {
         let endpoint = EndpointDef {
             description: None,
             params,
+            inputs: TypedPortSet::default(),
             nodes: HashMap::new(),
             edges: vec![],
         };
@@ -1627,6 +1762,7 @@ mod tests {
         let endpoint = EndpointDef {
             description: None,
             params,
+            inputs: TypedPortSet::default(),
             nodes: HashMap::new(),
             edges: vec![],
         };
@@ -1655,6 +1791,7 @@ mod tests {
         let endpoint = EndpointDef {
             description: None,
             params,
+            inputs: TypedPortSet::default(),
             nodes: HashMap::new(),
             edges: vec![],
         };
@@ -1683,6 +1820,7 @@ mod tests {
         let endpoint = EndpointDef {
             description: None,
             params,
+            inputs: TypedPortSet::default(),
             nodes: HashMap::new(),
             edges: vec![],
         };

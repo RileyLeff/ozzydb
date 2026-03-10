@@ -175,6 +175,13 @@ impl RegistrySnapshot {
         )?)
     }
 
+    pub fn expanded_type_expr(
+        &self,
+        type_ref: &TypeRefExpr,
+    ) -> Result<TypeExpr, RegistrySnapshotError> {
+        self.expand_published_type_ref(type_ref)
+    }
+
     pub fn bind_runtime_definitions(
         &self,
         authored_environment_bindings: &HashMap<String, VersionedName>,

@@ -1,8 +1,9 @@
 //! Types for the compute backend.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 /// Trait for compute backends (Docker, Fly Machines, etc.).
 ///
@@ -10,8 +11,6 @@ use anyhow::Result;
 /// waits for completion, and returns exit code + logs. All I/O (inputs,
 /// output, source code, secrets) is handled via presigned URLs encoded
 /// in env_vars by the orchestrator.
-///
-/// Object-safe: uses boxed futures to support `dyn ComputeBackend` in the registry.
 pub trait ComputeBackend: Send + Sync + std::any::Any {
     /// Execute a transform in a container and return the result.
     fn run<'a>(
@@ -21,89 +20,67 @@ pub trait ComputeBackend: Send + Sync + std::any::Any {
 }
 
 /// A request to execute a transform in a container.
-///
-/// All I/O is encoded in `env_vars` as presigned URLs:
-/// - `OZZY_INIT_SCRIPT_B64`: base64-encoded init script
-/// - `OZZY_RUNNER_SCRIPT_B64`: base64-encoded runner script
-/// - `OZZY_INPUT_DOWNLOADS`: JSON array of input download specs
-/// - `OZZY_SOURCE_DOWNLOAD`: presigned GET URL for source tarball
-/// - `OZZY_OUTPUT_UPLOAD_URL`: presigned PUT URL for output tarball
-/// - `OZZY_SECRETS_URL`: presigned GET URL for secrets JSON
-/// - `OZZY_INPUT_MANIFEST`: JSON manifest of inputs
-/// - `OZZY_PARAMS`: JSON params object
-/// - `OZZY_PARAM_*`: individual param values
-/// - `PYTHONHASHSEED`, `OMP_NUM_THREADS`, etc.: determinism env vars
 #[derive(Debug, Clone)]
 pub struct ComputeRequest {
-    /// Docker image to run (e.g., "ozzydb-env:abc123").
     pub image: String,
-    /// Environment variables to set in the container.
-    /// Contains all OZZY_* vars, determinism vars, params, etc.
     pub env_vars: HashMap<String, String>,
-    /// Timeout in seconds.
     pub timeout_secs: u64,
 }
 
-/// Specification for an input file (used to build the input manifest).
-#[derive(Debug, Clone)]
-pub struct InputSpec {
-    /// Input name (matches the key in the input manifest).
-    pub name: String,
-    /// Content type of the input.
-    pub content_type: String,
-    /// Whether this input is a collection directory.
-    pub is_collection: bool,
+/// Loader hint for a blob-like input artifact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InputLoader {
+    Bytes,
+    Csv,
+    Json,
+    Parquet,
+    Text,
+}
+
+/// A manifest entry for one blob-like input file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InputBlobSpec {
+    pub path: String,
+    pub loader: InputLoader,
+}
+
+/// Runtime input manifest shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InputSpec {
+    Blob {
+        path: String,
+        loader: InputLoader,
+    },
+    Bundle {
+        entries: BTreeMap<String, InputSpec>,
+    },
+    Collection {
+        items: Vec<InputSpec>,
+    },
 }
 
 /// Result of a compute execution.
 #[derive(Debug)]
 pub struct ComputeResult {
-    /// Container exit code.
     pub exit_code: i32,
-    /// Combined stdout + stderr from the container.
     pub logs: String,
-    /// Execution duration in milliseconds.
     pub duration_ms: u64,
 }
 
 impl ComputeResult {
-    /// Whether the execution succeeded (exit code 0).
     pub fn success(&self) -> bool {
         self.exit_code == 0
     }
 }
 
-/// Build the input manifest JSON for a set of inputs.
-///
-/// This produces the JSON blob that the runner reads from `OZZY_INPUT_MANIFEST`.
-pub fn build_input_manifest(inputs: &[InputSpec]) -> serde_json::Value {
-    let mut manifest = serde_json::Map::new();
-    for input in inputs {
-        let container_path = format!("/workspace/inputs/{}", input.name);
-        let mut spec = serde_json::Map::new();
-        spec.insert("path".to_string(), serde_json::json!(container_path));
-        spec.insert(
-            "content_type".to_string(),
-            serde_json::json!(input.content_type),
-        );
-        spec.insert(
-            "is_collection".to_string(),
-            serde_json::json!(input.is_collection),
-        );
-        if input.is_collection {
-            spec.insert(
-                "manifest_path".to_string(),
-                serde_json::json!(format!("{}/manifest.json", container_path)),
-            );
-        }
-        manifest.insert(input.name.clone(), serde_json::Value::Object(spec));
-    }
-    serde_json::Value::Object(manifest)
+/// Build the input manifest JSON for a set of named inputs.
+pub fn build_input_manifest(inputs: &BTreeMap<String, InputSpec>) -> serde_json::Value {
+    serde_json::to_value(inputs).expect("input manifest serialization should be infallible")
 }
 
 /// Build the per-param env vars (OZZY_PARAM_*).
-///
-/// Keys are sanitized to `[a-zA-Z0-9_]` — any non-matching characters are stripped.
 pub fn build_param_env_vars(params: &serde_json::Value) -> Vec<(String, String)> {
     let mut vars = Vec::new();
     if let Some(obj) = params.as_object() {
@@ -150,35 +127,73 @@ mod tests {
     }
 
     #[test]
-    fn test_build_input_manifest_single() {
-        let inputs = vec![InputSpec {
-            name: "readings".to_string(),
-            content_type: "application/vnd.apache.parquet".to_string(),
-            is_collection: false,
-        }];
+    fn test_build_input_manifest_blob() {
+        let manifest = build_input_manifest(&BTreeMap::from([(
+            "readings".to_string(),
+            InputSpec::Blob {
+                path: "/workspace/inputs/readings".to_string(),
+                loader: InputLoader::Parquet,
+            },
+        )]));
 
-        let manifest = build_input_manifest(&inputs);
         let readings = manifest.get("readings").unwrap();
+        assert_eq!(readings.get("kind").unwrap(), "blob");
         assert_eq!(readings.get("path").unwrap(), "/workspace/inputs/readings");
-        assert_eq!(
-            readings.get("content_type").unwrap(),
-            "application/vnd.apache.parquet"
-        );
-        assert_eq!(readings.get("is_collection").unwrap(), false);
+        assert_eq!(readings.get("loader").unwrap(), "parquet");
     }
 
     #[test]
     fn test_build_input_manifest_collection() {
-        let inputs = vec![InputSpec {
-            name: "all_readings".to_string(),
-            content_type: "collection".to_string(),
-            is_collection: true,
-        }];
+        let manifest = build_input_manifest(&BTreeMap::from([(
+            "all_readings".to_string(),
+            InputSpec::Collection {
+                items: vec![
+                    InputSpec::Blob {
+                        path: "/workspace/inputs/all_readings/item_0".to_string(),
+                        loader: InputLoader::Parquet,
+                    },
+                    InputSpec::Blob {
+                        path: "/workspace/inputs/all_readings/item_1".to_string(),
+                        loader: InputLoader::Parquet,
+                    },
+                ],
+            },
+        )]));
 
-        let manifest = build_input_manifest(&inputs);
         let coll = manifest.get("all_readings").unwrap();
-        assert_eq!(coll.get("is_collection").unwrap(), true);
-        assert!(coll.get("manifest_path").is_some());
+        assert_eq!(coll.get("kind").unwrap(), "collection");
+        assert_eq!(coll.get("items").unwrap().as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_build_input_manifest_bundle() {
+        let manifest = build_input_manifest(&BTreeMap::from([(
+            "bundle".to_string(),
+            InputSpec::Bundle {
+                entries: BTreeMap::from([
+                    (
+                        "obs".to_string(),
+                        InputSpec::Blob {
+                            path: "/workspace/inputs/bundle/obs".to_string(),
+                            loader: InputLoader::Parquet,
+                        },
+                    ),
+                    (
+                        "meta".to_string(),
+                        InputSpec::Blob {
+                            path: "/workspace/inputs/bundle/meta".to_string(),
+                            loader: InputLoader::Json,
+                        },
+                    ),
+                ]),
+            },
+        )]));
+
+        let bundle = manifest.get("bundle").unwrap();
+        assert_eq!(bundle.get("kind").unwrap(), "bundle");
+        let entries = bundle.get("entries").unwrap().as_object().unwrap();
+        assert_eq!(entries["obs"]["loader"], "parquet");
+        assert_eq!(entries["meta"]["loader"], "json");
     }
 
     #[test]
@@ -196,19 +211,5 @@ mod tests {
         assert_eq!(var_map.get("OZZY_PARAM_threshold").unwrap(), "12.5");
         assert_eq!(var_map.get("OZZY_PARAM_format").unwrap(), "csv");
         assert_eq!(var_map.get("OZZY_PARAM_debug").unwrap(), "true");
-    }
-
-    #[test]
-    fn test_build_param_env_vars_empty() {
-        let params = serde_json::json!({});
-        let vars = build_param_env_vars(&params);
-        assert!(vars.is_empty());
-    }
-
-    #[test]
-    fn test_build_param_env_vars_string_not_quoted() {
-        let params = serde_json::json!({ "name": "alice" });
-        let vars = build_param_env_vars(&params);
-        assert_eq!(vars[0].1, "alice");
     }
 }

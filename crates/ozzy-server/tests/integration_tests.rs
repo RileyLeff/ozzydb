@@ -34,8 +34,7 @@ fn test_r2_config() -> ozzy_server::config::R2Config {
     ozzy_server::config::R2Config {
         endpoint: std::env::var("TEST_R2_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:9002".into()),
-        bucket: std::env::var("TEST_R2_BUCKET")
-            .unwrap_or_else(|_| "ozzy-test".into()),
+        bucket: std::env::var("TEST_R2_BUCKET").unwrap_or_else(|_| "ozzy-test".into()),
         access_key_id: std::env::var("TEST_R2_ACCESS_KEY_ID")
             .unwrap_or_else(|_| "minioadmin".into()),
         secret_access_key: std::env::var("TEST_R2_SECRET_ACCESS_KEY")
@@ -122,8 +121,11 @@ impl TestServer {
             ContentStorage::from_config(&config).expect("Failed to create content storage");
 
         let git = ozzy_server::GitHubProvider::new(None, db.clone());
-        let compute =
-            ozzy_server::compute::ComputeRegistry::from_config(&config.compute, config.docker.as_ref(), config.fly.as_ref());
+        let compute = ozzy_server::compute::ComputeRegistry::from_config(
+            &config.compute,
+            config.docker.as_ref(),
+            config.fly.as_ref(),
+        );
         let state = AppState {
             config: Arc::new(config),
             db: db.clone(),
@@ -1143,6 +1145,8 @@ async fn setup_job_test(
             commit.id,
             &serde_json::json!({}),
             "params_hash_placeholder",
+            &serde_json::json!({}),
+            "",
             &node_status,
             Some(user.id),
         )

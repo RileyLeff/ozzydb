@@ -1,7 +1,7 @@
 # v4 Workflow State
 
 ## Current Phase: Phase 5 underway
-## Current Step: Phase 5.2 underway; invocation/output artifact slice landed
+## Current Step: Phase 5.3 next; typed fetch rewrite is complete
 
 ## Completed Steps
 
@@ -488,3 +488,49 @@
   - `cargo check -p ozzy-server --tests`
 - Review artifact:
   - `planning/reviews/v4/20_pre_phase5_source_fallback_fix_review.md`
+
+### Phase 5.1: Bind `TransformVersion` to execution
+- Bound execution to published `TransformVersion` data through pinned
+  `PublishedProjectRevision` snapshots.
+- Execution now resolves typed transform input/output ports and published
+  `EnvironmentVersion`s instead of using the older authored-transform runtime
+  model.
+- Verification for this checkpoint:
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/21_phase5_1_review.md`
+
+### Phase 5.2: Invocation/output artifact slice
+- Successful node execution now creates real `v4_invocations`.
+- Successful node execution now persists output artifacts and declared output
+  conformance.
+- Invocation success/failure transitions are transactional instead of leaving
+  stale `running` rows on cache hits or failed persistence.
+- Verification for this checkpoint:
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/22_phase5_2_invocation_artifacts_review.md`
+
+### Phase 5.2 completion: typed fetch and artifact-bound inputs
+- Replaced endpoint leaf ingress with typed endpoint inputs.
+  - endpoints now declare `[endpoints.<name>.inputs.<port>]`
+  - endpoint edges now use `input:<port>`
+- `POST /v1/fetch/...` now accepts explicit artifact bindings per endpoint input
+  instead of the old anonymous `data:` / `collection:` model.
+- Fetch now validates:
+  - exact endpoint input coverage
+  - same-project artifact ownership
+  - existence of non-rejected conformance for the required endpoint input type
+- Job dedup now includes `input_bindings_hash` as part of the identity.
+- Runtime input manifests for Python and R are now recursive artifact-backed
+  bundle/collection manifests instead of the old `is_collection` flag contract.
+- The live v4 fetch/orchestrator path no longer depends on `data:` or
+  `collection:` ingress.
+- Verification for this checkpoint:
+  - `cargo test -p ozzy-core`
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-core -p ozzy-types -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/23_phase5_2_typed_fetch_review.md`

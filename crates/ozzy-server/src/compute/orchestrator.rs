@@ -7,7 +7,7 @@
 //! 4. Updates job/node status as execution progresses
 //! 5. Stores output and sets job result on completion
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use base64::Engine as _;
 use serde_json::json;
@@ -17,6 +17,7 @@ use crate::AppState;
 use crate::registry::{
     RegistrySnapshot, RuntimeTransformDef, load_published_project_revision_by_commit,
 };
+use ozzy_types::syntax::{BuiltinConstructor, BuiltinType, TypeExpr};
 
 /// Run a job to completion: load context, execute DAG in parallel waves, update status.
 pub async fn run_job(state: AppState, job_id: Uuid) {
@@ -59,6 +60,15 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
         .endpoints
         .get(&job.endpoint_name)
         .ok_or_else(|| anyhow::anyhow!("Endpoint '{}' not found", job.endpoint_name))?;
+    let requested_inputs = decode_job_input_bindings(&job.input_bindings)?;
+    let endpoint_inputs = super::super::api::v1::fetch::validate_and_resolve_endpoint_inputs(
+        state,
+        project.id,
+        published.snapshot.as_ref(),
+        endpoint_def,
+        &requested_inputs,
+    )
+    .await?;
 
     let resolved_params: serde_json::Value = job.params.clone();
     // Safety: source_dir TempDir lives for the duration of run_job_inner. Spawned tasks
@@ -132,6 +142,7 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
             let commit = commit.clone();
             let project_id = project.id;
             let resolved_params = resolved_params.clone();
+            let endpoint_inputs = endpoint_inputs.clone();
             let platform_hash = platform_hash.clone();
             let platform = platform.clone();
             let transforms = published.runtime.transforms.clone();
@@ -164,6 +175,7 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
                     project_id,
                     &job_endpoint_name,
                     &resolved_params,
+                    &endpoint_inputs,
                     &platform_hash,
                     &platform,
                     &edge_map_for_node,
@@ -248,6 +260,7 @@ async fn execute_node(
     project_id: Uuid,
     endpoint_name: &str,
     resolved_params: &serde_json::Value,
+    endpoint_inputs: &BTreeMap<String, super::super::api::v1::fetch::ResolvedEndpointInput>,
     platform_hash: &str,
     platform: &ozzy_core::platform::PlatformFingerprint,
     edges_for_node: &[(String, String)],
@@ -281,12 +294,16 @@ async fn execute_node(
     // Resolve inputs
     let mut input_hashes: Vec<(String, String)> = Vec::new();
     for (input_name, source) in edges_for_node {
-        let hash = resolve_edge_source(source, state, project_id, node_outputs).await?;
+        let hash = resolve_edge_source(source, endpoint_inputs, node_outputs).await?;
         input_hashes.push((input_name.clone(), hash));
     }
 
-    let invocation_input_bindings =
-        build_invocation_input_bindings(edges_for_node, &input_hashes, node_outputs)?;
+    let invocation_input_bindings = build_invocation_input_bindings(
+        edges_for_node,
+        &input_hashes,
+        endpoint_inputs,
+        node_outputs,
+    )?;
 
     // Resolve params
     let node_params = super::super::api::v1::fetch::resolve_node_params(
@@ -309,8 +326,7 @@ async fn execute_node(
         .await?;
 
     // Compute source hash
-    let (source_hash, function_name) =
-        compute_source_hash(transform_def, node_def, source_dir)?;
+    let (source_hash, function_name) = compute_source_hash(transform_def, node_def, source_dir)?;
 
     let params_schema_hash =
         super::super::api::v1::fetch::compute_params_schema_hash(transform_def)?;
@@ -450,24 +466,15 @@ async fn execute_node(
     let init_script = crate::runners::init::generate_init(runner_type);
 
     // Build compute inputs (for manifest only)
-    let mut compute_inputs: Vec<crate::compute::InputSpec> = Vec::new();
-    for (input_name, hash) in &input_hashes {
-        let content_type = resolve_input_content_type(
-            input_name,
-            hash,
-            state,
-            project_id,
-            edges_for_node,
-            node_outputs,
-        )
-        .await?;
-        compute_inputs.push(crate::compute::InputSpec {
-            name: input_name.clone(),
-            content_type,
-            is_collection: false,
-        });
-    }
-
+    let (compute_inputs, downloads) = build_runtime_inputs(
+        state,
+        snapshot,
+        project_id,
+        edges_for_node,
+        endpoint_inputs,
+        node_outputs,
+    )
+    .await?;
     let input_manifest = crate::compute::build_input_manifest(&compute_inputs);
     let param_env_vars = crate::compute::build_param_env_vars(&node_params);
 
@@ -485,29 +492,6 @@ async fn execute_node(
     }
 
     // Build presigned download URLs for each input (all backends use presigned URLs)
-    let mut downloads: Vec<serde_json::Value> = Vec::new();
-    for (input_name, hash) in &input_hashes {
-        let content_type = compute_inputs
-            .iter()
-            .find(|i| &i.name == input_name)
-            .map(|i| i.content_type.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing input spec for input '{}'", input_name))?;
-        let ext = super::super::api::v1::fetch::content_type_to_extension(content_type);
-        let url = state
-            .storage
-            .presigned_get_url_for_compute(
-                hash,
-                &ext,
-                std::time::Duration::from_secs(state.config.compute.timeout_secs + 300),
-            )
-            .await?;
-        let dest_path = format!("/workspace/inputs/{}", input_name);
-        downloads.push(serde_json::json!({
-            "name": input_name,
-            "url": url,
-            "path": dest_path,
-        }));
-    }
     if !downloads.is_empty() {
         env_vars.insert(
             "OZZY_INPUT_DOWNLOADS".to_string(),
@@ -806,9 +790,364 @@ pub(crate) struct NodeOutput {
     pub artifact_id: Option<Uuid>,
 }
 
+fn decode_job_input_bindings(
+    input_bindings: &serde_json::Value,
+) -> Result<BTreeMap<String, Uuid>, anyhow::Error> {
+    let object = input_bindings
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("Job input bindings must be a JSON object"))?;
+    object
+        .iter()
+        .map(|(name, value)| {
+            let id = value
+                .as_str()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Job input binding '{}' must be a UUID string", name)
+                })
+                .and_then(|raw| {
+                    Uuid::parse_str(raw).map_err(|e| {
+                        anyhow::anyhow!(
+                            "Job input binding '{}' has invalid UUID '{}': {}",
+                            name,
+                            raw,
+                            e
+                        )
+                    })
+                })?;
+            Ok((name.clone(), id))
+        })
+        .collect()
+}
+
+async fn build_runtime_inputs(
+    state: &AppState,
+    snapshot: &RegistrySnapshot,
+    project_id: Uuid,
+    edges_for_node: &[(String, String)],
+    endpoint_inputs: &BTreeMap<String, super::super::api::v1::fetch::ResolvedEndpointInput>,
+    node_outputs: &HashMap<String, NodeOutput>,
+) -> Result<
+    (
+        BTreeMap<String, crate::compute::InputSpec>,
+        Vec<serde_json::Value>,
+    ),
+    anyhow::Error,
+> {
+    let mut manifest = BTreeMap::new();
+    let mut downloads = Vec::new();
+
+    for (input_name, source) in edges_for_node {
+        let spec = if let Some(endpoint_input_name) = source.strip_prefix("input:") {
+            let binding = endpoint_inputs.get(endpoint_input_name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Endpoint input '{}' is not available for node input '{}'",
+                    endpoint_input_name,
+                    input_name
+                )
+            })?;
+            let expected_expr = snapshot.expanded_type_expr(&binding.type_ref)?;
+            materialize_artifact_input(
+                state,
+                project_id,
+                &binding.artifact,
+                &expected_expr,
+                &format!("/workspace/inputs/{}", input_name),
+                &mut downloads,
+            )
+            .await?
+        } else {
+            let output = node_outputs.get(source).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Node '{}' output is not available for input '{}'",
+                    source,
+                    input_name
+                )
+            })?;
+            let loader = input_loader_from_content_type(&output.content_type);
+            let ext = super::super::api::v1::fetch::content_type_to_extension(&output.content_type);
+            let url = state
+                .storage
+                .presigned_get_url_for_compute(
+                    &output.output_hash,
+                    &ext,
+                    std::time::Duration::from_secs(state.config.compute.timeout_secs + 300),
+                )
+                .await?;
+            let path = format!("/workspace/inputs/{}", input_name);
+            downloads.push(serde_json::json!({
+                "name": input_name,
+                "url": url,
+                "path": path,
+            }));
+            crate::compute::InputSpec::Blob { path, loader }
+        };
+
+        manifest.insert(input_name.clone(), spec);
+    }
+
+    Ok((manifest, downloads))
+}
+
+#[async_recursion::async_recursion]
+async fn materialize_artifact_input(
+    state: &AppState,
+    project_id: Uuid,
+    artifact: &crate::db::v4::StoredArtifact,
+    expected_expr: &TypeExpr,
+    base_path: &str,
+    downloads: &mut Vec<serde_json::Value>,
+) -> Result<crate::compute::InputSpec, anyhow::Error> {
+    match artifact.artifact_kind.as_str() {
+        "blob" => {
+            let content_hash = artifact.content_hash.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Blob artifact '{}' is missing a content hash", artifact.id)
+            })?;
+            let loader = infer_blob_loader_from_expr(expected_expr)?;
+            let ext = loader_extension(&loader);
+            let url = state
+                .storage
+                .presigned_get_url_for_compute(
+                    content_hash,
+                    ext,
+                    std::time::Duration::from_secs(state.config.compute.timeout_secs + 300),
+                )
+                .await?;
+            downloads.push(serde_json::json!({
+                "name": artifact.id.to_string(),
+                "url": url,
+                "path": base_path,
+            }));
+            Ok(crate::compute::InputSpec::Blob {
+                path: base_path.to_string(),
+                loader,
+            })
+        }
+        "manifest" => {
+            let manifest = state.db.decode_v4_artifact_manifest(artifact)?;
+            match (manifest, expected_expr) {
+                (
+                    ozzy_core::artifacts::ArtifactManifest::Collection { items },
+                    TypeExpr::Collection(item_ty),
+                ) => {
+                    let mut item_specs = Vec::new();
+                    for (idx, entry) in items.iter().enumerate() {
+                        let child = state
+                            .db
+                            .get_v4_artifact(entry.artifact_id)
+                            .await?
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Manifest artifact '{}' references missing artifact '{}'",
+                                    artifact.id,
+                                    entry.artifact_id
+                                )
+                            })?;
+                        if child.project_id != project_id {
+                            anyhow::bail!(
+                                "Manifest artifact '{}' references artifact '{}' outside project '{}'",
+                                artifact.id,
+                                child.id,
+                                project_id
+                            );
+                        }
+                        let child_path = format!("{}/item_{:06}", base_path, idx);
+                        item_specs.push(
+                            materialize_artifact_input(
+                                state,
+                                project_id,
+                                &child,
+                                item_ty.as_ref(),
+                                &child_path,
+                                downloads,
+                            )
+                            .await?,
+                        );
+                    }
+                    Ok(crate::compute::InputSpec::Collection { items: item_specs })
+                }
+                (
+                    ozzy_core::artifacts::ArtifactManifest::Bundle { entries },
+                    TypeExpr::Record(record),
+                ) => {
+                    let mut bundle_entries = BTreeMap::new();
+                    let expected_fields = record
+                        .fields
+                        .iter()
+                        .map(|field| (field.name.clone(), field))
+                        .collect::<BTreeMap<_, _>>();
+
+                    for field in &record.fields {
+                        let entry = entries.get(&field.name).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Bundle artifact '{}' is missing required entry '{}'",
+                                artifact.id,
+                                field.name
+                            )
+                        })?;
+                        let child = state
+                            .db
+                            .get_v4_artifact(entry.artifact_id)
+                            .await?
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Bundle artifact '{}' references missing artifact '{}'",
+                                    artifact.id,
+                                    entry.artifact_id
+                                )
+                            })?;
+                        if child.project_id != project_id {
+                            anyhow::bail!(
+                                "Bundle artifact '{}' references artifact '{}' outside project '{}'",
+                                artifact.id,
+                                child.id,
+                                project_id
+                            );
+                        }
+                        let child_path = format!("{}/{}", base_path, field.name);
+                        let child_spec = materialize_artifact_input(
+                            state,
+                            project_id,
+                            &child,
+                            &field.ty,
+                            &child_path,
+                            downloads,
+                        )
+                        .await?;
+                        bundle_entries.insert(field.name.clone(), child_spec);
+                    }
+
+                    if !record.open {
+                        let unexpected = entries
+                            .keys()
+                            .filter(|name| !expected_fields.contains_key(*name))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if !unexpected.is_empty() {
+                            anyhow::bail!(
+                                "Bundle artifact '{}' has unexpected entries {:?} for a closed record type",
+                                artifact.id,
+                                unexpected
+                            );
+                        }
+                    }
+
+                    Ok(crate::compute::InputSpec::Bundle {
+                        entries: bundle_entries,
+                    })
+                }
+                (ozzy_core::artifacts::ArtifactManifest::Collection { .. }, other) => {
+                    anyhow::bail!(
+                        "Manifest artifact '{}' is a collection but expected type '{}' is not a collection",
+                        artifact.id,
+                        describe_type_expr(other)
+                    )
+                }
+                (ozzy_core::artifacts::ArtifactManifest::Bundle { .. }, other) => {
+                    anyhow::bail!(
+                        "Manifest artifact '{}' is a bundle but expected type '{}' is not a record",
+                        artifact.id,
+                        describe_type_expr(other)
+                    )
+                }
+            }
+        }
+        other => anyhow::bail!(
+            "Artifact '{}' has unsupported runtime kind '{}'",
+            artifact.id,
+            other
+        ),
+    }
+}
+
+fn infer_blob_loader_from_expr(
+    expr: &TypeExpr,
+) -> Result<crate::compute::InputLoader, anyhow::Error> {
+    if contains_builtin(expr, BuiltinType::Parquet) {
+        return Ok(crate::compute::InputLoader::Parquet);
+    }
+    if contains_constructor(expr, BuiltinConstructor::Csv) {
+        return Ok(crate::compute::InputLoader::Csv);
+    }
+    if contains_builtin(expr, BuiltinType::Json) {
+        return Ok(crate::compute::InputLoader::Json);
+    }
+    if contains_builtin(expr, BuiltinType::Utf8) || contains_builtin(expr, BuiltinType::String) {
+        return Ok(crate::compute::InputLoader::Text);
+    }
+    if contains_builtin(expr, BuiltinType::Bytes) {
+        return Ok(crate::compute::InputLoader::Bytes);
+    }
+    match expr {
+        TypeExpr::Table(_) => anyhow::bail!(
+            "Table type '{}' does not declare an executable encoding; add parquet/json/csv to the type",
+            describe_type_expr(expr)
+        ),
+        TypeExpr::Record(_) | TypeExpr::Collection(_) => anyhow::bail!(
+            "Composite type '{}' cannot be loaded as a blob",
+            describe_type_expr(expr)
+        ),
+        _ => Ok(crate::compute::InputLoader::Bytes),
+    }
+}
+
+fn contains_builtin(expr: &TypeExpr, needle: BuiltinType) -> bool {
+    match expr {
+        TypeExpr::Builtin(builtin) => *builtin == needle,
+        TypeExpr::Intersection(parts) => parts.iter().any(|part| contains_builtin(part, needle)),
+        _ => false,
+    }
+}
+
+fn contains_constructor(expr: &TypeExpr, needle: BuiltinConstructor) -> bool {
+    match expr {
+        TypeExpr::Constructor(constructor) => constructor.name == needle,
+        TypeExpr::Intersection(parts) => {
+            parts.iter().any(|part| contains_constructor(part, needle))
+        }
+        _ => false,
+    }
+}
+
+fn loader_extension(loader: &crate::compute::InputLoader) -> &'static str {
+    match loader {
+        crate::compute::InputLoader::Bytes => "bin",
+        crate::compute::InputLoader::Csv => "csv",
+        crate::compute::InputLoader::Json => "json",
+        crate::compute::InputLoader::Parquet => "parquet",
+        crate::compute::InputLoader::Text => "txt",
+    }
+}
+
+fn input_loader_from_content_type(content_type: &str) -> crate::compute::InputLoader {
+    match content_type {
+        "application/vnd.apache.parquet" => crate::compute::InputLoader::Parquet,
+        "application/json" => crate::compute::InputLoader::Json,
+        "text/csv" => crate::compute::InputLoader::Csv,
+        "text/plain" => crate::compute::InputLoader::Text,
+        _ => crate::compute::InputLoader::Bytes,
+    }
+}
+
+fn describe_type_expr(expr: &TypeExpr) -> String {
+    match expr {
+        TypeExpr::Builtin(builtin) => builtin.as_str().to_string(),
+        TypeExpr::Ref(type_ref) => match &type_ref.version {
+            Some(version) => format!("{}@{}", type_ref.name, version),
+            None => type_ref.name.clone(),
+        },
+        TypeExpr::Intersection(_) => "intersection".to_string(),
+        TypeExpr::Constructor(constructor) => constructor.name.as_str().to_string(),
+        TypeExpr::Record(_) => "record".to_string(),
+        TypeExpr::Collection(_) => "collection".to_string(),
+        TypeExpr::Table(_) => "table".to_string(),
+        TypeExpr::Never => "never".to_string(),
+    }
+}
+
 fn build_invocation_input_bindings(
     edges_for_node: &[(String, String)],
     input_hashes: &[(String, String)],
+    endpoint_inputs: &BTreeMap<String, super::super::api::v1::fetch::ResolvedEndpointInput>,
     node_outputs: &HashMap<String, NodeOutput>,
 ) -> Result<serde_json::Value, anyhow::Error> {
     let input_hash_map = input_hashes
@@ -821,11 +1160,18 @@ fn build_invocation_input_bindings(
         let content_hash = input_hash_map.get(input_name.as_str()).ok_or_else(|| {
             anyhow::anyhow!("Input '{}' is missing a resolved content hash", input_name)
         })?;
-        let artifact_id = node_outputs
-            .get(source)
-            .and_then(|output| output.artifact_id)
-            .map(|id| serde_json::Value::String(id.to_string()))
-            .unwrap_or(serde_json::Value::Null);
+        let artifact_id = if let Some(endpoint_input_name) = source.strip_prefix("input:") {
+            endpoint_inputs
+                .get(endpoint_input_name)
+                .map(|binding| serde_json::Value::String(binding.artifact.id.to_string()))
+                .unwrap_or(serde_json::Value::Null)
+        } else {
+            node_outputs
+                .get(source)
+                .and_then(|output| output.artifact_id)
+                .map(|id| serde_json::Value::String(id.to_string()))
+                .unwrap_or(serde_json::Value::Null)
+        };
         bindings.insert(
             input_name.clone(),
             json!({
@@ -843,12 +1189,13 @@ fn resolve_single_output_type(
     snapshot: &RegistrySnapshot,
     transform_def: &RuntimeTransformDef,
 ) -> Result<(String, Uuid), anyhow::Error> {
-    let (output_name, output_port) = transform_def
-        .outputs
-        .ports
-        .iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("Transform '{}' has no output ports", transform_def.versioned_name))?;
+    let (output_name, output_port) =
+        transform_def.outputs.ports.iter().next().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Transform '{}' has no output ports",
+                transform_def.versioned_name
+            )
+        })?;
     if transform_def.outputs.ports.len() != 1 {
         anyhow::bail!(
             "Transform '{}' has multiple output ports; runtime output binding is not yet port-addressable",
@@ -858,7 +1205,6 @@ fn resolve_single_output_type(
     let (_, stored_type) = snapshot.resolve_type_ref(&output_port.ty)?;
     Ok((output_name.clone(), stored_type.id))
 }
-
 
 /// Compute execution waves: groups of nodes whose dependencies are all in earlier waves.
 ///
@@ -882,7 +1228,7 @@ pub fn compute_waves(
         }
 
         let source = &edge.from;
-        // If the source is a node name (not data: or collection: or endpoint:)
+        // If the source is a node name (not input: or endpoint:)
         let source_node = source.split('.').next().unwrap_or(source);
         if node_names.contains(source_node) {
             deps.get_mut(target_node).unwrap().insert(source_node);
@@ -936,35 +1282,14 @@ fn create_source_tarball(source_dir: &std::path::Path) -> Result<Vec<u8>, anyhow
 /// Resolve an edge source to a content hash.
 async fn resolve_edge_source(
     source: &str,
-    state: &AppState,
-    project_id: Uuid,
+    endpoint_inputs: &BTreeMap<String, super::super::api::v1::fetch::ResolvedEndpointInput>,
     node_outputs: &HashMap<String, NodeOutput>,
 ) -> Result<String, anyhow::Error> {
-    if let Some(data_name) = source.strip_prefix("data:") {
-        let atom = state
-            .db
-            .get_data_atom(project_id, data_name)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Data atom '{}' not found", data_name))?;
-        if atom.yanked {
-            anyhow::bail!("Data atom '{}' has been yanked", data_name);
-        }
-        Ok(atom.hash)
-    } else if let Some(coll_name) = source.strip_prefix("collection:") {
-        let collection = state
-            .db
-            .get_collection(project_id, coll_name)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Collection '{}' not found", coll_name))?;
-        if collection.yanked {
-            anyhow::bail!("Collection '{}' has been yanked", coll_name);
-        }
-        let version = state
-            .db
-            .get_latest_collection_version(collection.id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Collection '{}' has no versions", coll_name))?;
-        Ok(version.hash)
+    if let Some(input_name) = source.strip_prefix("input:") {
+        let binding = endpoint_inputs
+            .get(input_name)
+            .ok_or_else(|| anyhow::anyhow!("Endpoint input '{}' is not available", input_name))?;
+        Ok(format!("artifact:{}", binding.artifact.id))
     } else if source.starts_with("endpoint:") {
         anyhow::bail!("Cross-project endpoint dependencies ('{source}') are not yet implemented")
     } else {
@@ -1037,46 +1362,6 @@ fn compute_source_hash(
     }
 }
 
-/// Resolve the content type for an input edge.
-///
-/// For data atoms: reads content_type from DB.
-/// For collections: returns "collection".
-/// For node outputs: reads from the NodeOutput struct.
-async fn resolve_input_content_type(
-    input_name: &str,
-    _hash: &str,
-    state: &AppState,
-    project_id: Uuid,
-    edges_for_node: &[(String, String)],
-    node_outputs: &HashMap<String, NodeOutput>,
-) -> Result<String, anyhow::Error> {
-    // Find the source string for this input name
-    let source = edges_for_node
-        .iter()
-        .find(|(name, _)| name == input_name)
-        .map(|(_, s)| s.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Input '{}' has no bound edge source", input_name))?;
-
-    if let Some(data_name) = source.strip_prefix("data:") {
-        let atom = state
-            .db
-            .get_data_atom(project_id, data_name)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Data atom '{}' not found", data_name))?;
-        return Ok(atom.content_type);
-    } else if source.starts_with("collection:") {
-        return Ok("collection".to_string());
-    } else if let Some(output) = node_outputs.get(source) {
-        return Ok(output.content_type.clone());
-    }
-
-    Err(anyhow::anyhow!(
-        "Input '{}' points at unavailable source '{}'",
-        input_name,
-        source
-    ))
-}
-
 /// Resolve secrets hash for a transform.
 ///
 /// Uses `ozzy_core::hash::secrets_hash()` to match the fetch.rs cache-hit fast path.
@@ -1116,6 +1401,14 @@ mod tests {
 
     fn make_linear_endpoint() -> EndpointDef {
         let mut nodes = HashMap::new();
+        let mut inputs = ozzy_types::ports::TypedPortSet::default();
+        inputs.insert(
+            "raw",
+            ozzy_types::ports::TypedPort::new(ozzy_types::syntax::TypeRefExpr::new(
+                "std/Input",
+                Some("1".to_string()),
+            )),
+        );
         nodes.insert(
             "step1".to_string(),
             NodeDef {
@@ -1134,10 +1427,11 @@ mod tests {
         EndpointDef {
             description: Some("linear".to_string()),
             params: HashMap::new(),
+            inputs,
             nodes,
             edges: vec![
                 EdgeDef {
-                    from: "data:raw".to_string(),
+                    from: "input:raw".to_string(),
                     to: "step1.data".to_string(),
                 },
                 EdgeDef {
@@ -1151,6 +1445,14 @@ mod tests {
     fn make_parallel_endpoint() -> EndpointDef {
         // step1 and step2 both depend only on data, step3 depends on both
         let mut nodes = HashMap::new();
+        let mut inputs = ozzy_types::ports::TypedPortSet::default();
+        inputs.insert(
+            "raw",
+            ozzy_types::ports::TypedPort::new(ozzy_types::syntax::TypeRefExpr::new(
+                "std/Input",
+                Some("1".to_string()),
+            )),
+        );
         nodes.insert(
             "step1".to_string(),
             NodeDef {
@@ -1176,14 +1478,15 @@ mod tests {
         EndpointDef {
             description: Some("parallel".to_string()),
             params: HashMap::new(),
+            inputs,
             nodes,
             edges: vec![
                 EdgeDef {
-                    from: "data:raw".to_string(),
+                    from: "input:raw".to_string(),
                     to: "step1.data".to_string(),
                 },
                 EdgeDef {
-                    from: "data:raw".to_string(),
+                    from: "input:raw".to_string(),
                     to: "step2.data".to_string(),
                 },
                 EdgeDef {
@@ -1233,9 +1536,10 @@ mod tests {
         let endpoint = EndpointDef {
             description: None,
             params: HashMap::new(),
+            inputs: ozzy_types::ports::TypedPortSet::default(),
             nodes,
             edges: vec![EdgeDef {
-                from: "data:x".to_string(),
+                from: "input:x".to_string(),
                 to: "only.input".to_string(),
             }],
         };
@@ -1260,10 +1564,11 @@ mod tests {
         let endpoint = EndpointDef {
             description: None,
             params: HashMap::new(),
+            inputs: ozzy_types::ports::TypedPortSet::default(),
             nodes,
             edges: vec![
                 EdgeDef {
-                    from: "data:raw".to_string(),
+                    from: "input:raw".to_string(),
                     to: "a.input".to_string(),
                 },
                 EdgeDef {
@@ -1297,13 +1602,29 @@ mod tests {
     fn test_build_invocation_input_bindings_carries_hashes_and_node_artifacts() {
         let upstream_artifact_id = Uuid::new_v4();
         let edges = vec![
-            ("raw".to_string(), "data:raw".to_string()),
+            ("raw".to_string(), "input:raw".to_string()),
             ("cleaned".to_string(), "step1".to_string()),
         ];
         let input_hashes = vec![
             ("raw".to_string(), "hash_raw".to_string()),
             ("cleaned".to_string(), "hash_step1".to_string()),
         ];
+        let endpoint_inputs = BTreeMap::from([(
+            "raw".to_string(),
+            crate::api::v1::fetch::ResolvedEndpointInput {
+                artifact: crate::db::v4::StoredArtifact {
+                    id: Uuid::new_v4(),
+                    project_id: Uuid::new_v4(),
+                    artifact_kind: "blob".to_string(),
+                    content_hash: Some("hash_raw".to_string()),
+                    manifest: None,
+                    source_invocation_id: None,
+                    created_by: Uuid::new_v4(),
+                    created_at: chrono::Utc::now(),
+                },
+                type_ref: ozzy_types::syntax::TypeRefExpr::new("std/Input", Some("1".to_string())),
+            },
+        )]);
         let node_outputs = HashMap::from([(
             "step1".to_string(),
             NodeOutput {
@@ -1317,11 +1638,15 @@ mod tests {
         )]);
 
         let bindings =
-            build_invocation_input_bindings(&edges, &input_hashes, &node_outputs).unwrap();
+            build_invocation_input_bindings(&edges, &input_hashes, &endpoint_inputs, &node_outputs)
+                .unwrap();
 
-        assert_eq!(bindings["raw"]["source"], "data:raw");
+        assert_eq!(bindings["raw"]["source"], "input:raw");
         assert_eq!(bindings["raw"]["content_hash"], "hash_raw");
-        assert!(bindings["raw"]["artifact_id"].is_null());
+        assert_eq!(
+            bindings["raw"]["artifact_id"],
+            serde_json::Value::String(endpoint_inputs["raw"].artifact.id.to_string())
+        );
         assert_eq!(bindings["cleaned"]["source"], "step1");
         assert_eq!(bindings["cleaned"]["content_hash"], "hash_step1");
         assert_eq!(

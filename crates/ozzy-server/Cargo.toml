@@ -54,6 +54,7 @@ uuid.workspace = true
 # Error handling
 anyhow.workspace = true
 thiserror.workspace = true
+async-recursion = "1.1"
 
 # Tracing
 tracing.workspace = true

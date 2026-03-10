@@ -11,7 +11,7 @@ use sqlx::{Postgres, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
-use ozzy_core::toml_spec::{OzzyToml, PublishedEnvironmentDef, TransformDef};
+use ozzy_core::toml_spec::{EndpointDef, OzzyToml, PublishedEnvironmentDef, TransformDef};
 use ozzy_types::canonical::{CanonicalType, CanonicalizationError};
 use ozzy_types::ports::{TypedPort, TypedPortSet};
 use ozzy_types::registry::TypeVersion;
@@ -87,6 +87,22 @@ pub enum PublicationError {
     UnknownTransformPortType {
         transform_name: String,
         port_name: String,
+        type_name: String,
+    },
+    #[error(
+        "endpoint input '{endpoint_name}.{input_name}' references unknown local type '{type_name}'"
+    )]
+    UnknownEndpointInputType {
+        endpoint_name: String,
+        input_name: String,
+        type_name: String,
+    },
+    #[error(
+        "endpoint input '{endpoint_name}.{input_name}' uses unsupported builtin type '{type_name}' directly; define it in [types] first"
+    )]
+    BuiltinEndpointInputTypeMustBeNamed {
+        endpoint_name: String,
+        input_name: String,
         type_name: String,
     },
     #[error(
@@ -244,16 +260,21 @@ async fn compile_publication_bundle(
             &environments,
         )
         .await?;
+    let (rewritten_endpoints, endpoint_external_types) =
+        resolve_published_endpoints(tx, project_id, &ozzy_toml.endpoints, &local_types).await?;
 
     let mut attached_types = local_types.clone();
     for (key, row) in referenced_external_types {
+        attached_types.entry(key).or_insert(row);
+    }
+    for (key, row) in endpoint_external_types {
         attached_types.entry(key).or_insert(row);
     }
 
     Ok(PublicationBundle {
         environments_payload: build_environment_bindings_payload(&environments)?,
         transforms_payload: serde_json::to_value(&rewritten_transforms)?,
-        endpoints_payload: serde_json::to_value(&ozzy_toml.endpoints)?,
+        endpoints_payload: serde_json::to_value(&rewritten_endpoints)?,
         project_meta_payload: serde_json::to_value(&ozzy_toml.project)?,
         types: attached_types,
         environments,
@@ -367,6 +388,37 @@ fn build_environment_bindings_payload(
 
 type ExternalTypeRowMap = BTreeMap<String, StoredTypeVersion>;
 
+async fn resolve_published_endpoints(
+    tx: &mut Transaction<'_, Postgres>,
+    project_id: Uuid,
+    authored: &std::collections::HashMap<String, EndpointDef>,
+    local_types: &BTreeMap<String, StoredTypeVersion>,
+) -> Result<(BTreeMap<String, EndpointDef>, ExternalTypeRowMap), PublicationError> {
+    let mut rewritten = BTreeMap::new();
+    let mut external = BTreeMap::new();
+
+    for (name, endpoint) in authored {
+        let (input_rows, rewritten_inputs, input_external) =
+            resolve_endpoint_input_ports(tx, project_id, name, &endpoint.inputs, local_types)
+                .await?;
+        let _ = input_rows;
+        external.extend(input_external);
+
+        rewritten.insert(
+            name.clone(),
+            EndpointDef {
+                description: endpoint.description.clone(),
+                params: endpoint.params.clone(),
+                inputs: rewritten_inputs,
+                nodes: endpoint.nodes.clone(),
+                edges: endpoint.edges.clone(),
+            },
+        );
+    }
+
+    Ok((rewritten, external))
+}
+
 async fn resolve_or_publish_transforms(
     tx: &mut Transaction<'_, Postgres>,
     project_id: Uuid,
@@ -464,6 +516,71 @@ async fn resolve_or_publish_transforms(
     }
 
     Ok((published, rewritten, external_types))
+}
+
+async fn resolve_endpoint_input_ports(
+    tx: &mut Transaction<'_, Postgres>,
+    project_id: Uuid,
+    endpoint_name: &str,
+    authored_ports: &TypedPortSet,
+    local_types: &BTreeMap<String, StoredTypeVersion>,
+) -> Result<
+    (
+        BTreeMap<String, StoredTypeVersion>,
+        TypedPortSet,
+        ExternalTypeRowMap,
+    ),
+    PublicationError,
+> {
+    let mut rows = BTreeMap::new();
+    let mut rewritten = TypedPortSet::default();
+    let mut external = BTreeMap::new();
+
+    for (input_name, port) in &authored_ports.ports {
+        let row = match &port.ty.version {
+            Some(version) => {
+                let stored = get_type_version_tx(tx, project_id, &port.ty.name, version)
+                    .await?
+                    .ok_or_else(|| PublicationError::MissingPublishedTypeReference {
+                        project_id,
+                        name: port.ty.name.clone(),
+                        version: version.clone(),
+                    })?;
+                external.insert(
+                    format!("{}@{}", stored.name, stored.version),
+                    stored.clone(),
+                );
+                stored
+            }
+            None => {
+                if BuiltinType::parse(&port.ty.name).is_some() {
+                    return Err(PublicationError::BuiltinEndpointInputTypeMustBeNamed {
+                        endpoint_name: endpoint_name.to_string(),
+                        input_name: input_name.clone(),
+                        type_name: port.ty.name.clone(),
+                    });
+                }
+                local_types.get(&port.ty.name).cloned().ok_or_else(|| {
+                    PublicationError::UnknownEndpointInputType {
+                        endpoint_name: endpoint_name.to_string(),
+                        input_name: input_name.clone(),
+                        type_name: port.ty.name.clone(),
+                    }
+                })?
+            }
+        };
+
+        rows.insert(input_name.clone(), row.clone());
+        rewritten.insert(
+            input_name.clone(),
+            TypedPort {
+                ty: TypeRefExpr::new(row.name.clone(), Some(row.version.clone())),
+                description: port.description.clone(),
+            },
+        );
+    }
+
+    Ok((rows, rewritten, external))
 }
 
 async fn find_matching_transform_version(

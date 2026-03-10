@@ -1225,6 +1225,8 @@ async fn test_create_and_get_job() -> Result<()> {
             commit.id,
             &params,
             &params_hash,
+            &serde_json::json!({}),
+            "",
             &node_status,
             Some(user.id),
         )
@@ -1284,7 +1286,7 @@ async fn test_find_active_job_dedup() -> Result<()> {
 
     // No active job initially
     let found = db
-        .find_active_job(project.id, "analysis", commit.id, &params_hash)
+        .find_active_job(project.id, "analysis", commit.id, &params_hash, "")
         .await?;
     assert!(found.is_none());
 
@@ -1297,13 +1299,15 @@ async fn test_find_active_job_dedup() -> Result<()> {
             &serde_json::json!({}),
             &params_hash,
             &serde_json::json!({}),
+            "",
+            &serde_json::json!({}),
             Some(user.id),
         )
         .await?;
 
     // Now find_active_job should return it
     let found = db
-        .find_active_job(project.id, "analysis", commit.id, &params_hash)
+        .find_active_job(project.id, "analysis", commit.id, &params_hash, "")
         .await?
         .unwrap();
     assert_eq!(found.id, job.id);
@@ -1311,7 +1315,7 @@ async fn test_find_active_job_dedup() -> Result<()> {
     // Mark as done — should no longer be found
     db.update_job_status(job.id, "done").await?;
     let found = db
-        .find_active_job(project.id, "analysis", commit.id, &params_hash)
+        .find_active_job(project.id, "analysis", commit.id, &params_hash, "")
         .await?;
     assert!(found.is_none());
 
@@ -1355,6 +1359,8 @@ async fn test_update_job_status_timestamps() -> Result<()> {
             commit.id,
             &serde_json::json!({}),
             "phash",
+            &serde_json::json!({}),
+            "",
             &serde_json::json!({}),
             None,
         )
@@ -1413,6 +1419,8 @@ async fn test_update_node_status() -> Result<()> {
             commit.id,
             &serde_json::json!({}),
             "phash",
+            &serde_json::json!({}),
+            "",
             &serde_json::json!({"node_a": "queued", "node_b": "queued"}),
             None,
         )
@@ -1473,6 +1481,8 @@ async fn test_set_job_output_and_error() -> Result<()> {
             &serde_json::json!({}),
             &format!("ph_{}", Uuid::new_v4()),
             &serde_json::json!({}),
+            "",
+            &serde_json::json!({}),
             None,
         )
         .await?;
@@ -1496,6 +1506,8 @@ async fn test_set_job_output_and_error() -> Result<()> {
             commit.id,
             &serde_json::json!({}),
             &format!("ph_{}", Uuid::new_v4()),
+            &serde_json::json!({}),
+            "",
             &serde_json::json!({}),
             None,
         )
@@ -1553,6 +1565,8 @@ async fn test_list_jobs() -> Result<()> {
             &serde_json::json!({}),
             &format!("ph_{}", i),
             &serde_json::json!({}),
+            "",
+            &serde_json::json!({}),
             None,
         )
         .await?;
@@ -1604,6 +1618,8 @@ async fn test_cleanup_expired_jobs() -> Result<()> {
             commit.id,
             &serde_json::json!({}),
             &format!("ph_{}", Uuid::new_v4()),
+            &serde_json::json!({}),
+            "",
             &serde_json::json!({}),
             None,
         )

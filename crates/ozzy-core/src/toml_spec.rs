@@ -166,6 +166,8 @@ pub struct EndpointDef {
     #[serde(default)]
     pub params: HashMap<String, EndpointParamDef>,
     #[serde(default)]
+    pub inputs: TypedPortSet,
+    #[serde(default)]
     pub nodes: HashMap<String, NodeDef>,
     #[serde(default)]
     pub edges: Vec<EdgeDef>,
@@ -204,17 +206,14 @@ pub struct EdgeDef {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EdgeSource {
-    Data(String),
-    Collection(String),
+    Input(String),
     Endpoint(String),
     Node(String),
 }
 
 pub fn parse_edge_source(from: &str) -> EdgeSource {
-    if let Some(rest) = from.strip_prefix("data:") {
-        EdgeSource::Data(rest.to_string())
-    } else if let Some(rest) = from.strip_prefix("collection:") {
-        EdgeSource::Collection(rest.to_string())
+    if let Some(rest) = from.strip_prefix("input:") {
+        EdgeSource::Input(rest.to_string())
     } else if let Some(rest) = from.strip_prefix("endpoint:") {
         EdgeSource::Endpoint(rest.to_string())
     } else {
@@ -283,7 +282,7 @@ struct RawOzzyToml {
     #[serde(default)]
     transforms: HashMap<String, RawTransformDef>,
     #[serde(default)]
-    endpoints: HashMap<String, EndpointDef>,
+    endpoints: HashMap<String, RawEndpointDef>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -305,6 +304,20 @@ struct RawTransformDef {
     network: bool,
     #[serde(default)]
     secrets: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawEndpointDef {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    params: HashMap<String, EndpointParamDef>,
+    #[serde(default)]
+    inputs: HashMap<String, RawTypedPort>,
+    #[serde(default)]
+    nodes: HashMap<String, NodeDef>,
+    #[serde(default)]
+    edges: Vec<EdgeDef>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -360,6 +373,27 @@ impl OzzyToml {
             })
             .collect::<Result<HashMap<_, _>, OzzyTomlParseError>>()?;
 
+        let endpoints = raw
+            .endpoints
+            .into_iter()
+            .map(|(name, raw_endpoint)| {
+                let inputs = parse_typed_port_set(
+                    &raw_endpoint.inputs,
+                    format!("endpoints.{}.inputs", name),
+                )?;
+                Ok((
+                    name,
+                    EndpointDef {
+                        description: raw_endpoint.description,
+                        params: raw_endpoint.params,
+                        inputs,
+                        nodes: raw_endpoint.nodes,
+                        edges: raw_endpoint.edges,
+                    },
+                ))
+            })
+            .collect::<Result<HashMap<_, _>, OzzyTomlParseError>>()?;
+
         Ok(Self {
             project: raw.project,
             git: raw.git,
@@ -367,7 +401,7 @@ impl OzzyToml {
             types,
             environments: raw.environments,
             transforms,
-            endpoints: raw.endpoints,
+            endpoints,
         })
     }
 
@@ -503,6 +537,18 @@ impl OzzyToml {
                         message: format!(
                             "Invalid node name \"{}\". Names must match [a-zA-Z0-9_-]+.",
                             node_name
+                        ),
+                        suggestion: None,
+                    });
+                }
+            }
+            for input_name in endpoint.inputs.ports.keys() {
+                if !is_valid_name(input_name) {
+                    errors.push(ValidationError {
+                        location: format!("endpoints.{}.inputs.{}", name, input_name),
+                        message: format!(
+                            "Invalid input port name \"{}\". Names must match [a-zA-Z0-9_-]+.",
+                            input_name
                         ),
                         suggestion: None,
                     });
@@ -671,7 +717,17 @@ impl OzzyToml {
 
         for (endpoint_name, endpoint) in &self.endpoints {
             let node_names: Vec<&str> = endpoint.nodes.keys().map(|s| s.as_str()).collect();
+            let endpoint_input_names: Vec<&str> =
+                endpoint.inputs.ports.keys().map(String::as_str).collect();
             let mut covered_inputs: HashMap<(String, String), usize> = HashMap::new();
+
+            for (input_name, input) in &endpoint.inputs.ports {
+                self.validate_port_type_ref(
+                    &format!("endpoints.{}.inputs.{}", endpoint_name, input_name),
+                    &input.ty,
+                    errors,
+                );
+            }
 
             for (node_name, node) in &endpoint.nodes {
                 if !self.transforms.contains_key(&node.transform) {
@@ -733,9 +789,7 @@ impl OzzyToml {
 
                 let source = parse_edge_source(&edge.from);
                 let empty_ref = match &source {
-                    EdgeSource::Data(r) | EdgeSource::Collection(r) | EdgeSource::Endpoint(r) => {
-                        r.is_empty()
-                    }
+                    EdgeSource::Input(r) | EdgeSource::Endpoint(r) => r.is_empty(),
                     EdgeSource::Node(r) => r.is_empty(),
                 };
                 if empty_ref {
@@ -762,7 +816,22 @@ impl OzzyToml {
                             });
                         }
                     }
-                    EdgeSource::Data(_) | EdgeSource::Collection(_) => {}
+                    EdgeSource::Input(input_ref) => {
+                        if !input_ref.is_empty() && !endpoint.inputs.ports.contains_key(&input_ref)
+                        {
+                            errors.push(ValidationError {
+                                location: format!("{}.from", edge_loc),
+                                message: format!(
+                                    "Source input \"{}\" not declared on endpoint.",
+                                    input_ref
+                                ),
+                                suggestion: suggest_name(
+                                    &input_ref,
+                                    endpoint_input_names.iter().copied(),
+                                ),
+                            });
+                        }
+                    }
                     EdgeSource::Endpoint(ref_str) => {
                         if ref_str.contains('/') {
                             let pin_valid = ref_str
@@ -1054,11 +1123,14 @@ type = "float"
 [endpoints.cleaned]
 description = "Cleaned data"
 
+[endpoints.cleaned.inputs.raw]
+type = "RawWaterPotentialCsv"
+
 [endpoints.cleaned.nodes]
 clean = { transform = "clean" }
 
 [[endpoints.cleaned.edges]]
-from = "data:raw"
+from = "input:raw"
 to = "clean.raw"
 "#;
 
@@ -1264,11 +1336,14 @@ type = "Csv"
 
 [endpoints.ep]
 
+[endpoints.ep.inputs.raw]
+type = "Csv"
+
 [endpoints.ep.nodes]
 n = { transform = "t" }
 
 [[endpoints.ep.edges]]
-from = "data:raw"
+from = "input:raw"
 to = "n.wrong"
 "#;
         let doc = OzzyToml::parse(toml).expect("toml should parse");

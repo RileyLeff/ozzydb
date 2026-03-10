@@ -303,6 +303,8 @@ pub struct Job {
     pub commit_id: Uuid,
     pub params: serde_json::Value,
     pub params_hash: String,
+    pub input_bindings: serde_json::Value,
+    pub input_bindings_hash: String,
     pub status: String,
     pub node_status: serde_json::Value,
     pub output_hash: Option<String>,

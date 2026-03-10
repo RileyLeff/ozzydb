@@ -1814,12 +1814,25 @@ impl Database {
         commit_id: Uuid,
         params: &serde_json::Value,
         params_hash: &str,
+        input_bindings: &serde_json::Value,
+        input_bindings_hash: &str,
         node_status: &serde_json::Value,
         created_by: Option<Uuid>,
     ) -> Result<Job> {
         let job = sqlx::query_as::<_, Job>(
-            "INSERT INTO jobs (project_id, endpoint_name, commit_id, params, params_hash, node_status, created_by, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, now() + interval '24 hours')
+            "INSERT INTO jobs (
+                project_id,
+                endpoint_name,
+                commit_id,
+                params,
+                params_hash,
+                input_bindings,
+                input_bindings_hash,
+                node_status,
+                created_by,
+                expires_at
+            )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + interval '24 hours')
              RETURNING *",
         )
         .bind(project_id)
@@ -1827,6 +1840,8 @@ impl Database {
         .bind(commit_id)
         .bind(params)
         .bind(params_hash)
+        .bind(input_bindings)
+        .bind(input_bindings_hash)
         .bind(node_status)
         .bind(created_by)
         .fetch_one(&self.pool)
@@ -1850,10 +1865,15 @@ impl Database {
         endpoint_name: &str,
         commit_id: Uuid,
         params_hash: &str,
+        input_bindings_hash: &str,
     ) -> Result<Option<Job>> {
         let job = sqlx::query_as::<_, Job>(
             "SELECT * FROM jobs
-             WHERE project_id = $1 AND endpoint_name = $2 AND commit_id = $3 AND params_hash = $4
+             WHERE project_id = $1
+             AND endpoint_name = $2
+             AND commit_id = $3
+             AND params_hash = $4
+             AND input_bindings_hash = $5
              AND status IN ('queued', 'running')
              ORDER BY created_at DESC
              LIMIT 1",
@@ -1862,6 +1882,7 @@ impl Database {
         .bind(endpoint_name)
         .bind(commit_id)
         .bind(params_hash)
+        .bind(input_bindings_hash)
         .fetch_optional(&self.pool)
         .await?;
         Ok(job)

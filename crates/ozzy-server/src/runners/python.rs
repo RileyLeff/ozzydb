@@ -28,40 +28,43 @@ params = json.loads(os.environ.get("OZZY_PARAMS", "{{}}"))
 # --- Load inputs ---
 input_manifest = json.loads(os.environ.get("OZZY_INPUT_MANIFEST", "{{}}"))
 
-
-def _load_item(path, content_type):
-    if "parquet" in content_type:
+def _load_blob(spec):
+    loader = spec["loader"]
+    path = spec["path"]
+    if loader == "parquet":
         import polars as pl
         return pl.read_parquet(path)
-    elif content_type.startswith("image/"):
-        with open(path, "rb") as f:
-            return f.read()
-    elif content_type == "application/json":
+    elif loader == "csv":
+        import polars as pl
+        return pl.read_csv(path)
+    elif loader == "json":
         with open(path) as f:
             return json.loads(f.read())
-    elif content_type.startswith("text/"):
+    elif loader == "text":
         with open(path) as f:
             return f.read()
-    else:
+    elif loader == "bytes":
         with open(path, "rb") as f:
             return f.read()
+    else:
+        raise ValueError(f"Unsupported input loader: {{loader}}")
+
+
+def _load_input(spec):
+    kind = spec["kind"]
+    if kind == "blob":
+        return _load_blob(spec)
+    elif kind == "collection":
+        return [_load_input(item) for item in spec["items"]]
+    elif kind == "bundle":
+        return {{name: _load_input(entry) for name, entry in spec["entries"].items()}}
+    else:
+        raise ValueError(f"Unsupported input kind: {{kind}}")
 
 
 inputs = {{}}
 for name, spec in input_manifest.items():
-    path = spec["path"]
-    content_type = spec["content_type"]
-    is_collection = spec.get("is_collection", False)
-
-    if is_collection:
-        with open(spec["manifest_path"]) as f:
-            member_manifest = json.loads(f.read())
-        members = []
-        for member in member_manifest:
-            members.append(_load_item(member["path"], member["content_type"]))
-        inputs[name] = members
-    else:
-        inputs[name] = _load_item(path, content_type)
+    inputs[name] = _load_input(spec)
 
 
 def _write_item(item, path):

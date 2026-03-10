@@ -94,6 +94,9 @@ if [ -n "$OZZY_INPUT_DOWNLOADS" ]; then
 import sys, json, urllib.request
 downloads = json.loads(sys.stdin.read())
 for d in downloads:
+    parent = os.path.dirname(d['path'])
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     urllib.request.urlretrieve(d['url'], d['path'])
     print('Downloaded ' + d['name'] + ' -> ' + d['path'])
 " 2>&1) || {{

@@ -20,17 +20,40 @@ params <- fromJSON(Sys.getenv("OZZY_PARAMS", "{{}}"))
 input_manifest <- fromJSON(Sys.getenv("OZZY_INPUT_MANIFEST", "{{}}"))
 inputs <- list()
 
-for (name in names(input_manifest)) {{
-  spec <- input_manifest[[name]]
-  if (grepl("parquet", spec$content_type)) {{
-    inputs[[name]] <- read_parquet(spec$path)
-  }} else if (spec$content_type == "text/csv") {{
-    inputs[[name]] <- read.csv(spec$path)
-  }} else if (startsWith(spec$content_type, "text/")) {{
-    inputs[[name]] <- readLines(spec$path, warn = FALSE)
+load_blob <- function(spec) {{
+  if (spec$loader == "parquet") {{
+    read_parquet(spec$path)
+  }} else if (spec$loader == "csv") {{
+    read.csv(spec$path)
+  }} else if (spec$loader == "json") {{
+    fromJSON(paste(readLines(spec$path, warn = FALSE), collapse = "\n"))
+  }} else if (spec$loader == "text") {{
+    readLines(spec$path, warn = FALSE)
+  }} else if (spec$loader == "bytes") {{
+    readBin(spec$path, "raw", file.info(spec$path)$size)
   }} else {{
-    inputs[[name]] <- readBin(spec$path, "raw", file.info(spec$path)$size)
+    stop(paste("Unsupported input loader:", spec$loader))
   }}
+}}
+
+load_input <- function(spec) {{
+  if (spec$kind == "blob") {{
+    load_blob(spec)
+  }} else if (spec$kind == "collection") {{
+    lapply(spec$items, load_input)
+  }} else if (spec$kind == "bundle") {{
+    out <- list()
+    for (entry_name in names(spec$entries)) {{
+      out[[entry_name]] <- load_input(spec$entries[[entry_name]])
+    }}
+    out
+  }} else {{
+    stop(paste("Unsupported input kind:", spec$kind))
+  }}
+}}
+
+for (name in names(input_manifest)) {{
+  inputs[[name]] <- load_input(input_manifest[[name]])
 }}
 
 # Source the user's file and call the function
