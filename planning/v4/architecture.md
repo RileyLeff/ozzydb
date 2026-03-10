@@ -491,6 +491,73 @@ At minimum:
 
 These are implementation-facing Rust structs. Persistence and API layers may serialize them into JSON evidence, but the verifier layer should work with typed witnesses internally.
 
+### Verifier coverage is intentionally phased
+
+Phase 1 establishes the execution model for verification:
+
+- the type language is explicit and closed
+- the verifier model is executable
+- witness-based verification is compositional
+- published type refs can be resolved through a registry context
+- layered conjunctive checks can be satisfied through multiple witness views of one artifact
+- malformed semantic input returns structured errors
+
+Even with that base in place, the v1 type language is still broader than the v1 verifier surface.
+
+The remaining gap is mostly about artifact-backed witness derivation and richer semantic metadata, not about whether verification is a first-class concept.
+
+Examples of builtin areas that may still lag behind full execution coverage after Phase 1:
+
+- `bytes`
+- `json`
+- `date`
+- `datetime`
+- `unit(...)`
+
+That gap should close in later phases, not through fallback behavior.
+
+#### Phase 2
+
+Registry persistence and snapshots make the registry-backed verification context durable.
+
+Phase 1 may already resolve published refs in-memory, but Phase 2 is where that behavior becomes part of the real persisted platform contract through pinned registry revisions and immutable snapshots.
+
+#### Phase 3
+
+`ozzy.toml` publication makes verifier requirements part of the published object model.
+
+This is where published type/environment/transform objects become the canonical inputs to verification planning, rather than AST fragments that only exist transiently during local parsing.
+
+#### Phase 4
+
+The `Artifact` model is where raw verification inputs become first-class.
+
+This phase should provide the bridge from:
+
+- raw uploaded blobs
+- typed bundles/manifests
+- collection-like artifacts
+
+into the witness system.
+
+Builtin coverage that depends on actual artifact bytes or manifest structure, such as `bytes`, `json`, and richer collection/bundle conformance, should be extended here.
+
+#### Phase 5
+
+Execution integration is where runtime metadata becomes part of the platform contract.
+
+This includes:
+
+- carrying measurement/runtime metadata far enough to support constraints like `unit(...)`
+- making typed input/output verification part of the fetch/execute path
+- deriving and persisting the witness views required by execution-time conformance policy
+
+The rule across all phases is:
+
+- never silently broaden acceptance because a verifier is incomplete
+- add real witness derivation or artifact support when a constructor becomes executable
+- keep unsupported areas explicit until the required infrastructure exists
+
 ---
 
 ## Error Handling Principle

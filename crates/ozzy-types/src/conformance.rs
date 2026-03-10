@@ -59,7 +59,11 @@ impl ConformanceRecord {
         self.attempts.push(VerificationAttempt::Failed(failure));
     }
 
-    pub fn latest_report(&self) -> Option<&VerificationReport> {
+    pub fn latest_attempt(&self) -> Option<&VerificationAttempt> {
+        self.attempts.last()
+    }
+
+    pub fn latest_completed_report(&self) -> Option<&VerificationReport> {
         self.attempts
             .iter()
             .rev()
@@ -69,8 +73,8 @@ impl ConformanceRecord {
             })
     }
 
-    pub fn latest_evidence(&self) -> Option<&Value> {
-        self.latest_report()
+    pub fn latest_completed_evidence(&self) -> Option<&Value> {
+        self.latest_completed_report()
             .and_then(|report| report.evidence.as_ref())
     }
 }
@@ -92,8 +96,9 @@ mod tests {
         let record = ConformanceRecord::declared("artifact_123", TypeVersionId::new("std/T@1"));
         assert_eq!(record.status, ConformanceStatus::Declared);
         assert!(record.attempts.is_empty());
-        assert!(record.latest_report().is_none());
-        assert!(record.latest_evidence().is_none());
+        assert!(record.latest_attempt().is_none());
+        assert!(record.latest_completed_report().is_none());
+        assert!(record.latest_completed_evidence().is_none());
     }
 
     #[test]
@@ -108,7 +113,14 @@ mod tests {
 
         assert_eq!(record.status, ConformanceStatus::Verified);
         assert_eq!(record.attempts.len(), 1);
-        assert_eq!(record.latest_evidence(), Some(&json!({ "kind": "table" })));
+        assert!(matches!(
+            record.latest_attempt(),
+            Some(VerificationAttempt::Completed { .. })
+        ));
+        assert_eq!(
+            record.latest_completed_evidence(),
+            Some(&json!({ "kind": "table" }))
+        );
     }
 
     #[test]
@@ -121,7 +133,11 @@ mod tests {
 
         assert_eq!(record.status, ConformanceStatus::Declared);
         assert_eq!(record.attempts.len(), 1);
-        assert!(record.latest_report().is_none());
+        assert!(matches!(
+            record.latest_attempt(),
+            Some(VerificationAttempt::Failed(_))
+        ));
+        assert!(record.latest_completed_report().is_none());
     }
 
     #[test]
@@ -136,7 +152,7 @@ mod tests {
 
         assert_eq!(record.status, ConformanceStatus::Rejected);
         assert_eq!(
-            record.latest_report().unwrap().verdict,
+            record.latest_completed_report().unwrap().verdict,
             VerificationVerdict::Rejected
         );
     }

@@ -31,3 +31,11 @@ Verification code must not assume malformed constructor state is impossible and 
 ### Phase 1 semantic code should not rely on "validated earlier" panics
 
 Phase 1 consolidation removed remaining panic-based constructor handling from canonicalization and relation evaluation. Going forward, malformed semantic inputs must return typed errors across syntax validation, canonicalization, relation evaluation, verification, and conformance handling.
+
+### Published type verification requires a registry context
+
+The verifier is no longer allowed to treat versioned type refs as opaque external leaves. Verification planning must resolve published refs through an explicit registry context so the runtime contract matches the v4 object model.
+
+### Layered conjunctive verification uses derived witness inputs
+
+Phase 1 follow-up introduced `VerificationInput::Derived(...)` so one artifact can satisfy a conjunctive type through multiple witness views. This is an explicit bridge until Phase 4/5 artifact-backed witness generation makes those views first-class in the wider platform.

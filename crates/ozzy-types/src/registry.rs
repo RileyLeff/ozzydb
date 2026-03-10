@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::canonical::CanonicalTypeId;
-use crate::syntax::TypeExpr;
+use crate::syntax::{TypeExpr, TypeRefExpr};
 
 /// Public identifier for a published type version.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -53,6 +53,8 @@ impl TypeVersion {
 pub enum RegistryError {
     #[error("type version '{name}@{version}' already exists")]
     DuplicateTypeVersion { name: String, version: String },
+    #[error("published type reference '{name}@{version}' could not be resolved")]
+    UnknownTypeVersionReference { name: String, version: String },
 }
 
 /// Minimal in-memory registry surface for Phase 1.1 scaffolding.
@@ -80,6 +82,27 @@ impl TypeRegistry {
 
     pub fn get(&self, id: &TypeVersionId) -> Option<&TypeVersion> {
         self.types.get(id)
+    }
+
+    pub fn get_by_name_version(&self, name: &str, version: &str) -> Option<&TypeVersion> {
+        self.types
+            .values()
+            .find(|type_version| type_version.name == name && type_version.version == version)
+    }
+
+    pub fn resolve_ref(&self, type_ref: &TypeRefExpr) -> Result<&TypeVersion, RegistryError> {
+        let version = type_ref.version.as_deref().ok_or_else(|| {
+            RegistryError::UnknownTypeVersionReference {
+                name: type_ref.name.clone(),
+                version: "<unversioned>".to_string(),
+            }
+        })?;
+
+        self.get_by_name_version(&type_ref.name, version)
+            .ok_or_else(|| RegistryError::UnknownTypeVersionReference {
+                name: type_ref.name.clone(),
+                version: version.to_string(),
+            })
     }
 }
 
@@ -131,5 +154,24 @@ mod tests {
                 version: "1".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn published_type_refs_can_be_resolved_by_name_and_version() {
+        let mut registry = TypeRegistry::default();
+        let type_version = TypeVersion::new("std/WaterPotential", "1", TypeExpr::ref_("float64"));
+        registry
+            .insert(type_version)
+            .expect("insert should succeed");
+
+        let resolved = registry
+            .resolve_ref(&TypeRefExpr::new(
+                "std/WaterPotential",
+                Some("1".to_string()),
+            ))
+            .expect("published ref should resolve");
+
+        assert_eq!(resolved.name, "std/WaterPotential");
+        assert_eq!(resolved.version, "1");
     }
 }

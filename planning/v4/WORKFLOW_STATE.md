@@ -1,7 +1,7 @@
 # v4 Workflow State
 
 ## Current Phase: Phase 1 complete; Phase 2 next
-## Current Step: Phase 1 consolidation review complete
+## Current Step: Phase 1 follow-up fix pass complete
 
 ## Completed Steps
 
@@ -112,7 +112,7 @@
   - `ConformanceRecord::declared(...)`
   - `record_report(...)`
   - `record_failure(...)`
-  - `latest_report()` / `latest_evidence()`
+  - `latest_completed_report()` / `latest_completed_evidence()`
 - Kept semantic conformance state constrained to:
   - `declared`
   - `verified`
@@ -129,8 +129,16 @@
 - Added regression coverage proving malformed semantic constructor state errors instead of panicking.
 - Reconfirmed `cargo test -p ozzy-types` passes for the whole Phase 1 surface.
 
+### Phase 1 follow-up fix pass
+- Made published type verification registry-backed instead of treating versioned refs as opaque verifier dead ends.
+- Added `TypeRegistry::resolve_ref(...)` and `get_by_name_version(...)`.
+- Made verifier compilation/execution require a registry context.
+- Added `VerificationInput::Derived(...)` so conjunctive verification can consume multiple witness views of one artifact.
+- Renamed conformance helpers so latest attempt and latest completed report/evidence are not conflated.
+- Updated the architecture doc to stage the remaining verifier-surface gap across Phases 2 through 5.
+
 ## Open Review Findings
-- None blocking for Phase 1.
+- None blocking for the Phase 1 library surface.
 - Review artifacts:
   - `planning/reviews/v4/01_phase1_1_review.md`
   - `planning/reviews/v4/02_phase1_2_review.md`
@@ -138,6 +146,7 @@
   - `planning/reviews/v4/04_phase1_4_review.md`
   - `planning/reviews/v4/05_phase1_5_review.md`
   - `planning/reviews/v4/06_phase1_consolidation_review.md`
+  - `planning/reviews/v4/07_phase1_followup_fix_review.md`
 
 ## Current Blockers
 - None.
@@ -146,6 +155,7 @@
 1. Start Phase 2.1 and model first-class registry persistence objects.
 2. Keep `commit_state` out of the new runtime path entirely.
 3. Preserve the Phase 1 rule that semantic subsystems return typed errors instead of panicking or falling back.
+4. Extend the remaining unsupported builtin verifier surface only when the required registry/artifact/execution infrastructure exists.
 
 ## Notes
 - Existing v3 planning and type-system notes remain background context only.

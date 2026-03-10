@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::canonical::{CanonicalizationError, canonicalize};
+use crate::registry::{RegistryError, TypeRegistry};
 use crate::syntax::{
     BuiltinConstructor, BuiltinType, ConstructorExpr, Literal, TypeDefinitions, TypeExpr,
     TypeRefExpr,
@@ -43,6 +44,7 @@ pub enum VerificationInput {
     Record(BTreeMap<String, VerificationInput>),
     Collection(Vec<VerificationInput>),
     ParquetFile(PathBuf),
+    Derived(Vec<VerificationInput>),
 }
 
 impl VerificationInput {
@@ -55,6 +57,7 @@ impl VerificationInput {
             Self::Record(_) => "record",
             Self::Collection(_) => "collection",
             Self::ParquetFile(_) => "parquet_file",
+            Self::Derived(_) => "derived",
         }
     }
 }
@@ -70,7 +73,6 @@ pub enum VerificationPlan {
     },
     Collection(Box<VerificationPlan>),
     Table(Box<VerificationPlan>),
-    ExternalRef(TypeRefExpr),
     Never,
 }
 
@@ -88,6 +90,8 @@ pub struct BuiltinVerifierRegistry;
 pub enum VerificationError {
     #[error(transparent)]
     Canonicalization(#[from] CanonicalizationError),
+    #[error(transparent)]
+    Registry(#[from] RegistryError),
     #[error(transparent)]
     Witness(#[from] WitnessError),
     #[error("verification input kind '{actual}' cannot satisfy expected '{expected}'")]
@@ -115,6 +119,8 @@ pub enum VerificationError {
         arg: &'static str,
         expected: &'static str,
     },
+    #[error("published type reference cycle detected during verification planning: {cycle:?}")]
+    RecursivePublishedTypeReference { cycle: Vec<String> },
     #[error("failed to serialize verification evidence")]
     EvidenceEncodingFailed(#[source] serde_json::Error),
 }
@@ -123,19 +129,21 @@ impl BuiltinVerifierRegistry {
     pub fn compile(
         &self,
         defs: &TypeDefinitions,
+        registry: &TypeRegistry,
         expr: &TypeExpr,
     ) -> Result<VerificationPlan, VerificationError> {
         let canonical = canonicalize(defs, expr)?;
-        Ok(compile_plan(&canonical))
+        compile_plan(registry, &canonical, &mut Vec::new())
     }
 
     pub fn verify(
         &self,
         defs: &TypeDefinitions,
+        registry: &TypeRegistry,
         expr: &TypeExpr,
         input: &VerificationInput,
     ) -> Result<VerificationReport, VerificationError> {
-        let plan = self.compile(defs, expr)?;
+        let plan = self.compile(defs, registry, expr)?;
         let outcome = execute_plan(&plan, input)?;
 
         Ok(VerificationReport {
@@ -151,30 +159,72 @@ impl BuiltinVerifierRegistry {
     }
 }
 
-fn compile_plan(expr: &TypeExpr) -> VerificationPlan {
+fn compile_plan(
+    registry: &TypeRegistry,
+    expr: &TypeExpr,
+    stack: &mut Vec<String>,
+) -> Result<VerificationPlan, VerificationError> {
     match expr {
-        TypeExpr::Intersection(parts) => {
-            VerificationPlan::All(parts.iter().map(compile_plan).collect())
+        TypeExpr::Intersection(parts) => Ok(VerificationPlan::All(
+            parts
+                .iter()
+                .map(|part| compile_plan(registry, part, stack))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        TypeExpr::Builtin(builtin) => Ok(VerificationPlan::Builtin(*builtin)),
+        TypeExpr::Constructor(constructor) => {
+            Ok(VerificationPlan::Constructor(constructor.clone()))
         }
-        TypeExpr::Builtin(builtin) => VerificationPlan::Builtin(*builtin),
-        TypeExpr::Constructor(constructor) => VerificationPlan::Constructor(constructor.clone()),
-        TypeExpr::Record(record) => VerificationPlan::Record {
+        TypeExpr::Record(record) => Ok(VerificationPlan::Record {
             open: record.open,
             fields: record
                 .fields
                 .iter()
-                .map(|field| RecordFieldPlan {
-                    name: field.name.clone(),
-                    optional: field.optional,
-                    plan: Box::new(compile_plan(&field.ty)),
+                .map(|field| {
+                    Ok(RecordFieldPlan {
+                        name: field.name.clone(),
+                        optional: field.optional,
+                        plan: Box::new(compile_plan(registry, &field.ty, stack)?),
+                    })
                 })
-                .collect(),
-        },
-        TypeExpr::Collection(item) => VerificationPlan::Collection(Box::new(compile_plan(item))),
-        TypeExpr::Table(row) => VerificationPlan::Table(Box::new(compile_plan(row))),
-        TypeExpr::Ref(type_ref) => VerificationPlan::ExternalRef(type_ref.clone()),
-        TypeExpr::Never => VerificationPlan::Never,
+                .collect::<Result<Vec<_>, VerificationError>>()?,
+        }),
+        TypeExpr::Collection(item) => Ok(VerificationPlan::Collection(Box::new(compile_plan(
+            registry, item, stack,
+        )?))),
+        TypeExpr::Table(row) => Ok(VerificationPlan::Table(Box::new(compile_plan(
+            registry, row, stack,
+        )?))),
+        TypeExpr::Ref(type_ref) => compile_published_ref_plan(registry, type_ref, stack),
+        TypeExpr::Never => Ok(VerificationPlan::Never),
     }
+}
+
+fn compile_published_ref_plan(
+    registry: &TypeRegistry,
+    type_ref: &TypeRefExpr,
+    stack: &mut Vec<String>,
+) -> Result<VerificationPlan, VerificationError> {
+    let version =
+        type_ref
+            .version
+            .as_ref()
+            .ok_or_else(|| VerificationError::UnsupportedExternalRef {
+                name: type_ref.name.clone(),
+            })?;
+    let key = format!("{}@{}", type_ref.name, version);
+
+    if stack.contains(&key) {
+        let mut cycle = stack.clone();
+        cycle.push(key);
+        return Err(VerificationError::RecursivePublishedTypeReference { cycle });
+    }
+
+    let type_version = registry.resolve_ref(type_ref)?;
+    stack.push(format!("{}@{}", type_version.name, type_version.version));
+    let result = compile_plan(registry, &type_version.expr, stack);
+    stack.pop();
+    result
 }
 
 #[derive(Debug)]
@@ -226,6 +276,20 @@ fn execute_plan(
     plan: &VerificationPlan,
     input: &VerificationInput,
 ) -> Result<ExecutionOutcome, VerificationError> {
+    if let VerificationInput::Derived(inputs) = input {
+        return match plan {
+            VerificationPlan::All(plans) => {
+                let mut outcomes = Vec::with_capacity(plans.len());
+                for plan in plans {
+                    outcomes.push(execute_plan(plan, input)?);
+                }
+
+                Ok(ExecutionOutcome::merge_all(outcomes))
+            }
+            _ => execute_against_derived_inputs(plan, inputs),
+        };
+    }
+
     match plan {
         VerificationPlan::All(plans) => {
             let mut outcomes = Vec::with_capacity(plans.len());
@@ -240,17 +304,37 @@ fn execute_plan(
         VerificationPlan::Record { open, fields } => verify_record(*open, fields, input),
         VerificationPlan::Collection(item_plan) => verify_collection(item_plan, input),
         VerificationPlan::Table(row_plan) => verify_table(row_plan, input),
-        VerificationPlan::ExternalRef(type_ref) => Err(VerificationError::UnsupportedExternalRef {
-            name: match &type_ref.version {
-                Some(version) => format!("{}@{}", type_ref.name, version),
-                None => type_ref.name.clone(),
-            },
-        }),
         VerificationPlan::Never => Ok(ExecutionOutcome::rejected(
             "type canonicalized to never; no artifact can conform",
             json!({ "kind": "never" }),
         )),
     }
+}
+
+fn execute_against_derived_inputs(
+    plan: &VerificationPlan,
+    inputs: &[VerificationInput],
+) -> Result<ExecutionOutcome, VerificationError> {
+    let mut first_mismatch: Option<VerificationError> = None;
+
+    for candidate in inputs {
+        match execute_plan(plan, candidate) {
+            Ok(outcome) => return Ok(outcome),
+            Err(err @ VerificationError::InputKindMismatch { .. }) => {
+                if first_mismatch.is_none() {
+                    first_mismatch = Some(err);
+                }
+            }
+            Err(other) => return Err(other),
+        }
+    }
+
+    Err(
+        first_mismatch.unwrap_or(VerificationError::InputKindMismatch {
+            expected: "a compatible derived verification input",
+            actual: "derived",
+        }),
+    )
 }
 
 fn verify_builtin(
@@ -748,6 +832,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::registry::{TypeRegistry, TypeVersion};
     use crate::syntax::{RecordExpr, RecordField, TypeDefinition};
 
     #[test]
@@ -766,6 +851,7 @@ mod tests {
     #[test]
     fn registry_compiles_csv_and_table_plan() {
         let mut defs = TypeDefinitions::default();
+        let published = TypeRegistry::default();
         defs.insert(TypeDefinition::new(
             "Row",
             TypeExpr::Record(RecordExpr {
@@ -783,6 +869,7 @@ mod tests {
         let plan = registry
             .compile(
                 &defs,
+                &published,
                 &TypeExpr::intersection(vec![
                     TypeExpr::Constructor(ConstructorExpr {
                         name: BuiltinConstructor::Csv,
@@ -803,10 +890,12 @@ mod tests {
     #[test]
     fn csv_witness_verification_rejects_mismatched_header() {
         let defs = TypeDefinitions::default();
+        let published = TypeRegistry::default();
         let registry = BuiltinVerifierRegistry;
         let report = registry
             .verify(
                 &defs,
+                &published,
                 &TypeExpr::Constructor(ConstructorExpr {
                     name: BuiltinConstructor::Csv,
                     args: BTreeMap::from([("header".to_string(), Literal::Bool(true))]),
@@ -827,10 +916,12 @@ mod tests {
     #[test]
     fn table_verification_checks_required_columns_and_types() {
         let defs = TypeDefinitions::default();
+        let published = TypeRegistry::default();
         let registry = BuiltinVerifierRegistry;
         let report = registry
             .verify(
                 &defs,
+                &published,
                 &TypeExpr::Table(Box::new(TypeExpr::Record(RecordExpr {
                     fields: vec![
                         RecordField {
@@ -870,10 +961,12 @@ mod tests {
     #[test]
     fn table_verification_rejects_missing_required_column() {
         let defs = TypeDefinitions::default();
+        let published = TypeRegistry::default();
         let registry = BuiltinVerifierRegistry;
         let report = registry
             .verify(
                 &defs,
+                &published,
                 &TypeExpr::Table(Box::new(TypeExpr::Record(RecordExpr {
                     fields: vec![RecordField {
                         name: "wp".to_string(),
@@ -900,10 +993,12 @@ mod tests {
     #[test]
     fn scalar_min_verification_rejects_values_below_bound() {
         let defs = TypeDefinitions::default();
+        let published = TypeRegistry::default();
         let registry = BuiltinVerifierRegistry;
         let report = registry
             .verify(
                 &defs,
+                &published,
                 &TypeExpr::Constructor(ConstructorExpr {
                     name: BuiltinConstructor::Min,
                     args: BTreeMap::from([("value".to_string(), Literal::Integer(5))]),
@@ -918,10 +1013,12 @@ mod tests {
     #[test]
     fn malformed_min_constructor_errors_instead_of_falling_back() {
         let defs = TypeDefinitions::default();
+        let published = TypeRegistry::default();
         let registry = BuiltinVerifierRegistry;
         let err = registry
             .verify(
                 &defs,
+                &published,
                 &TypeExpr::Constructor(ConstructorExpr {
                     name: BuiltinConstructor::Min,
                     args: BTreeMap::from([(
@@ -938,5 +1035,127 @@ mod tests {
             VerificationError::Canonicalization(_)
                 | VerificationError::InvalidConstructorArg { .. }
         ));
+    }
+
+    #[test]
+    fn derived_inputs_can_satisfy_conjunctive_csv_and_table_types() {
+        let mut defs = TypeDefinitions::default();
+        let published = TypeRegistry::default();
+        defs.insert(TypeDefinition::new(
+            "Row",
+            TypeExpr::Record(RecordExpr {
+                fields: vec![
+                    RecordField {
+                        name: "species".to_string(),
+                        ty: TypeExpr::ref_("string"),
+                        optional: false,
+                    },
+                    RecordField {
+                        name: "wp".to_string(),
+                        ty: TypeExpr::ref_("float64"),
+                        optional: false,
+                    },
+                ],
+                open: false,
+            }),
+        ))
+        .expect("insert row");
+
+        let registry = BuiltinVerifierRegistry;
+        let report = registry
+            .verify(
+                &defs,
+                &published,
+                &TypeExpr::intersection(vec![
+                    TypeExpr::Constructor(ConstructorExpr {
+                        name: BuiltinConstructor::Csv,
+                        args: BTreeMap::from([("header".to_string(), Literal::Bool(true))]),
+                    }),
+                    TypeExpr::Table(Box::new(TypeExpr::named_ref("Row"))),
+                ])
+                .expect("non-empty intersection"),
+                &VerificationInput::Derived(vec![
+                    VerificationInput::Csv(CsvWitness {
+                        delimiter: ",".to_string(),
+                        header: true,
+                        columns: vec!["species".to_string(), "wp".to_string()],
+                        row_count: Some(10),
+                    }),
+                    VerificationInput::Table(TableWitness {
+                        columns: vec![
+                            TableColumnWitness {
+                                name: "species".to_string(),
+                                data_type: "utf8".to_string(),
+                                nullable: false,
+                            },
+                            TableColumnWitness {
+                                name: "wp".to_string(),
+                                data_type: "float64".to_string(),
+                                nullable: false,
+                            },
+                        ],
+                        row_count: Some(10),
+                    }),
+                ]),
+            )
+            .expect("verification should run");
+
+        assert_eq!(report.verdict, VerificationVerdict::Verified);
+    }
+
+    #[test]
+    fn versioned_refs_are_verified_via_the_registry() {
+        let defs = TypeDefinitions::default();
+        let mut published = TypeRegistry::default();
+        published
+            .insert(TypeVersion::new(
+                "std/WaterPotentialTable",
+                "1",
+                TypeExpr::Table(Box::new(TypeExpr::Record(RecordExpr {
+                    fields: vec![
+                        RecordField {
+                            name: "species".to_string(),
+                            ty: TypeExpr::ref_("string"),
+                            optional: false,
+                        },
+                        RecordField {
+                            name: "wp".to_string(),
+                            ty: TypeExpr::ref_("float64"),
+                            optional: false,
+                        },
+                    ],
+                    open: false,
+                }))),
+            ))
+            .expect("insert published type");
+
+        let registry = BuiltinVerifierRegistry;
+        let report = registry
+            .verify(
+                &defs,
+                &published,
+                &TypeExpr::Ref(TypeRefExpr::new(
+                    "std/WaterPotentialTable",
+                    Some("1".to_string()),
+                )),
+                &VerificationInput::Table(TableWitness {
+                    columns: vec![
+                        TableColumnWitness {
+                            name: "species".to_string(),
+                            data_type: "utf8".to_string(),
+                            nullable: false,
+                        },
+                        TableColumnWitness {
+                            name: "wp".to_string(),
+                            data_type: "float64".to_string(),
+                            nullable: false,
+                        },
+                    ],
+                    row_count: Some(10),
+                }),
+            )
+            .expect("verification should run");
+
+        assert_eq!(report.verdict, VerificationVerdict::Verified);
     }
 }
