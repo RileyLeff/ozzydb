@@ -367,6 +367,7 @@ async fn check_all_node_caches(
                     content_type: cached.output_content_type,
                     byte_size: cached.output_byte_size,
                     cache_hit: true,
+                    artifact_id: None,
                 },
             );
         } else {

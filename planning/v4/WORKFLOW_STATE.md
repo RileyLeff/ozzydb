@@ -1,7 +1,7 @@
 # v4 Workflow State
 
 ## Current Phase: Phase 5 underway
-## Current Step: Phase 5.1 complete; ready for Phase 5.2 fetch rewrite
+## Current Step: Phase 5.2 underway; invocation/output artifact slice landed
 
 ## Completed Steps
 
@@ -259,6 +259,35 @@
   - `cargo check -p ozzy-server --tests`
 - External review degraded again for this checkpoint, so the milestone gate was
   completed with direct self-review plus tests.
+
+### Phase 5.2 slice: Invocation and output artifact persistence
+- Added the first live execution-side use of:
+  - `v4_invocations`
+  - `v4_artifacts`
+  - `v4_invocation_artifacts`
+  - `v4_conformance_records`
+- Successful node execution now:
+  - inserts a `running` invocation after the per-node cache check
+  - persists the output artifact
+  - binds that artifact to the invocation output port
+  - declares output conformance against the published output type
+  - marks the invocation `succeeded`
+- Added a transactional DB helper so output artifact persistence and invocation
+  success transition happen atomically.
+- Failed compute or post-compute persistence now marks the invocation `failed`
+  instead of leaving it stranded in `running`.
+- `NodeOutput` now carries optional artifact identity so downstream invocation
+  input metadata can include upstream artifact IDs when available.
+- Remaining work for full Phase 5.2:
+  - remove old leaf-source dependence in fetch/orchestrator
+  - move required input resolution onto first-class artifacts
+  - add input conformance gating
+  - add output verification where policy requires it
+- Verification for this checkpoint:
+  - `cargo check -p ozzy-server --tests`
+  - `cargo test -p ozzy-types`
+- Review artifact:
+  - `planning/reviews/v4/22_phase5_2_invocation_artifacts_review.md`
 
 ### Phase 3.1: `ozzy.toml` parser rewrite
 - Moved schema/witness helpers from `ozzy-core` into `ozzy-types` and removed the dependency-cycle blocker.

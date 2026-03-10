@@ -1,6 +1,6 @@
 //! Query helpers for the v4 registry persistence layer.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -37,6 +37,14 @@ pub enum V4QueryError {
     ConformanceProjectMismatch {
         artifact_id: Uuid,
         artifact_project_id: Uuid,
+        type_version_id: Uuid,
+        type_project_id: Uuid,
+    },
+    #[error(
+        "project {project_id} cannot bind type version {type_version_id} from project {type_project_id}"
+    )]
+    TypeVersionProjectMismatch {
+        project_id: Uuid,
         type_version_id: Uuid,
         type_project_id: Uuid,
     },
@@ -124,6 +132,41 @@ impl Database {
             return Err(V4QueryError::ConformanceProjectMismatch {
                 artifact_id,
                 artifact_project_id: artifact.project_id,
+                type_version_id,
+                type_project_id: type_version.project_id,
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn validate_v4_conformance_subject_for_project(
+        &self,
+        project_id: Uuid,
+        type_version_id: Uuid,
+    ) -> Result<(), V4QueryError> {
+        #[derive(sqlx::FromRow)]
+        struct TypeProjectRow {
+            project_id: Uuid,
+        }
+
+        let type_version = sqlx::query_as::<_, TypeProjectRow>(
+            r#"
+            SELECT project_id
+            FROM v4_type_versions
+            WHERE id = $1
+            "#,
+        )
+        .bind(type_version_id)
+        .fetch_optional(self.pool())
+        .await?;
+        let Some(type_version) = type_version else {
+            return Err(V4QueryError::UnknownTypeVersion { type_version_id });
+        };
+
+        if type_version.project_id != project_id {
+            return Err(V4QueryError::TypeVersionProjectMismatch {
+                project_id,
                 type_version_id,
                 type_project_id: type_version.project_id,
             });
@@ -753,9 +796,22 @@ impl Database {
                 input_bindings,
                 output_bindings,
                 status,
+                started_at,
                 created_by
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES (
+                $1,
+                $2,
+                $3,
+                $4,
+                $5,
+                $6,
+                $7,
+                $8,
+                $9,
+                CASE WHEN $9 = 'running' THEN now() ELSE NULL END,
+                $10
+            )
             RETURNING *
             "#,
         )
@@ -772,6 +828,159 @@ impl Database {
         .fetch_one(self.pool())
         .await?;
         Ok(row)
+    }
+
+    pub async fn mark_v4_invocation_succeeded(
+        &self,
+        invocation_id: Uuid,
+        output_bindings: Value,
+    ) -> Result<StoredInvocation, V4QueryError> {
+        let row = sqlx::query_as::<_, StoredInvocation>(
+            r#"
+            UPDATE v4_invocations
+            SET status = 'succeeded',
+                output_bindings = $2,
+                completed_at = now(),
+                started_at = COALESCE(started_at, created_at)
+            WHERE id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(output_bindings)
+        .fetch_one(self.pool())
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn mark_v4_invocation_failed(
+        &self,
+        invocation_id: Uuid,
+        error_message: &str,
+    ) -> Result<StoredInvocation, V4QueryError> {
+        let row = sqlx::query_as::<_, StoredInvocation>(
+            r#"
+            UPDATE v4_invocations
+            SET status = 'failed',
+                error_message = $2,
+                completed_at = now(),
+                started_at = COALESCE(started_at, created_at)
+            WHERE id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(error_message)
+        .fetch_one(self.pool())
+        .await?;
+        Ok(row)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn persist_v4_invocation_success(
+        &self,
+        invocation_id: Uuid,
+        project_id: Uuid,
+        output_port_name: &str,
+        output_hash: &str,
+        output_type_version_id: Uuid,
+        output_content_type: &str,
+        created_by: Uuid,
+    ) -> Result<(StoredInvocation, StoredArtifact, StoredConformanceRecord), V4QueryError> {
+        self.validate_v4_conformance_subject_for_project(project_id, output_type_version_id)
+            .await?;
+
+        let mut tx = self.pool().begin().await?;
+
+        let artifact = sqlx::query_as::<_, StoredArtifact>(
+            r#"
+            INSERT INTO v4_artifacts (
+                project_id,
+                artifact_kind,
+                content_hash,
+                manifest,
+                source_invocation_id,
+                created_by
+            )
+            VALUES ($1, 'blob', $2, NULL, $3, $4)
+            RETURNING *
+            "#,
+        )
+        .bind(project_id)
+        .bind(output_hash)
+        .bind(invocation_id)
+        .bind(created_by)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query_as::<_, StoredInvocationArtifact>(
+            r#"
+            INSERT INTO v4_invocation_artifacts (
+                invocation_id,
+                binding_kind,
+                port_name,
+                artifact_id
+            )
+            VALUES ($1, 'output', $2, $3)
+            RETURNING *
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(output_port_name)
+        .bind(artifact.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|err| {
+            map_duplicate(
+                err,
+                "invocation artifact binding",
+                format!("{invocation_id}/output/{output_port_name}"),
+            )
+        })?;
+
+        let conformance = sqlx::query_as::<_, StoredConformanceRecord>(
+            r#"
+            INSERT INTO v4_conformance_records (artifact_id, type_version_id, status)
+            VALUES ($1, $2, 'declared')
+            RETURNING *
+            "#,
+        )
+        .bind(artifact.id)
+        .bind(output_type_version_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|err| {
+            map_duplicate(
+                err,
+                "conformance record",
+                format!("{}/{output_type_version_id}", artifact.id),
+            )
+        })?;
+
+        let invocation = sqlx::query_as::<_, StoredInvocation>(
+            r#"
+            UPDATE v4_invocations
+            SET status = 'succeeded',
+                output_bindings = $2,
+                completed_at = now(),
+                started_at = COALESCE(started_at, created_at)
+            WHERE id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(invocation_id)
+        .bind(json!({
+            output_port_name: {
+                "artifact_id": artifact.id,
+                "content_hash": output_hash,
+                "content_type": output_content_type,
+            }
+        }))
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok((invocation, artifact, conformance))
     }
 
     pub async fn insert_v4_artifact(
@@ -1367,6 +1576,18 @@ mod tests {
             )
             .await
             .expect("insert output artifact binding");
+        let succeeded_invocation = db
+            .mark_v4_invocation_succeeded(
+                invocation.id,
+                json!({
+                    "result": {
+                        "artifact_id": manifest_artifact.id,
+                        "content_hash": "artifact_hash_1",
+                    }
+                }),
+            )
+            .await
+            .expect("mark invocation succeeded");
 
         let conformance = db
             .insert_v4_conformance_record(
@@ -1394,6 +1615,9 @@ mod tests {
         assert_eq!(stored_port.port_kind, "input");
         assert_eq!(project_revision.source_commit_id, commit.id);
         assert_eq!(invocation.status, "queued");
+        assert_eq!(succeeded_invocation.status, "succeeded");
+        assert!(succeeded_invocation.started_at.is_some());
+        assert!(succeeded_invocation.completed_at.is_some());
         assert_eq!(attempt.verdict.as_deref(), Some("verified"));
 
         let loaded_types = db

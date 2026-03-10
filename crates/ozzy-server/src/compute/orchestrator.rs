@@ -10,11 +10,12 @@
 use std::collections::{HashMap, HashSet};
 
 use base64::Engine as _;
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::registry::{
-    RuntimeTransformDef, load_published_project_revision_by_commit,
+    RegistrySnapshot, RuntimeTransformDef, load_published_project_revision_by_commit,
 };
 
 /// Run a job to completion: load context, execute DAG in parallel waves, update status.
@@ -52,6 +53,7 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
     let published =
         load_published_project_revision_by_commit(&state.db, &state.registry_snapshots, commit.id)
             .await?;
+    let invocation_actor_id = job.created_by.unwrap_or(commit.pushed_by);
 
     let endpoint_def = published
         .endpoints
@@ -133,6 +135,8 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
             let platform_hash = platform_hash.clone();
             let platform = platform.clone();
             let transforms = published.runtime.transforms.clone();
+            let snapshot = published.snapshot.clone();
+            let project_revision_id = published.row.id;
             let endpoint_def = endpoint_def.clone();
             let edge_map_for_node: Vec<(String, String)> = match edge_map.get(node_name.as_str()) {
                 Some(edges) => edges
@@ -153,7 +157,10 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
                     &node_name,
                     &endpoint_def,
                     &transforms,
+                    snapshot.as_ref(),
+                    project_revision_id,
                     &commit,
+                    invocation_actor_id,
                     project_id,
                     &job_endpoint_name,
                     &resolved_params,
@@ -234,7 +241,10 @@ async fn execute_node(
     node_name: &str,
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
     transforms: &HashMap<String, RuntimeTransformDef>,
+    snapshot: &RegistrySnapshot,
+    project_revision_id: Uuid,
     commit: &crate::db::Commit,
+    invocation_actor_id: Uuid,
     project_id: Uuid,
     endpoint_name: &str,
     resolved_params: &serde_json::Value,
@@ -274,6 +284,9 @@ async fn execute_node(
         let hash = resolve_edge_source(source, state, project_id, node_outputs).await?;
         input_hashes.push((input_name.clone(), hash));
     }
+
+    let invocation_input_bindings =
+        build_invocation_input_bindings(edges_for_node, &input_hashes, node_outputs)?;
 
     // Resolve params
     let node_params = super::super::api::v1::fetch::resolve_node_params(
@@ -342,8 +355,25 @@ async fn execute_node(
             content_type: cached.output_content_type,
             byte_size: cached.output_byte_size,
             cache_hit: true,
+            artifact_id: None,
         });
     }
+
+    let invocation = state
+        .db
+        .insert_v4_invocation(
+            project_revision_id,
+            transform_def.row_id,
+            Some(endpoint_name),
+            Some(node_name),
+            node_params.clone(),
+            &params_hash,
+            invocation_input_bindings,
+            json!({}),
+            "running",
+            Some(invocation_actor_id),
+        )
+        .await?;
 
     // Resolve the server-selected compute backend. Provider realization is not
     // part of the authored endpoint model in v4.
@@ -654,7 +684,25 @@ async fn execute_node(
         let _ = super::secrets::cleanup_secrets(&state.storage, key).await;
     }
 
-    let (output_bytes, output_content_type, compute_duration_ms) = compute_result?;
+    let (output_bytes, output_content_type, compute_duration_ms) = match compute_result {
+        Ok(output) => output,
+        Err(err) => {
+            if let Err(mark_err) = state
+                .db
+                .mark_v4_invocation_failed(invocation.id, &err.to_string())
+                .await
+            {
+                return Err(anyhow::anyhow!(
+                    "node '{}' failed: {}; additionally failed to mark invocation {} failed: {}",
+                    node_name,
+                    err,
+                    invocation.id,
+                    mark_err
+                ));
+            }
+            return Err(err);
+        }
+    };
     let output_hash = ozzy_core::hash::blake3_hash(&output_bytes);
     let output_byte_size = output_bytes.len() as i64;
     let output_ext = super::super::api::v1::fetch::content_type_to_extension(&output_content_type);
@@ -665,6 +713,41 @@ async fn execute_node(
         .store_with_hash(&output_hash, &output_bytes, &output_ext)
         .await?;
     let output_r2_key = state.storage.storage_key(&output_hash, &output_ext)?;
+
+    let (output_port_name, output_type_row_id) =
+        resolve_single_output_type(snapshot, transform_def)?;
+
+    let (_, output_artifact, _) = match state
+        .db
+        .persist_v4_invocation_success(
+            invocation.id,
+            project_id,
+            &output_port_name,
+            &output_hash,
+            output_type_row_id,
+            &output_content_type,
+            invocation_actor_id,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            if let Err(mark_err) = state
+                .db
+                .mark_v4_invocation_failed(invocation.id, &err.to_string())
+                .await
+            {
+                return Err(anyhow::anyhow!(
+                    "node '{}' output persistence failed: {}; additionally failed to mark invocation {} failed: {}",
+                    node_name,
+                    err,
+                    invocation.id,
+                    mark_err
+                ));
+            }
+            return Err(err.into());
+        }
+    };
 
     // Insert materialized cache record
     let platform_str = serde_json::to_string(platform)?;
@@ -705,6 +788,7 @@ async fn execute_node(
         content_type: output_content_type,
         byte_size: output_byte_size,
         cache_hit: false,
+        artifact_id: Some(output_artifact.id),
     })
 }
 
@@ -719,7 +803,62 @@ pub(crate) struct NodeOutput {
     pub content_type: String,
     pub byte_size: i64,
     pub cache_hit: bool,
+    pub artifact_id: Option<Uuid>,
 }
+
+fn build_invocation_input_bindings(
+    edges_for_node: &[(String, String)],
+    input_hashes: &[(String, String)],
+    node_outputs: &HashMap<String, NodeOutput>,
+) -> Result<serde_json::Value, anyhow::Error> {
+    let input_hash_map = input_hashes
+        .iter()
+        .map(|(name, hash)| (name.as_str(), hash.as_str()))
+        .collect::<HashMap<_, _>>();
+
+    let mut bindings = serde_json::Map::new();
+    for (input_name, source) in edges_for_node {
+        let content_hash = input_hash_map.get(input_name.as_str()).ok_or_else(|| {
+            anyhow::anyhow!("Input '{}' is missing a resolved content hash", input_name)
+        })?;
+        let artifact_id = node_outputs
+            .get(source)
+            .and_then(|output| output.artifact_id)
+            .map(|id| serde_json::Value::String(id.to_string()))
+            .unwrap_or(serde_json::Value::Null);
+        bindings.insert(
+            input_name.clone(),
+            json!({
+                "source": source,
+                "content_hash": content_hash,
+                "artifact_id": artifact_id,
+            }),
+        );
+    }
+
+    Ok(serde_json::Value::Object(bindings))
+}
+
+fn resolve_single_output_type(
+    snapshot: &RegistrySnapshot,
+    transform_def: &RuntimeTransformDef,
+) -> Result<(String, Uuid), anyhow::Error> {
+    let (output_name, output_port) = transform_def
+        .outputs
+        .ports
+        .iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Transform '{}' has no output ports", transform_def.versioned_name))?;
+    if transform_def.outputs.ports.len() != 1 {
+        anyhow::bail!(
+            "Transform '{}' has multiple output ports; runtime output binding is not yet port-addressable",
+            transform_def.versioned_name
+        );
+    }
+    let (_, stored_type) = snapshot.resolve_type_ref(&output_port.ty)?;
+    Ok((output_name.clone(), stored_type.id))
+}
+
 
 /// Compute execution waves: groups of nodes whose dependencies are all in earlier waves.
 ///
@@ -1152,5 +1291,42 @@ mod tests {
         wave1.sort();
         assert_eq!(wave1, vec!["b", "c"]);
         assert_eq!(waves[2], vec!["d"]);
+    }
+
+    #[test]
+    fn test_build_invocation_input_bindings_carries_hashes_and_node_artifacts() {
+        let upstream_artifact_id = Uuid::new_v4();
+        let edges = vec![
+            ("raw".to_string(), "data:raw".to_string()),
+            ("cleaned".to_string(), "step1".to_string()),
+        ];
+        let input_hashes = vec![
+            ("raw".to_string(), "hash_raw".to_string()),
+            ("cleaned".to_string(), "hash_step1".to_string()),
+        ];
+        let node_outputs = HashMap::from([(
+            "step1".to_string(),
+            NodeOutput {
+                materialized_hash: "mat_hash".to_string(),
+                output_hash: "hash_step1".to_string(),
+                content_type: "application/json".to_string(),
+                byte_size: 7,
+                cache_hit: false,
+                artifact_id: Some(upstream_artifact_id),
+            },
+        )]);
+
+        let bindings =
+            build_invocation_input_bindings(&edges, &input_hashes, &node_outputs).unwrap();
+
+        assert_eq!(bindings["raw"]["source"], "data:raw");
+        assert_eq!(bindings["raw"]["content_hash"], "hash_raw");
+        assert!(bindings["raw"]["artifact_id"].is_null());
+        assert_eq!(bindings["cleaned"]["source"], "step1");
+        assert_eq!(bindings["cleaned"]["content_hash"], "hash_step1");
+        assert_eq!(
+            bindings["cleaned"]["artifact_id"],
+            serde_json::Value::String(upstream_artifact_id.to_string())
+        );
     }
 }
