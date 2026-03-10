@@ -1,7 +1,7 @@
 # v4 Workflow State
 
 ## Current Phase: Phase 4 underway
-## Current Step: Phase 4.2 complete; ready for Phase 4.3 artifact-backed conformance
+## Current Step: Phase 4.3 complete; ready for Phase 5 execution integration
 
 ## Completed Steps
 
@@ -323,7 +323,7 @@
   - `planning/reviews/v4/16_phase3_3_env_identity_fix_review.md`
 
 ## Open Review Findings
-- None blocking for Phase 4.3.
+- None blocking for Phase 5.1.
 - Residual legacy debt to delete later:
   - `commit_state` helpers in the DB/test surface
   - `register_commit_atomically(...)` in legacy tests
@@ -346,12 +346,13 @@
 - `planning/reviews/v4/16_phase3_3_env_identity_fix_review.md`
 - `planning/reviews/v4/17_phase4_1_review.md`
 - `planning/reviews/v4/18_phase4_2_review.md`
+- `planning/reviews/v4/19_phase4_3_review.md`
 
 ## Current Blockers
 - None.
 
 ## Next Recommended Steps
-1. Start Phase 4.3 and attach conformance explicitly to first-class artifacts.
+1. Start Phase 5.1 and bind execution to `TransformVersion`, typed ports, and pinned registry snapshots.
 2. Remove the remaining dead `commit_state`/legacy publication helpers once the old DB/e2e tests are moved onto the v4 publication path.
 3. Preserve the Phase 1 rule that semantic subsystems return typed errors instead of panicking or falling back.
 4. Extend the remaining unsupported builtin verifier surface only when the required registry/artifact/execution infrastructure exists.
@@ -398,3 +399,26 @@
   - `cargo check -p ozzy-server --tests`
 - Review artifact:
   - `planning/reviews/v4/18_phase4_2_review.md`
+
+### Phase 4.3: Artifact-backed conformance
+- Added `migrations/009_v4_conformance_artifact_fk.sql` so persisted conformance rows now have a real foreign-key relationship to `v4_artifacts`.
+- Tightened v4 conformance writes so conformance records only accept:
+  - existing artifacts
+  - existing type versions
+  - artifact/type pairs from the same project
+- Added explicit query helpers for:
+  - listing conformance records for an artifact
+  - listing verification attempts for a conformance record
+- Replaced raw verification-attempt inserts with semantic recording helpers:
+  - completed verification now updates conformance status to `verified` or `rejected`
+  - failed verification attempts keep semantic status unchanged and only update attempt history / `updated_at`
+- Added DB-gated tests covering:
+  - verified status transitions
+  - failed-attempt persistence without semantic downgrade
+  - cross-project artifact/type rejection
+- Verification for this checkpoint:
+  - `cargo test -p ozzy-core`
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/19_phase4_3_review.md`

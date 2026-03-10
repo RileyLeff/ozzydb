@@ -27,6 +27,19 @@ pub enum V4QueryError {
     },
     #[error("invalid query input: {0}")]
     InvalidInput(String),
+    #[error("unknown artifact {artifact_id}")]
+    UnknownArtifact { artifact_id: Uuid },
+    #[error("unknown type version {type_version_id}")]
+    UnknownTypeVersion { type_version_id: Uuid },
+    #[error(
+        "artifact {artifact_id} in project {artifact_project_id} cannot carry conformance for type version {type_version_id} in project {type_project_id}"
+    )]
+    ConformanceProjectMismatch {
+        artifact_id: Uuid,
+        artifact_project_id: Uuid,
+        type_version_id: Uuid,
+        type_project_id: Uuid,
+    },
     #[error("invalid artifact manifest: {0}")]
     InvalidArtifactManifest(#[from] ArtifactManifestError),
     #[error("artifact manifest references unknown artifact {artifact_id}")]
@@ -64,6 +77,61 @@ fn verdict_to_str(verdict: VerificationVerdict) -> &'static str {
 }
 
 impl Database {
+    async fn validate_v4_conformance_subject(
+        &self,
+        artifact_id: Uuid,
+        type_version_id: Uuid,
+    ) -> Result<(), V4QueryError> {
+        #[derive(sqlx::FromRow)]
+        struct ArtifactProjectRow {
+            project_id: Uuid,
+        }
+
+        #[derive(sqlx::FromRow)]
+        struct TypeProjectRow {
+            project_id: Uuid,
+        }
+
+        let artifact = sqlx::query_as::<_, ArtifactProjectRow>(
+            r#"
+            SELECT project_id
+            FROM v4_artifacts
+            WHERE id = $1
+            "#,
+        )
+        .bind(artifact_id)
+        .fetch_optional(self.pool())
+        .await?;
+        let Some(artifact) = artifact else {
+            return Err(V4QueryError::UnknownArtifact { artifact_id });
+        };
+
+        let type_version = sqlx::query_as::<_, TypeProjectRow>(
+            r#"
+            SELECT project_id
+            FROM v4_type_versions
+            WHERE id = $1
+            "#,
+        )
+        .bind(type_version_id)
+        .fetch_optional(self.pool())
+        .await?;
+        let Some(type_version) = type_version else {
+            return Err(V4QueryError::UnknownTypeVersion { type_version_id });
+        };
+
+        if artifact.project_id != type_version.project_id {
+            return Err(V4QueryError::ConformanceProjectMismatch {
+                artifact_id,
+                artifact_project_id: artifact.project_id,
+                type_version_id,
+                type_project_id: type_version.project_id,
+            });
+        }
+
+        Ok(())
+    }
+
     async fn validate_v4_manifest_artifact_members(
         &self,
         project_id: Uuid,
@@ -849,6 +917,9 @@ impl Database {
         type_version_id: Uuid,
         status: ConformanceStatus,
     ) -> Result<StoredConformanceRecord, V4QueryError> {
+        self.validate_v4_conformance_subject(artifact_id, type_version_id)
+            .await?;
+
         sqlx::query_as::<_, StoredConformanceRecord>(
             r#"
             INSERT INTO v4_conformance_records (artifact_id, type_version_id, status)
@@ -889,6 +960,24 @@ impl Database {
         Ok(row)
     }
 
+    pub async fn list_v4_conformance_records_for_artifact(
+        &self,
+        artifact_id: Uuid,
+    ) -> Result<Vec<StoredConformanceRecord>, V4QueryError> {
+        let rows = sqlx::query_as::<_, StoredConformanceRecord>(
+            r#"
+            SELECT *
+            FROM v4_conformance_records
+            WHERE artifact_id = $1
+            ORDER BY created_at ASC, id ASC
+            "#,
+        )
+        .bind(artifact_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
     pub fn decode_v4_artifact_manifest(
         &self,
         artifact: &StoredArtifact,
@@ -910,12 +999,36 @@ impl Database {
         Ok(serde_json::from_value(manifest)?)
     }
 
-    pub async fn insert_v4_verification_attempt_from_report(
+    pub async fn list_v4_verification_attempts(
+        &self,
+        conformance_record_id: Uuid,
+    ) -> Result<Vec<StoredVerificationAttempt>, V4QueryError> {
+        let rows = sqlx::query_as::<_, StoredVerificationAttempt>(
+            r#"
+            SELECT *
+            FROM v4_verification_attempts
+            WHERE conformance_record_id = $1
+            ORDER BY created_at ASC, id ASC
+            "#,
+        )
+        .bind(conformance_record_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn record_v4_verification_report(
         &self,
         conformance_record_id: Uuid,
         report: &VerificationReport,
     ) -> Result<StoredVerificationAttempt, V4QueryError> {
         let diagnostics = serde_json::to_value(&report.diagnostics)?;
+        let next_status = match report.verdict {
+            VerificationVerdict::Verified => ConformanceStatus::Verified,
+            VerificationVerdict::Rejected => ConformanceStatus::Rejected,
+        };
+
+        let mut tx = self.pool().begin().await?;
 
         let row = sqlx::query_as::<_, StoredVerificationAttempt>(
             r#"
@@ -936,12 +1049,26 @@ impl Database {
         .bind(verdict_to_str(report.verdict))
         .bind(diagnostics)
         .bind(report.evidence.clone())
-        .fetch_one(self.pool())
+        .fetch_one(&mut *tx)
         .await?;
+
+        sqlx::query(
+            r#"
+            UPDATE v4_conformance_records
+            SET status = $2, updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(conformance_record_id)
+        .bind(status_to_str(next_status))
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
         Ok(row)
     }
 
-    pub async fn insert_v4_verification_attempt_from_failure(
+    pub async fn record_v4_verification_failure(
         &self,
         conformance_record_id: Uuid,
         attempt: &VerificationAttempt,
@@ -951,6 +1078,8 @@ impl Database {
                 "expected a failed verification attempt".to_string(),
             ));
         };
+
+        let mut tx = self.pool().begin().await?;
 
         let row = sqlx::query_as::<_, StoredVerificationAttempt>(
             r#"
@@ -968,8 +1097,21 @@ impl Database {
         .bind(conformance_record_id)
         .bind(&failure.verifier)
         .bind(&failure.error)
-        .fetch_one(self.pool())
+        .fetch_one(&mut *tx)
         .await?;
+
+        sqlx::query(
+            r#"
+            UPDATE v4_conformance_records
+            SET updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(conformance_record_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
         Ok(row)
     }
 }
@@ -980,8 +1122,10 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use std::env;
 
+    use ozzy_types::TypeDefinitions;
     use ozzy_types::canonical::CanonicalType;
     use ozzy_types::conformance::ConformanceStatus;
+    use ozzy_types::syntax::BuiltinType;
     use ozzy_types::syntax::TypeExpr;
 
     use super::*;
@@ -1234,7 +1378,7 @@ mod tests {
             .expect("insert conformance");
 
         let attempt = db
-            .insert_v4_verification_attempt_from_report(
+            .record_v4_verification_report(
                 conformance.id,
                 &VerificationReport {
                     verifier: "builtin.v1".to_string(),
@@ -1294,6 +1438,14 @@ mod tests {
             .await
             .expect("load conformance")
             .expect("conformance exists");
+        let loaded_conformances = db
+            .list_v4_conformance_records_for_artifact(manifest_artifact.id)
+            .await
+            .expect("list artifact conformances");
+        let loaded_attempts = db
+            .list_v4_verification_attempts(conformance.id)
+            .await
+            .expect("list verification attempts");
 
         assert_eq!(loaded_types.len(), 1);
         assert_eq!(loaded_envs.len(), 1);
@@ -1339,7 +1491,10 @@ mod tests {
         assert_eq!(loaded_invocation_artifacts.len(), 2);
         assert_eq!(input_binding.binding_kind, "input");
         assert_eq!(output_binding.binding_kind, "output");
-        assert_eq!(loaded_conformance.status, "declared");
+        assert_eq!(loaded_conformance.status, "verified");
+        assert_eq!(loaded_conformances.len(), 1);
+        assert_eq!(loaded_attempts.len(), 1);
+        assert_eq!(loaded_attempts[0].attempt_kind, "completed");
     }
 
     #[tokio::test]
@@ -1468,5 +1623,187 @@ mod tests {
             V4QueryError::CrossProjectArtifactReference { artifact_id, project_id }
             if artifact_id == foreign_artifact.id && project_id == project_a.id
         ));
+    }
+
+    #[tokio::test]
+    async fn v4_conformance_rejects_cross_project_type_pairs() {
+        let Some(db) = get_test_db().await else {
+            return;
+        };
+
+        let user = db
+            .upsert_user_from_github(
+                rand::random::<i64>() & i64::MAX,
+                &unique_name("v4user"),
+                None,
+                None,
+            )
+            .await
+            .expect("create user");
+
+        let project_a = db
+            .create_project(user.id, &unique_name("v4proja"), Some("v4 test"), "private")
+            .await
+            .expect("create project a");
+        let project_b = db
+            .create_project(user.id, &unique_name("v4projb"), Some("v4 test"), "private")
+            .await
+            .expect("create project b");
+
+        db.upsert_content_ref(
+            "artifact_hash_conformance_mismatch",
+            "content/ar/ti/artifact_hash_conformance_mismatch.bin",
+            "application/octet-stream",
+            42,
+        )
+        .await
+        .expect("upsert content ref");
+
+        let artifact = db
+            .insert_v4_artifact(
+                project_a.id,
+                ArtifactKind::Blob,
+                Some("artifact_hash_conformance_mismatch"),
+                None,
+                None,
+                user.id,
+            )
+            .await
+            .expect("insert artifact");
+
+        let type_version = TypeVersion::new(
+            format!("{}/ExternalType", project_b.id),
+            "1",
+            TypeExpr::Builtin(BuiltinType::String),
+        );
+        let canonical =
+            CanonicalType::canonicalize(&TypeDefinitions::default(), &type_version.expr)
+                .expect("canonicalize type");
+        let stored_canonical = match db.insert_v4_canonical_type(&canonical).await {
+            Ok(row) => row,
+            Err(V4QueryError::Duplicate { .. }) => db
+                .get_v4_canonical_type_by_key(canonical.id.as_str())
+                .await
+                .expect("load canonical type")
+                .expect("canonical type should exist"),
+            Err(other) => panic!("persist canonical type failed: {other}"),
+        };
+        let stored_type = db
+            .insert_v4_type_version(project_b.id, user.id, &type_version, stored_canonical.id)
+            .await
+            .expect("insert type version");
+
+        let err = db
+            .insert_v4_conformance_record(artifact.id, stored_type.id, ConformanceStatus::Declared)
+            .await
+            .expect_err("cross-project conformance should fail");
+
+        assert!(matches!(
+            err,
+            V4QueryError::ConformanceProjectMismatch {
+                artifact_id,
+                artifact_project_id,
+                type_version_id,
+                type_project_id,
+            } if artifact_id == artifact.id
+                && artifact_project_id == project_a.id
+                && type_version_id == stored_type.id
+                && type_project_id == project_b.id
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_verification_attempt_keeps_declared_status() {
+        let Some(db) = get_test_db().await else {
+            return;
+        };
+
+        let user = db
+            .upsert_user_from_github(
+                rand::random::<i64>() & i64::MAX,
+                &unique_name("v4user"),
+                None,
+                None,
+            )
+            .await
+            .expect("create user");
+        let project = db
+            .create_project(user.id, &unique_name("v4proj"), Some("v4 test"), "private")
+            .await
+            .expect("create project");
+
+        db.upsert_content_ref(
+            "artifact_hash_failed_attempt",
+            "content/ar/ti/artifact_hash_failed_attempt.bin",
+            "application/octet-stream",
+            42,
+        )
+        .await
+        .expect("upsert content ref");
+
+        let artifact = db
+            .insert_v4_artifact(
+                project.id,
+                ArtifactKind::Blob,
+                Some("artifact_hash_failed_attempt"),
+                None,
+                None,
+                user.id,
+            )
+            .await
+            .expect("insert artifact");
+
+        let type_version = TypeVersion::new(
+            format!("{}/BlobType", project.id),
+            "1",
+            TypeExpr::Builtin(BuiltinType::Bytes),
+        );
+        let canonical =
+            CanonicalType::canonicalize(&TypeDefinitions::default(), &type_version.expr)
+                .expect("canonicalize type");
+        let stored_canonical = match db.insert_v4_canonical_type(&canonical).await {
+            Ok(row) => row,
+            Err(V4QueryError::Duplicate { .. }) => db
+                .get_v4_canonical_type_by_key(canonical.id.as_str())
+                .await
+                .expect("load canonical type")
+                .expect("canonical type should exist"),
+            Err(other) => panic!("persist canonical type failed: {other}"),
+        };
+        let stored_type = db
+            .insert_v4_type_version(project.id, user.id, &type_version, stored_canonical.id)
+            .await
+            .expect("insert type version");
+
+        let conformance = db
+            .insert_v4_conformance_record(artifact.id, stored_type.id, ConformanceStatus::Declared)
+            .await
+            .expect("insert conformance");
+
+        let failure = VerificationAttempt::Failed(ozzy_types::conformance::VerificationFailure {
+            verifier: "builtin.v1".to_string(),
+            error: "codec unavailable".to_string(),
+        });
+        let attempt = db
+            .record_v4_verification_failure(conformance.id, &failure)
+            .await
+            .expect("record failed verification attempt");
+        let loaded = db
+            .get_v4_conformance_record(artifact.id, stored_type.id)
+            .await
+            .expect("reload conformance")
+            .expect("conformance exists");
+        let attempts = db
+            .list_v4_verification_attempts(conformance.id)
+            .await
+            .expect("list attempts");
+
+        assert_eq!(attempt.attempt_kind, "failed");
+        assert_eq!(loaded.status, "declared");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].failure_error.as_deref(),
+            Some("codec unavailable")
+        );
     }
 }
