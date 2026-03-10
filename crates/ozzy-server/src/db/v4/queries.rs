@@ -1020,4 +1020,65 @@ mod tests {
         assert_eq!(loaded_project_revision.project_meta["owner"], "user");
         assert_eq!(loaded_conformance.status, "declared");
     }
+
+    #[tokio::test]
+    async fn v4_project_revisions_reject_non_object_payloads() {
+        let Some(db) = get_test_db().await else {
+            return;
+        };
+
+        let user = db
+            .upsert_user_from_github(
+                rand::random::<i64>() & i64::MAX,
+                &unique_name("v4user"),
+                None,
+                None,
+            )
+            .await
+            .expect("create user");
+
+        let project = db
+            .create_project(user.id, &unique_name("v4proj"), Some("v4 test"), "private")
+            .await
+            .expect("create project");
+
+        let commit = db
+            .insert_commit(
+                project.id,
+                "github",
+                "rileyleff/ozzydb",
+                &format!("{:040x}", rand::random::<u64>()),
+                "test_ozzy_toml_hash",
+                user.id,
+                Some("v4 registry test"),
+            )
+            .await
+            .expect("insert commit");
+
+        let registry_revision = db
+            .insert_v4_registry_revision(project.id, user.id)
+            .await
+            .expect("insert registry revision");
+
+        let err = db
+            .insert_v4_project_revision(
+                project.id,
+                commit.id,
+                registry_revision.id,
+                "test_ozzy_toml_hash",
+                "[project]\nname = \"test\"\nowner = \"user\"\n",
+                json!(["not-an-object"]),
+                json!({}),
+                json!({}),
+                json!({}),
+                user.id,
+            )
+            .await
+            .expect_err("array payload should violate JSON object checks");
+
+        assert!(
+            matches!(err, V4QueryError::Database(_)),
+            "expected database constraint error, got {err:?}"
+        );
+    }
 }

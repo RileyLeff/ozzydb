@@ -92,7 +92,6 @@ struct ParamDetail {
 struct NodeDetail {
     transform: String,
     params: HashMap<String, serde_json::Value>,
-    machine: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -279,7 +278,6 @@ fn extract_nodes(def: &ozzy_core::toml_spec::EndpointDef) -> HashMap<String, Nod
                 NodeDetail {
                     transform: node.transform.clone(),
                     params: node.params.clone(),
-                    machine: node.machine.clone(),
                 },
             )
         })

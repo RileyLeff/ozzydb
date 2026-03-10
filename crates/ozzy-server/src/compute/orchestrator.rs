@@ -346,8 +346,9 @@ async fn execute_node(
         });
     }
 
-    // Resolve compute backend for this node
-    let backend = state.compute.resolve(node_def.machine.as_deref())?;
+    // Resolve the server-selected compute backend. Provider realization is not
+    // part of the authored endpoint model in v4.
+    let backend = state.compute.resolve(None)?;
 
     let env_image_ref = env_image
         .as_ref()
@@ -982,7 +983,6 @@ mod tests {
             NodeDef {
                 transform: "qc".to_string(),
                 params: HashMap::new(),
-                machine: None,
             },
         );
         nodes.insert(
@@ -990,7 +990,6 @@ mod tests {
             NodeDef {
                 transform: "analyze".to_string(),
                 params: HashMap::new(),
-                machine: None,
             },
         );
 
@@ -1019,7 +1018,6 @@ mod tests {
             NodeDef {
                 transform: "qc".to_string(),
                 params: HashMap::new(),
-                machine: None,
             },
         );
         nodes.insert(
@@ -1027,7 +1025,6 @@ mod tests {
             NodeDef {
                 transform: "filter".to_string(),
                 params: HashMap::new(),
-                machine: None,
             },
         );
         nodes.insert(
@@ -1035,7 +1032,6 @@ mod tests {
             NodeDef {
                 transform: "combine".to_string(),
                 params: HashMap::new(),
-                machine: None,
             },
         );
 
@@ -1094,7 +1090,6 @@ mod tests {
             NodeDef {
                 transform: "t".to_string(),
                 params: HashMap::new(),
-                machine: None,
             },
         );
         let endpoint = EndpointDef {
@@ -1121,7 +1116,6 @@ mod tests {
                 NodeDef {
                     transform: format!("t_{}", name),
                     params: HashMap::new(),
-                    machine: None,
                 },
             );
         }

@@ -1162,7 +1162,6 @@ mod tests {
             NodeDef {
                 transform: "qc".to_string(),
                 params: HashMap::new(),
-                machine: None,
             },
         );
         nodes.insert(
@@ -1170,7 +1169,6 @@ mod tests {
             NodeDef {
                 transform: "analyze".to_string(),
                 params: HashMap::new(),
-                machine: None,
             },
         );
 
@@ -1216,7 +1214,6 @@ mod tests {
             NodeDef {
                 transform: "t".to_string(),
                 params: HashMap::new(),
-                machine: None,
             },
         );
         let endpoint = EndpointDef {
@@ -1397,7 +1394,6 @@ mod tests {
                 p.insert("static_key".to_string(), serde_json::json!("static_val"));
                 p
             },
-            machine: None,
         };
 
         let endpoint = EndpointDef {

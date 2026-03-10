@@ -214,12 +214,11 @@ pub struct EndpointParamDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeDef {
     pub transform: String,
     #[serde(default)]
     pub params: HashMap<String, serde_json::Value>,
-    #[serde(default)]
-    pub machine: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1693,7 +1692,7 @@ min = 0.0
     }
 
     #[test]
-    fn parse_machine_config() {
+    fn parse_unknown_machine_field_is_rejected() {
         let toml = r#"
 [project]
 name = "test"
@@ -1713,23 +1712,13 @@ output = "parquet"
 
 [endpoints.ep.nodes]
 heavy = { transform = "t", machine = "gpu-large" }
-light = { transform = "t" }
 
 [[endpoints.ep.edges]]
 from = "data:raw"
 to = "heavy.data"
-
-[[endpoints.ep.edges]]
-from = "heavy"
-to = "light.data"
 "#;
-        let doc = OzzyToml::parse(toml).unwrap();
-        let ep = &doc.endpoints["ep"];
-        assert_eq!(ep.nodes["heavy"].machine.as_deref(), Some("gpu-large"));
-        assert_eq!(ep.nodes["light"].machine, None);
-
-        let errors = doc.validate();
-        assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
+        let err = OzzyToml::parse(toml).expect_err("machine field should be rejected");
+        assert!(err.to_string().contains("unknown field `machine`"));
     }
 
     #[test]

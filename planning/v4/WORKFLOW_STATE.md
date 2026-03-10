@@ -218,6 +218,23 @@
   - `compute::orchestrator`
   - endpoint inspection
 - Removed direct `commit_state` reads from those runtime paths.
+
+### Phase 2.3 cleanup pass
+- Removed `NodeDef.machine` from the authored endpoint model and made unknown `machine` fields parse errors.
+- Removed `machine` from endpoint inspection responses and stopped using node-level provider selection in the orchestrator.
+- Moved commit detail reads onto `PublishedProjectRevision` instead of `commit_state`.
+- Added `project_meta` to commit detail responses so commit inspection reflects the published project revision payloads.
+- Added `crates/ozzy-server/migrations/006_v4_project_revision_payload_checks.sql` to enforce object-shaped JSON payloads for:
+  - `environments`
+  - `transforms`
+  - `endpoints`
+  - `project_meta`
+- Renamed snapshot-binding errors so they refer to published project revisions instead of legacy commit-state terminology.
+- Added a DB-backed regression test proving non-object project-revision payloads are rejected.
+- Verification for this checkpoint:
+  - `cargo test -p ozzy-core`
+  - `cargo check -p ozzy-server --tests`
+  - `cargo test -p ozzy-types`
 - Added test coverage for:
   - project revision payload persistence
   - published project revision loading from a pinned snapshot

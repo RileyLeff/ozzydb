@@ -1,7 +1,7 @@
 //! Commit history API endpoints.
 //!
 //! `GET /v1/commits/{owner}/{slug}` — list commits for a project
-//! `GET /v1/commits/{owner}/{slug}/{sha}` — get commit detail + commit state
+//! `GET /v1/commits/{owner}/{slug}/{sha}` — get commit detail + published project revision
 
 use axum::{
     Json, Router,
@@ -15,6 +15,7 @@ use super::access::enforce_read_access;
 use super::auth::ApiError;
 use crate::AppState;
 use crate::auth::middleware::MaybeAuthUser;
+use crate::registry::load_published_project_revision_by_commit;
 
 /// Build the commits router.
 pub fn router() -> Router<AppState> {
@@ -61,6 +62,7 @@ struct CommitDetail {
     environments: serde_json::Value,
     transforms: serde_json::Value,
     endpoints: serde_json::Value,
+    project_meta: serde_json::Value,
 }
 
 // ============================================================================
@@ -106,7 +108,7 @@ async fn list_commits(
     Ok(Json(summaries))
 }
 
-/// Get a single commit by SHA, including its commit state.
+/// Get a single commit by SHA, including its published project revision payloads.
 async fn get_commit(
     State(state): State<AppState>,
     Path((owner, slug, sha)): Path<(String, String, String)>,
@@ -125,16 +127,10 @@ async fn get_commit(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Commit '{}' not found", sha)))?;
 
-    let commit_state = state.db.get_commit_state(commit.id).await?;
-
-    let (environments, transforms, endpoints) = match commit_state {
-        Some(cs) => (cs.environments, cs.transforms, cs.endpoints),
-        None => (
-            serde_json::json!({}),
-            serde_json::json!({}),
-            serde_json::json!({}),
-        ),
-    };
+    let published =
+        load_published_project_revision_by_commit(&state.db, &state.registry_snapshots, commit.id)
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?;
 
     let username = state
         .db
@@ -152,8 +148,9 @@ async fn get_commit(
         message: commit.message,
         pushed_by: username,
         created_at: commit.created_at,
-        environments,
-        transforms,
-        endpoints,
+        environments: published.row.environments.clone(),
+        transforms: published.row.transforms.clone(),
+        endpoints: published.row.endpoints.clone(),
+        project_meta: published.project_meta,
     }))
 }

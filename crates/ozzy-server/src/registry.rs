@@ -184,7 +184,7 @@ impl RegistrySnapshot {
 
             match matches.as_slice() {
                 [] => {
-                    return Err(RegistrySnapshotError::MissingSnapshotEnvironmentBinding {
+                    return Err(RegistrySnapshotError::MissingPublishedEnvironmentBinding {
                         environment_name: authored_name.clone(),
                     });
                 }
@@ -198,10 +198,12 @@ impl RegistrySnapshot {
                     environments.insert(runtime_key, env_def);
                 }
                 many => {
-                    return Err(RegistrySnapshotError::AmbiguousSnapshotEnvironmentBinding {
-                        environment_name: authored_name.clone(),
-                        candidates: many.iter().map(|(key, _)| key.to_string()).collect(),
-                    });
+                    return Err(
+                        RegistrySnapshotError::AmbiguousPublishedEnvironmentBinding {
+                            environment_name: authored_name.clone(),
+                            candidates: many.iter().map(|(key, _)| key.to_string()).collect(),
+                        },
+                    );
                 }
             }
         }
@@ -211,7 +213,7 @@ impl RegistrySnapshot {
             let expected_environment_key = environment_keys_by_authored_name
                 .get(&authored_transform.environment)
                 .ok_or_else(
-                    || RegistrySnapshotError::MissingSnapshotEnvironmentBinding {
+                    || RegistrySnapshotError::MissingPublishedEnvironmentBinding {
                         environment_name: authored_transform.environment.clone(),
                     },
                 )?;
@@ -249,7 +251,7 @@ impl RegistrySnapshot {
 
             match matches.as_slice() {
                 [] => {
-                    return Err(RegistrySnapshotError::MissingSnapshotTransformBinding {
+                    return Err(RegistrySnapshotError::MissingPublishedTransformBinding {
                         transform_name: authored_name.clone(),
                     });
                 }
@@ -275,7 +277,7 @@ impl RegistrySnapshot {
                     );
                 }
                 many => {
-                    return Err(RegistrySnapshotError::AmbiguousSnapshotTransformBinding {
+                    return Err(RegistrySnapshotError::AmbiguousPublishedTransformBinding {
                         transform_name: authored_name.clone(),
                         candidates: many.iter().map(|(key, _)| key.to_string()).collect(),
                     });
@@ -547,24 +549,30 @@ pub enum RegistrySnapshotError {
         port_kind: String,
         port_name: String,
     },
-    #[error("commit state environment '{environment_name}' has no matching snapshot environment")]
-    MissingSnapshotEnvironmentBinding { environment_name: String },
     #[error(
-        "commit state environment '{environment_name}' matches multiple snapshot environments: {candidates:?}"
+        "published project revision environment '{environment_name}' has no matching snapshot environment"
     )]
-    AmbiguousSnapshotEnvironmentBinding {
+    MissingPublishedEnvironmentBinding { environment_name: String },
+    #[error(
+        "published project revision environment '{environment_name}' matches multiple snapshot environments: {candidates:?}"
+    )]
+    AmbiguousPublishedEnvironmentBinding {
         environment_name: String,
         candidates: Vec<String>,
     },
-    #[error("commit state transform '{transform_name}' has no matching snapshot transform")]
-    MissingSnapshotTransformBinding { transform_name: String },
     #[error(
-        "commit state transform '{transform_name}' matches multiple snapshot transforms: {candidates:?}"
+        "published project revision transform '{transform_name}' has no matching snapshot transform"
     )]
-    AmbiguousSnapshotTransformBinding {
+    MissingPublishedTransformBinding { transform_name: String },
+    #[error(
+        "published project revision transform '{transform_name}' matches multiple snapshot transforms: {candidates:?}"
+    )]
+    AmbiguousPublishedTransformBinding {
         transform_name: String,
         candidates: Vec<String>,
     },
+    #[error("published project revision field '{field}' must be a JSON object")]
+    InvalidPublishedProjectRevisionPayload { field: &'static str },
     #[error(transparent)]
     Relation(#[from] ozzy_types::relations::RelationError),
 }
@@ -614,6 +622,13 @@ pub async fn load_published_project_revision_by_commit(
         serde_json::from_value(project_revision.transforms.clone())?;
     let endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef> =
         serde_json::from_value(project_revision.endpoints.clone())?;
+    if !project_revision.project_meta.is_object() {
+        return Err(
+            RegistrySnapshotError::InvalidPublishedProjectRevisionPayload {
+                field: "project_meta",
+            },
+        );
+    }
     let runtime = snapshot.bind_runtime_definitions(&environments, &transforms)?;
 
     Ok(PublishedProjectRevision {
