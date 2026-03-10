@@ -3,6 +3,7 @@
 //! v2: OzzyDB is a switchboard. Git owns code, container registries own environments,
 //! OzzyDB owns data, wires everything together, orchestrates compute, and caches results.
 
+pub mod artifacts;
 pub mod canon;
 pub mod hash;
 pub mod platform;

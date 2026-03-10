@@ -1,7 +1,7 @@
 # v4 Workflow State
 
-## Current Phase: Phase 3 underway
-## Current Step: Phase 3.3 complete; ready for Phase 4 artifact model rewrite
+## Current Phase: Phase 4 underway
+## Current Step: Phase 4.2 complete; ready for Phase 4.3 artifact-backed conformance
 
 ## Completed Steps
 
@@ -323,7 +323,7 @@
   - `planning/reviews/v4/16_phase3_3_env_identity_fix_review.md`
 
 ## Open Review Findings
-- None blocking for Phase 4.1.
+- None blocking for Phase 4.3.
 - Residual legacy debt to delete later:
   - `commit_state` helpers in the DB/test surface
   - `register_commit_atomically(...)` in legacy tests
@@ -345,12 +345,13 @@
 - `planning/reviews/v4/15_phase3_3_review.md`
 - `planning/reviews/v4/16_phase3_3_env_identity_fix_review.md`
 - `planning/reviews/v4/17_phase4_1_review.md`
+- `planning/reviews/v4/18_phase4_2_review.md`
 
 ## Current Blockers
 - None.
 
 ## Next Recommended Steps
-1. Start Phase 4.2 and replace the dedicated collection ontology with typed bundle/collection artifacts.
+1. Start Phase 4.3 and attach conformance explicitly to first-class artifacts.
 2. Remove the remaining dead `commit_state`/legacy publication helpers once the old DB/e2e tests are moved onto the v4 publication path.
 3. Preserve the Phase 1 rule that semantic subsystems return typed errors instead of panicking or falling back.
 4. Extend the remaining unsupported builtin verifier surface only when the required registry/artifact/execution infrastructure exists.
@@ -376,3 +377,24 @@
   - `cargo check -p ozzy-server --tests`
 - Review artifact:
   - `planning/reviews/v4/17_phase4_1_review.md`
+
+### Phase 4.2: Typed bundle and collection artifacts
+- Added `ozzy_core::artifacts` as the shared manifest model for artifact-backed structure.
+- Introduced typed manifest variants:
+  - `ArtifactManifest::Bundle { entries }`
+  - `ArtifactManifest::Collection { items }`
+- Added explicit Rust-side manifest validation instead of treating manifest payloads as unstructured JSON.
+- Added `migrations/008_v4_artifact_manifest_checks.sql` so manifest artifacts must declare a supported outer shape in the database:
+  - `bundle` with `entries`
+  - `collection` with `items`
+- Added v4 query helpers for:
+  - validated manifest artifact creation
+  - manifest decoding from stored artifacts
+  - same-project member validation before persistence
+- Kept the old `Collection` API/runtime surface untouched for now; this phase replaces the v4 ontology, not the public API contract.
+- Verification for this checkpoint:
+  - `cargo test -p ozzy-core`
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/18_phase4_2_review.md`

@@ -16,6 +16,7 @@ blake3.workspace = true
 thiserror.workspace = true
 walkdir.workspace = true
 ozzy-types.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -4,6 +4,7 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
+use ozzy_core::artifacts::{ArtifactManifest, ArtifactManifestError};
 use ozzy_types::canonical::CanonicalType;
 use ozzy_types::conformance::{ConformanceStatus, VerificationAttempt};
 use ozzy_types::registry::TypeVersion;
@@ -26,6 +27,12 @@ pub enum V4QueryError {
     },
     #[error("invalid query input: {0}")]
     InvalidInput(String),
+    #[error("invalid artifact manifest: {0}")]
+    InvalidArtifactManifest(#[from] ArtifactManifestError),
+    #[error("artifact manifest references unknown artifact {artifact_id}")]
+    UnknownReferencedArtifact { artifact_id: Uuid },
+    #[error("artifact manifest references artifact {artifact_id} outside project {project_id}")]
+    CrossProjectArtifactReference { artifact_id: Uuid, project_id: Uuid },
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("serialization error: {0}")]
@@ -57,6 +64,54 @@ fn verdict_to_str(verdict: VerificationVerdict) -> &'static str {
 }
 
 impl Database {
+    async fn validate_v4_manifest_artifact_members(
+        &self,
+        project_id: Uuid,
+        manifest: &ArtifactManifest,
+    ) -> Result<(), V4QueryError> {
+        let unique_ids: Vec<Uuid> = manifest.referenced_artifact_id_set().into_iter().collect();
+        if unique_ids.is_empty() {
+            return Ok(());
+        }
+
+        #[derive(sqlx::FromRow)]
+        struct ArtifactProjectRow {
+            id: Uuid,
+            project_id: Uuid,
+        }
+
+        let rows = sqlx::query_as::<_, ArtifactProjectRow>(
+            r#"
+            SELECT id, project_id
+            FROM v4_artifacts
+            WHERE id = ANY($1)
+            "#,
+        )
+        .bind(&unique_ids)
+        .fetch_all(self.pool())
+        .await?;
+
+        let row_map = rows
+            .into_iter()
+            .map(|row| (row.id, row.project_id))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        for artifact_id in unique_ids {
+            let Some(member_project_id) = row_map.get(&artifact_id).copied() else {
+                return Err(V4QueryError::UnknownReferencedArtifact { artifact_id });
+            };
+
+            if member_project_id != project_id {
+                return Err(V4QueryError::CrossProjectArtifactReference {
+                    artifact_id,
+                    project_id,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn insert_v4_canonical_type(
         &self,
         canonical: &CanonicalType,
@@ -685,6 +740,28 @@ impl Database {
         Ok(row)
     }
 
+    pub async fn insert_v4_manifest_artifact(
+        &self,
+        project_id: Uuid,
+        manifest: &ArtifactManifest,
+        source_invocation_id: Option<Uuid>,
+        created_by: Uuid,
+    ) -> Result<StoredArtifact, V4QueryError> {
+        manifest.validate()?;
+        self.validate_v4_manifest_artifact_members(project_id, manifest)
+            .await?;
+
+        self.insert_v4_artifact(
+            project_id,
+            ArtifactKind::Manifest,
+            None,
+            Some(serde_json::to_value(manifest)?),
+            source_invocation_id,
+            created_by,
+        )
+        .await
+    }
+
     pub async fn get_v4_artifact(
         &self,
         artifact_id: Uuid,
@@ -810,6 +887,27 @@ impl Database {
         .fetch_optional(self.pool())
         .await?;
         Ok(row)
+    }
+
+    pub fn decode_v4_artifact_manifest(
+        &self,
+        artifact: &StoredArtifact,
+    ) -> Result<ArtifactManifest, V4QueryError> {
+        if artifact.artifact_kind != ArtifactKind::Manifest.as_str() {
+            return Err(V4QueryError::InvalidInput(format!(
+                "artifact {} is not a manifest artifact",
+                artifact.id
+            )));
+        }
+
+        let manifest = artifact.manifest.clone().ok_or_else(|| {
+            V4QueryError::InvalidInput(format!(
+                "manifest artifact {} is missing payload",
+                artifact.id
+            ))
+        })?;
+
+        Ok(serde_json::from_value(manifest)?)
     }
 
     pub async fn insert_v4_verification_attempt_from_report(
@@ -1092,14 +1190,16 @@ mod tests {
             .await
             .expect("insert blob artifact");
         let manifest_artifact = db
-            .insert_v4_artifact(
+            .insert_v4_manifest_artifact(
                 project.id,
-                ArtifactKind::Manifest,
-                None,
-                Some(json!({
-                    "kind": "bundle",
-                    "members": ["artifact_hash_1"]
-                })),
+                &ArtifactManifest::Bundle {
+                    entries: std::collections::BTreeMap::from([(
+                        "raw".to_string(),
+                        ozzy_core::artifacts::ArtifactManifestEntry {
+                            artifact_id: blob_artifact.id,
+                        },
+                    )]),
+                },
                 Some(invocation.id),
                 user.id,
             )
@@ -1182,6 +1282,9 @@ mod tests {
             .list_v4_artifacts(project.id)
             .await
             .expect("list v4 artifacts");
+        let decoded_manifest = db
+            .decode_v4_artifact_manifest(&manifest_artifact)
+            .expect("decode manifest artifact");
         let loaded_invocation_artifacts = db
             .list_v4_invocation_artifacts(invocation.id)
             .await
@@ -1220,6 +1323,17 @@ mod tests {
         assert_eq!(
             loaded_blob_artifact.content_hash.as_deref(),
             Some("artifact_hash_1")
+        );
+        assert_eq!(
+            decoded_manifest,
+            ArtifactManifest::Bundle {
+                entries: std::collections::BTreeMap::from([(
+                    "raw".to_string(),
+                    ozzy_core::artifacts::ArtifactManifestEntry {
+                        artifact_id: blob_artifact.id
+                    }
+                )])
+            }
         );
         assert_eq!(loaded_artifacts.len(), 2);
         assert_eq!(loaded_invocation_artifacts.len(), 2);
@@ -1287,5 +1401,72 @@ mod tests {
             matches!(err, V4QueryError::Database(_)),
             "expected database constraint error, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn v4_manifest_artifacts_reject_cross_project_members() {
+        let Some(db) = get_test_db().await else {
+            return;
+        };
+
+        let user = db
+            .upsert_user_from_github(
+                rand::random::<i64>() & i64::MAX,
+                &unique_name("v4user"),
+                None,
+                None,
+            )
+            .await
+            .expect("create user");
+
+        let project_a = db
+            .create_project(user.id, &unique_name("v4proja"), Some("v4 test"), "private")
+            .await
+            .expect("create project a");
+        let project_b = db
+            .create_project(user.id, &unique_name("v4projb"), Some("v4 test"), "private")
+            .await
+            .expect("create project b");
+
+        db.upsert_content_ref(
+            "artifact_hash_cross_project",
+            "content/ar/ti/artifact_hash_cross_project.bin",
+            "application/octet-stream",
+            42,
+        )
+        .await
+        .expect("upsert content ref");
+
+        let foreign_artifact = db
+            .insert_v4_artifact(
+                project_b.id,
+                ArtifactKind::Blob,
+                Some("artifact_hash_cross_project"),
+                None,
+                None,
+                user.id,
+            )
+            .await
+            .expect("insert foreign artifact");
+
+        let err = db
+            .insert_v4_manifest_artifact(
+                project_a.id,
+                &ArtifactManifest::Collection {
+                    items: vec![ozzy_core::artifacts::ArtifactManifestEntry {
+                        artifact_id: foreign_artifact.id,
+                    }],
+                },
+                None,
+                user.id,
+            )
+            .await
+            .expect_err("cross-project manifest should fail");
+
+        assert!(matches!(
+            err,
+            V4QueryError::CrossProjectArtifactReference { artifact_id, project_id }
+            if artifact_id == foreign_artifact.id && project_id == project_a.id
+        ));
     }
 }
