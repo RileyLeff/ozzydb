@@ -27,3 +27,7 @@ Verification code must not assume malformed constructor state is impossible and 
 ### Conformance semantic state stays small; attempt history carries operational noise
 
 `ConformanceRecord` semantic state is limited to `declared`, `verified`, and `rejected`. Verifier crashes, missing backends, and other execution failures belong in append-only verification attempts and must not introduce an extra semantic state or silently mutate an existing verified/rejected claim.
+
+### Phase 1 semantic code should not rely on "validated earlier" panics
+
+Phase 1 consolidation removed remaining panic-based constructor handling from canonicalization and relation evaluation. Going forward, malformed semantic inputs must return typed errors across syntax validation, canonicalization, relation evaluation, verification, and conformance handling.

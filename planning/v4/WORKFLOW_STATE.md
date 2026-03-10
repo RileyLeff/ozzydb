@@ -1,7 +1,7 @@
 # v4 Workflow State
 
-## Current Phase: Phase 1 - Core Type System Foundation
-## Current Step: Step 1.5 complete (conformance model); Phase 1 consolidation checkpoint
+## Current Phase: Phase 1 complete; Phase 2 next
+## Current Step: Phase 1 consolidation review complete
 
 ## Completed Steps
 
@@ -123,6 +123,12 @@
   - failed verification attempts do not mutate semantic state
   - rejected reports set `rejected`
 
+### Phase 1 consolidation review
+- Reviewed the entire `ozzy-types` crate at the phase boundary.
+- Removed remaining non-test panic-based constructor handling from canonicalization and relation evaluation.
+- Added regression coverage proving malformed semantic constructor state errors instead of panicking.
+- Reconfirmed `cargo test -p ozzy-types` passes for the whole Phase 1 surface.
+
 ## Open Review Findings
 - None blocking for Phase 1.
 - Review artifacts:
@@ -131,14 +137,15 @@
   - `planning/reviews/v4/03_phase1_3_review.md`
   - `planning/reviews/v4/04_phase1_4_review.md`
   - `planning/reviews/v4/05_phase1_5_review.md`
+  - `planning/reviews/v4/06_phase1_consolidation_review.md`
 
 ## Current Blockers
 - None.
 
 ## Next Recommended Steps
-1. Run a Phase 1 consolidation review over `crates/ozzy-types` before starting Phase 2.
-2. If that review is clean, start Phase 2.1 registry persistence and snapshot modeling.
-3. Keep server/runtime rewrites deferred until the new persistence model exists.
+1. Start Phase 2.1 and model first-class registry persistence objects.
+2. Keep `commit_state` out of the new runtime path entirely.
+3. Preserve the Phase 1 rule that semantic subsystems return typed errors instead of panicking or falling back.
 
 ## Notes
 - Existing v3 planning and type-system notes remain background context only.

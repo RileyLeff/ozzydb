@@ -35,6 +35,21 @@ pub struct RelationQuery {
 pub enum RelationError {
     #[error(transparent)]
     Canonicalization(#[from] CanonicalizationError),
+    #[error(
+        "constructor '{constructor}' is missing required argument '{arg}' during relation evaluation"
+    )]
+    MissingConstructorArg {
+        constructor: BuiltinConstructor,
+        arg: &'static str,
+    },
+    #[error(
+        "constructor '{constructor}' has invalid argument '{arg}' during relation evaluation; expected {expected}"
+    )]
+    InvalidConstructorArg {
+        constructor: BuiltinConstructor,
+        arg: &'static str,
+        expected: &'static str,
+    },
 }
 
 pub fn equivalent(
@@ -52,7 +67,7 @@ pub fn refines(
 ) -> Result<bool, RelationError> {
     let left = canonicalize(defs, left)?;
     let right = canonicalize(defs, right)?;
-    Ok(refines_canonical(&left, &right))
+    refines_canonical(&left, &right)
 }
 
 pub fn evaluate(
@@ -71,19 +86,29 @@ pub fn evaluate(
     })
 }
 
-fn refines_canonical(left: &TypeExpr, right: &TypeExpr) -> bool {
+fn refines_canonical(left: &TypeExpr, right: &TypeExpr) -> Result<bool, RelationError> {
     if left == right {
-        return true;
+        return Ok(true);
     }
 
     match (left, right) {
-        (TypeExpr::Never, _) => true,
-        (_, TypeExpr::Never) => false,
+        (TypeExpr::Never, _) => Ok(true),
+        (_, TypeExpr::Never) => Ok(false),
         (_, TypeExpr::Intersection(parts)) => {
-            parts.iter().all(|part| refines_canonical(left, part))
+            for part in parts {
+                if !refines_canonical(left, part)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
         }
         (TypeExpr::Intersection(parts), _) => {
-            parts.iter().any(|part| refines_canonical(part, right))
+            for part in parts {
+                if refines_canonical(part, right)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         }
         (TypeExpr::Collection(left_item), TypeExpr::Collection(right_item)) => {
             refines_canonical(left_item, right_item)
@@ -100,11 +125,11 @@ fn refines_canonical(left: &TypeExpr, right: &TypeExpr) -> bool {
         (TypeExpr::Constructor(left_constructor), TypeExpr::Constructor(right_constructor)) => {
             constructor_refines(left_constructor, right_constructor)
         }
-        _ => false,
+        _ => Ok(false),
     }
 }
 
-fn record_refines(left: &RecordExpr, right: &RecordExpr) -> bool {
+fn record_refines(left: &RecordExpr, right: &RecordExpr) -> Result<bool, RelationError> {
     let left_fields = left
         .fields
         .iter()
@@ -120,93 +145,126 @@ fn record_refines(left: &RecordExpr, right: &RecordExpr) -> bool {
         match left_fields.get(target.name.as_str()) {
             Some(source) => {
                 if source.optional && !target.optional {
-                    return false;
+                    return Ok(false);
                 }
-                if !refines_canonical(&source.ty, &target.ty) {
-                    return false;
+                if !refines_canonical(&source.ty, &target.ty)? {
+                    return Ok(false);
                 }
             }
             None if target.optional => {}
-            None => return false,
+            None => return Ok(false),
         }
     }
 
     if !right.open {
         for field_name in left_fields.keys() {
             if !right_fields.contains_key(field_name) {
-                return false;
+                return Ok(false);
             }
         }
     }
 
-    true
+    Ok(true)
 }
 
-fn constructor_refines(left: &ConstructorExpr, right: &ConstructorExpr) -> bool {
+fn constructor_refines(
+    left: &ConstructorExpr,
+    right: &ConstructorExpr,
+) -> Result<bool, RelationError> {
     if left.name != right.name {
-        return false;
+        return Ok(false);
     }
 
     match left.name {
         BuiltinConstructor::Csv => csv_refines(left, right),
-        BuiltinConstructor::Unit => string_arg(left, "value") == string_arg(right, "value"),
-        BuiltinConstructor::Min => {
-            numeric_value(numeric_arg_literal(left, "value"))
-                >= numeric_value(numeric_arg_literal(right, "value"))
-        }
-        BuiltinConstructor::Max => {
-            numeric_value(numeric_arg_literal(left, "value"))
-                <= numeric_value(numeric_arg_literal(right, "value"))
-        }
+        BuiltinConstructor::Unit => Ok(string_arg(left, "value")? == string_arg(right, "value")?),
+        BuiltinConstructor::Min => Ok(numeric_value(numeric_arg_literal(left, "value")?)?
+            >= numeric_value(numeric_arg_literal(right, "value")?)?),
+        BuiltinConstructor::Max => Ok(numeric_value(numeric_arg_literal(left, "value")?)?
+            <= numeric_value(numeric_arg_literal(right, "value")?)?),
         BuiltinConstructor::Enum => {
-            let left_values = list_arg(left, "values");
-            let right_values = list_arg(right, "values");
-            left_values.iter().all(|value| right_values.contains(value))
+            let left_values = list_arg(left, "values")?;
+            let right_values = list_arg(right, "values")?;
+            Ok(left_values.iter().all(|value| right_values.contains(value)))
         }
-        BuiltinConstructor::Nullable => true,
+        BuiltinConstructor::Nullable => Ok(true),
     }
 }
 
-fn csv_refines(left: &ConstructorExpr, right: &ConstructorExpr) -> bool {
+fn csv_refines(left: &ConstructorExpr, right: &ConstructorExpr) -> Result<bool, RelationError> {
     for (name, expected) in &right.args {
         match left.args.get(name) {
             Some(actual) if actual == expected => {}
-            _ => return false,
+            _ => return Ok(false),
         }
     }
 
-    true
+    Ok(true)
 }
 
-fn string_arg<'a>(constructor: &'a ConstructorExpr, name: &str) -> &'a str {
+fn string_arg<'a>(
+    constructor: &'a ConstructorExpr,
+    name: &'static str,
+) -> Result<&'a str, RelationError> {
     match constructor.args.get(name) {
-        Some(Literal::String(value)) => value.as_str(),
-        _ => panic!("constructor arguments should be validated before relation checks"),
+        Some(Literal::String(value)) => Ok(value.as_str()),
+        Some(_) => Err(RelationError::InvalidConstructorArg {
+            constructor: constructor.name,
+            arg: name,
+            expected: "a string literal",
+        }),
+        None => Err(RelationError::MissingConstructorArg {
+            constructor: constructor.name,
+            arg: name,
+        }),
     }
 }
 
-fn numeric_arg_literal<'a>(constructor: &'a ConstructorExpr, name: &str) -> &'a Literal {
+fn numeric_arg_literal<'a>(
+    constructor: &'a ConstructorExpr,
+    name: &'static str,
+) -> Result<&'a Literal, RelationError> {
     match constructor.args.get(name) {
-        Some(Literal::Integer(_)) | Some(Literal::Float(_)) => constructor
-            .args
-            .get(name)
-            .expect("just matched the numeric argument"),
-        _ => panic!("constructor arguments should be validated before relation checks"),
+        Some(value @ Literal::Integer(_)) | Some(value @ Literal::Float(_)) => Ok(value),
+        Some(_) => Err(RelationError::InvalidConstructorArg {
+            constructor: constructor.name,
+            arg: name,
+            expected: "an integer or float literal",
+        }),
+        None => Err(RelationError::MissingConstructorArg {
+            constructor: constructor.name,
+            arg: name,
+        }),
     }
 }
 
-fn list_arg<'a>(constructor: &'a ConstructorExpr, name: &str) -> &'a [Literal] {
+fn list_arg<'a>(
+    constructor: &'a ConstructorExpr,
+    name: &'static str,
+) -> Result<&'a [Literal], RelationError> {
     match constructor.args.get(name) {
-        Some(Literal::List(values)) => values.as_slice(),
-        _ => panic!("constructor arguments should be validated before relation checks"),
+        Some(Literal::List(values)) => Ok(values.as_slice()),
+        Some(_) => Err(RelationError::InvalidConstructorArg {
+            constructor: constructor.name,
+            arg: name,
+            expected: "a list of scalar literals",
+        }),
+        None => Err(RelationError::MissingConstructorArg {
+            constructor: constructor.name,
+            arg: name,
+        }),
     }
 }
 
-fn numeric_value(literal: &Literal) -> f64 {
+fn numeric_value(literal: &Literal) -> Result<f64, RelationError> {
     match literal {
-        Literal::Integer(value) => *value as f64,
-        Literal::Float(value) => value.into_inner(),
-        _ => panic!("numeric_value called on non-numeric literal"),
+        Literal::Integer(value) => Ok(*value as f64),
+        Literal::Float(value) => Ok(value.into_inner()),
+        _ => Err(RelationError::InvalidConstructorArg {
+            constructor: BuiltinConstructor::Min,
+            arg: "value",
+            expected: "an integer or float literal",
+        }),
     }
 }
 
@@ -387,5 +445,24 @@ mod tests {
 
         assert!(refines(&defs, &subset, &superset).expect("refinement should succeed"));
         assert!(!refines(&defs, &superset, &subset).expect("refinement should succeed"));
+    }
+
+    #[test]
+    fn malformed_constructor_returns_error_instead_of_panicking() {
+        let defs = TypeDefinitions::default();
+        let err = refines(
+            &defs,
+            &TypeExpr::Constructor(ConstructorExpr {
+                name: BuiltinConstructor::Unit,
+                args: BTreeMap::from([("value".to_string(), Literal::Integer(3))]),
+            }),
+            &TypeExpr::Constructor(ConstructorExpr {
+                name: BuiltinConstructor::Unit,
+                args: BTreeMap::from([("value".to_string(), Literal::String("MPa".to_string()))]),
+            }),
+        )
+        .expect_err("malformed constructor should error");
+
+        assert!(matches!(err, RelationError::Canonicalization(_)));
     }
 }

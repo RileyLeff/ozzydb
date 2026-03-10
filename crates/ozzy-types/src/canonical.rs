@@ -62,6 +62,8 @@ pub enum CanonicalizationError {
     RecursiveTypeDefinition { cycle: Vec<String> },
     #[error("local type reference '{name}' could not be resolved during canonicalization")]
     UnresolvedLocalTypeReference { name: String },
+    #[error("canonical interner is internally inconsistent for '{id}'")]
+    InconsistentInternerState { id: String },
 }
 
 /// A minimal in-memory canonical interner for Phase 1.
@@ -84,11 +86,11 @@ impl CanonicalTypeInterner {
         let canonical = CanonicalType::canonicalize(defs, expr)?;
 
         if let Some(id) = self.by_expr.get(&canonical.expr) {
-            return Ok(self
-                .by_id
-                .get(id)
-                .expect("canonical interner should stay internally consistent")
-                .clone());
+            return self.by_id.get(id).cloned().ok_or_else(|| {
+                CanonicalizationError::InconsistentInternerState {
+                    id: id.as_str().to_string(),
+                }
+            });
         }
 
         self.by_expr
@@ -195,7 +197,7 @@ fn canonicalize_constructor(
 ) -> Result<TypeExpr, CanonicalizationError> {
     match constructor.name {
         BuiltinConstructor::Enum => {
-            let values = list_arg(constructor, "values");
+            let values = list_arg(constructor, "values")?;
             let values = values
                 .iter()
                 .cloned()
@@ -250,7 +252,7 @@ fn canonicalize_intersection(
             }
             TypeExpr::Constructor(constructor) => match constructor.name {
                 BuiltinConstructor::Csv => {
-                    let next = CsvConstraint::from_constructor(&constructor);
+                    let next = CsvConstraint::from_constructor(&constructor)?;
                     csv = Some(match csv.take() {
                         Some(current) => match current.merge(next) {
                             Some(merged) => merged,
@@ -260,7 +262,7 @@ fn canonicalize_intersection(
                     });
                 }
                 BuiltinConstructor::Unit => {
-                    let next = string_arg(&constructor, "value");
+                    let next = string_arg(&constructor, "value")?;
                     match &unit {
                         Some(current) if current != next => return Ok(TypeExpr::Never),
                         Some(_) => {}
@@ -268,21 +270,21 @@ fn canonicalize_intersection(
                     }
                 }
                 BuiltinConstructor::Min => {
-                    let next = numeric_arg_literal(&constructor, "value").clone();
+                    let next = numeric_arg_literal(&constructor, "value")?.clone();
                     min_bound = Some(match min_bound.take() {
-                        Some(current) => stronger_min(&current, &next),
+                        Some(current) => stronger_min(&current, &next)?,
                         None => next,
                     });
                 }
                 BuiltinConstructor::Max => {
-                    let next = numeric_arg_literal(&constructor, "value").clone();
+                    let next = numeric_arg_literal(&constructor, "value")?.clone();
                     max_bound = Some(match max_bound.take() {
-                        Some(current) => stronger_max(&current, &next),
+                        Some(current) => stronger_max(&current, &next)?,
                         None => next,
                     });
                 }
                 BuiltinConstructor::Enum => {
-                    let next = list_arg(&constructor, "values")
+                    let next = list_arg(&constructor, "values")?
                         .iter()
                         .cloned()
                         .collect::<BTreeSet<_>>();
@@ -306,7 +308,7 @@ fn canonicalize_intersection(
     }
 
     if let (Some(min), Some(max)) = (&min_bound, &max_bound) {
-        if numeric_value(min) > numeric_value(max) {
+        if numeric_value(min)? > numeric_value(max)? {
             return Ok(TypeExpr::Never);
         }
     }
@@ -356,7 +358,7 @@ fn canonicalize_intersection(
 
     let mut parts = normalized.into_iter().collect::<Vec<_>>();
     if parts.len() == 1 {
-        return Ok(parts.pop().expect("checked len"));
+        return Ok(parts.remove(0));
     }
 
     Ok(TypeExpr::Intersection(parts))
@@ -452,7 +454,15 @@ fn write_literal_key(out: &mut String, literal: &Literal) {
 }
 
 fn quote_string(value: &str) -> String {
-    serde_json::to_string(value).expect("serializing a string literal should not fail")
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        for escaped in ch.escape_default() {
+            quoted.push(escaped);
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn is_scalar_builtin(builtin: BuiltinType) -> bool {
@@ -467,64 +477,105 @@ fn is_scalar_builtin(builtin: BuiltinType) -> bool {
     )
 }
 
-fn string_arg<'a>(constructor: &'a ConstructorExpr, name: &str) -> &'a str {
+fn string_arg<'a>(
+    constructor: &'a ConstructorExpr,
+    name: &'static str,
+) -> Result<&'a str, CanonicalizationError> {
     match constructor.args.get(name) {
-        Some(Literal::String(value)) => value.as_str(),
-        _ => panic!("constructor arguments should be validated before canonicalization"),
+        Some(Literal::String(value)) => Ok(value.as_str()),
+        Some(_) => Err(TypeLanguageError::InvalidConstructorArg {
+            constructor: constructor.name,
+            arg: name.to_string(),
+            expected: "a string literal",
+        }
+        .into()),
+        None => Err(TypeLanguageError::MissingConstructorArg {
+            constructor: constructor.name,
+            arg: name.to_string(),
+        }
+        .into()),
     }
 }
 
-fn numeric_arg_literal<'a>(constructor: &'a ConstructorExpr, name: &str) -> &'a Literal {
+fn numeric_arg_literal<'a>(
+    constructor: &'a ConstructorExpr,
+    name: &'static str,
+) -> Result<&'a Literal, CanonicalizationError> {
     match constructor.args.get(name) {
-        Some(Literal::Integer(_)) | Some(Literal::Float(_)) => constructor
-            .args
-            .get(name)
-            .expect("just matched the numeric argument"),
-        _ => panic!("constructor arguments should be validated before canonicalization"),
+        Some(value @ Literal::Integer(_)) | Some(value @ Literal::Float(_)) => Ok(value),
+        Some(_) => Err(TypeLanguageError::InvalidConstructorArg {
+            constructor: constructor.name,
+            arg: name.to_string(),
+            expected: "an integer or float literal",
+        }
+        .into()),
+        None => Err(TypeLanguageError::MissingConstructorArg {
+            constructor: constructor.name,
+            arg: name.to_string(),
+        }
+        .into()),
     }
 }
 
-fn list_arg<'a>(constructor: &'a ConstructorExpr, name: &str) -> &'a [Literal] {
+fn list_arg<'a>(
+    constructor: &'a ConstructorExpr,
+    name: &'static str,
+) -> Result<&'a [Literal], CanonicalizationError> {
     match constructor.args.get(name) {
-        Some(Literal::List(values)) => values.as_slice(),
-        _ => panic!("constructor arguments should be validated before canonicalization"),
+        Some(Literal::List(values)) => Ok(values.as_slice()),
+        Some(_) => Err(TypeLanguageError::InvalidConstructorArg {
+            constructor: constructor.name,
+            arg: name.to_string(),
+            expected: "a non-empty list of scalar literals",
+        }
+        .into()),
+        None => Err(TypeLanguageError::MissingConstructorArg {
+            constructor: constructor.name,
+            arg: name.to_string(),
+        }
+        .into()),
     }
 }
 
-fn numeric_value(literal: &Literal) -> f64 {
+fn numeric_value(literal: &Literal) -> Result<f64, CanonicalizationError> {
     match literal {
-        Literal::Integer(value) => *value as f64,
-        Literal::Float(value) => value.into_inner(),
-        _ => panic!("numeric_value called on non-numeric literal"),
+        Literal::Integer(value) => Ok(*value as f64),
+        Literal::Float(value) => Ok(value.into_inner()),
+        _ => Err(TypeLanguageError::InvalidConstructorArg {
+            constructor: BuiltinConstructor::Min,
+            arg: "value".to_string(),
+            expected: "an integer or float literal",
+        }
+        .into()),
     }
 }
 
-fn stronger_min(current: &Literal, next: &Literal) -> Literal {
-    let current_value = numeric_value(current);
-    let next_value = numeric_value(next);
+fn stronger_min(current: &Literal, next: &Literal) -> Result<Literal, CanonicalizationError> {
+    let current_value = numeric_value(current)?;
+    let next_value = numeric_value(next)?;
 
     if next_value > current_value {
-        return next.clone();
+        return Ok(next.clone());
     }
     if next_value < current_value {
-        return current.clone();
+        return Ok(current.clone());
     }
 
-    current.max(next).clone()
+    Ok(current.max(next).clone())
 }
 
-fn stronger_max(current: &Literal, next: &Literal) -> Literal {
-    let current_value = numeric_value(current);
-    let next_value = numeric_value(next);
+fn stronger_max(current: &Literal, next: &Literal) -> Result<Literal, CanonicalizationError> {
+    let current_value = numeric_value(current)?;
+    let next_value = numeric_value(next)?;
 
     if next_value < current_value {
-        return next.clone();
+        return Ok(next.clone());
     }
     if next_value > current_value {
-        return current.clone();
+        return Ok(current.clone());
     }
 
-    current.min(next).clone()
+    Ok(current.min(next).clone())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,17 +585,33 @@ struct CsvConstraint {
 }
 
 impl CsvConstraint {
-    fn from_constructor(constructor: &ConstructorExpr) -> Self {
-        let delimiter = constructor.args.get("delimiter").map(|value| match value {
-            Literal::String(value) => value.clone(),
-            _ => panic!("csv delimiter should be validated as string"),
-        });
-        let header = constructor.args.get("header").map(|value| match value {
-            Literal::Bool(value) => *value,
-            _ => panic!("csv header should be validated as bool"),
-        });
+    fn from_constructor(constructor: &ConstructorExpr) -> Result<Self, CanonicalizationError> {
+        let delimiter = match constructor.args.get("delimiter") {
+            Some(Literal::String(value)) => Some(value.clone()),
+            Some(_) => {
+                return Err(TypeLanguageError::InvalidConstructorArg {
+                    constructor: constructor.name,
+                    arg: "delimiter".to_string(),
+                    expected: "a string literal",
+                }
+                .into());
+            }
+            None => None,
+        };
+        let header = match constructor.args.get("header") {
+            Some(Literal::Bool(value)) => Some(*value),
+            Some(_) => {
+                return Err(TypeLanguageError::InvalidConstructorArg {
+                    constructor: constructor.name,
+                    arg: "header".to_string(),
+                    expected: "a boolean literal",
+                }
+                .into());
+            }
+            None => None,
+        };
 
-        Self { delimiter, header }
+        Ok(Self { delimiter, header })
     }
 
     fn merge(self, next: Self) -> Option<Self> {
@@ -756,5 +823,20 @@ mod tests {
 
         assert_eq!(left.id, right.id);
         assert_eq!(interner.len(), 1);
+    }
+
+    #[test]
+    fn malformed_csv_constraint_returns_error_instead_of_panicking() {
+        let defs = TypeDefinitions::default();
+        let err = canonicalize(
+            &defs,
+            &TypeExpr::Constructor(ConstructorExpr {
+                name: BuiltinConstructor::Csv,
+                args: BTreeMap::from([("header".to_string(), Literal::String("yes".to_string()))]),
+            }),
+        )
+        .expect_err("malformed csv constraint should error");
+
+        assert!(matches!(err, CanonicalizationError::InvalidSurfaceType(_)));
     }
 }
