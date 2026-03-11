@@ -5,7 +5,6 @@ mod admin;
 pub mod auth;
 mod collections;
 mod commits;
-mod compute;
 mod data;
 mod endpoints;
 pub(crate) mod fetch;
@@ -33,6 +32,5 @@ pub fn router() -> Router<AppState> {
         .nest("/fetch", fetch::router())
         .nest("/jobs", jobs::router())
         .nest("/commits", commits::router())
-        .nest("/compute", compute::router())
         .nest("/admin", admin::router())
 }

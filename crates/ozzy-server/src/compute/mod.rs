@@ -1,8 +1,8 @@
 //! Compute backend — pluggable execution engine for transform containers.
 //!
 //! The `ComputeBackend` trait allows swapping Docker (local) for Fly Machines
-//! (cloud) or other providers. `ComputeRegistry` holds all active providers
-//! and resolves the server-selected backend for execution.
+//! (cloud) or other providers. `ComputeRegistry` holds all active providers and
+//! exposes only the server-selected backend to the runtime path.
 
 pub mod docker;
 pub mod environments;
@@ -23,8 +23,8 @@ use std::sync::Arc;
 /// Registry of active compute providers.
 ///
 /// Holds named providers (e.g., "docker", "fly") and an optional default.
-/// Runtime execution normally uses the default provider; named resolution is an
-/// internal server capability rather than part of the authored API surface.
+/// Runtime execution only sees the server-selected backend; provider identity is
+/// not part of the authored or public API surface.
 #[derive(Clone)]
 pub struct ComputeRegistry {
     providers: HashMap<String, Arc<dyn ComputeBackend>>,
@@ -80,41 +80,29 @@ impl ComputeRegistry {
         }
     }
 
-    /// Resolve a provider name to a compute backend.
+    /// Resolve the server-selected backend.
     ///
-    /// - `Some(name)`: look up the named provider
-    /// - `None`: use the default provider
-    ///
-    /// Returns an error if the provider isn't registered or no default is set.
-    pub fn resolve(&self, provider_name: Option<&str>) -> anyhow::Result<Arc<dyn ComputeBackend>> {
-        match provider_name {
-            Some(name) => self.providers.get(name).cloned().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Compute provider '{}' is not available on this server. Available: {}",
-                    name,
-                    self.provider_names().join(", ")
-                )
-            }),
-            None => {
-                let default = self.default_provider.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("No compute providers are configured on this server")
-                })?;
-                self.providers.get(default).cloned().ok_or_else(|| {
-                    anyhow::anyhow!("Default compute provider '{}' is not registered", default)
-                })
-            }
-        }
+    /// Returns an error if no default provider is configured or if the selected
+    /// provider is not registered.
+    pub fn backend(&self) -> anyhow::Result<Arc<dyn ComputeBackend>> {
+        let default = self
+            .default_provider
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No compute providers are configured on this server"))?;
+        self.providers.get(default).cloned().ok_or_else(|| {
+            anyhow::anyhow!("Default compute provider '{}' is not registered", default)
+        })
     }
 
-    /// List active provider names.
-    pub fn provider_names(&self) -> Vec<String> {
+    /// List configured provider names for internal diagnostics/logging.
+    pub fn configured_backend_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.providers.keys().cloned().collect();
         names.sort();
         names
     }
 
-    /// Get the default provider name (if any).
-    pub fn default_provider(&self) -> Option<&str> {
+    /// Get the server-selected backend name (if any) for internal diagnostics.
+    pub fn selected_backend_name(&self) -> Option<&str> {
         self.default_provider.as_deref()
     }
 
@@ -160,7 +148,7 @@ mod tests {
         let config = test_compute_config();
         let registry = ComputeRegistry::from_config(&config, None, None);
         assert!(!registry.is_enabled());
-        assert!(registry.resolve(None).is_err());
+        assert!(registry.backend().is_err());
     }
 
     #[test]
@@ -169,21 +157,20 @@ mod tests {
         let docker = test_docker_config();
         let registry = ComputeRegistry::from_config(&config, Some(&docker), None);
         assert!(registry.is_enabled());
-        assert_eq!(registry.default_provider(), Some("docker"));
-        assert!(registry.resolve(None).is_ok());
-        assert!(registry.resolve(Some("docker")).is_ok());
-        assert!(registry.resolve(Some("fly")).is_err());
+        assert_eq!(registry.selected_backend_name(), Some("docker"));
+        assert!(registry.backend().is_ok());
+        assert_eq!(
+            registry.configured_backend_names(),
+            vec!["docker".to_string()]
+        );
     }
 
     #[test]
-    fn test_registry_unknown_provider() {
+    fn test_registry_reports_selected_backend() {
         let config = test_compute_config();
         let docker = test_docker_config();
         let registry = ComputeRegistry::from_config(&config, Some(&docker), None);
-        let err = registry
-            .resolve(Some("gpu"))
-            .err()
-            .expect("should be an error");
-        assert!(err.to_string().contains("not available"));
+        assert!(registry.backend().is_ok());
+        assert_eq!(registry.selected_backend_name(), Some("docker"));
     }
 }

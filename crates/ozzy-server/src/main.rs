@@ -112,9 +112,9 @@ async fn main() -> Result<()> {
     );
     if compute.is_enabled() {
         tracing::info!(
-            "Compute providers: {} (default: {})",
-            compute.provider_names().join(", "),
-            compute.default_provider().unwrap_or("none"),
+            "Compute backends configured: {} (selected: {})",
+            compute.configured_backend_names().join(", "),
+            compute.selected_backend_name().unwrap_or("none"),
         );
     } else {
         tracing::info!("Compute disabled (no providers configured)");

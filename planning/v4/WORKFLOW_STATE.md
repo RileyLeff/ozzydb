@@ -568,5 +568,20 @@
   - `planning/reviews/v4/24_phase5_3_review.md`
 
 
-## Current Phase: Phase 5 underway
-## Current Step: Phase 5.4 next; cache identity rewrite is complete
+### Phase 5.4: Keep compute providers internal
+- Deleted the public `/v1/compute/providers` route and removed compute-provider introspection from the v1 API contract.
+- Collapsed runtime backend resolution to the server-selected backend only.
+- Replaced `ComputeRegistry::resolve(Option<&str>)` with `ComputeRegistry::backend()` so runtime code cannot select named providers.
+- Renamed internal diagnostic helpers to make backend visibility explicitly internal:
+  - `configured_backend_names()`
+  - `selected_backend_name()`
+- Kept provider realization details available only for internal server concerns like startup diagnostics and Fly orphan cleanup.
+- Verification for this checkpoint:
+  - `cargo fmt`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/25_phase5_4_review.md`
+
+
+## Current Phase: Phase 6 next
+## Current Step: Phase 6.1 next; execution integration is complete

@@ -367,7 +367,7 @@ async fn execute_node(
 
     // Resolve the server-selected compute backend. Provider realization is not
     // part of the authored endpoint model in v4.
-    let backend = state.compute.resolve(None)?;
+    let backend = state.compute.backend()?;
 
     let env_image_ref = env_image
         .as_ref()
