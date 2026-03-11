@@ -524,6 +524,8 @@ async fn resolve_published_environment_definition(
 fn classify_base_lockfile_installer(
     lockfile_path: &str,
 ) -> Result<BaseLockfileInstaller, &'static str> {
+    let file_name = lockfile_path.rsplit('/').next().unwrap_or(lockfile_path);
+
     if lockfile_path == "uv.lock" || lockfile_path.ends_with("/uv.lock") {
         return Err(
             "uv.lock is not directly installable. Export it to requirements.txt with `uv export --no-hashes > requirements.txt` and set lockfile = \"requirements.txt\" in ozzy.toml",
@@ -536,7 +538,16 @@ fn classify_base_lockfile_installer(
         );
     }
 
-    Ok(BaseLockfileInstaller::PipRequirements)
+    if file_name.ends_with(".txt")
+        || file_name == "requirements"
+        || file_name.starts_with("requirements.")
+    {
+        return Ok(BaseLockfileInstaller::PipRequirements);
+    }
+
+    Err(
+        "unsupported lockfile format for base + lockfile environments. Use a pip requirements file such as requirements.txt, or publish a dockerfile/image environment instead",
+    )
 }
 
 fn map_environment_file_error(env_name: &str, file_path: &str, err: anyhow::Error) -> ApiError {
@@ -636,5 +647,24 @@ mod tests {
         assert!(!is_valid_name("my/project")); // slash
         assert!(!is_valid_name("my project")); // space
         assert!(!is_valid_name("my.project")); // dot
+    }
+
+    #[test]
+    fn classify_base_lockfile_accepts_requirements_files() {
+        assert!(matches!(
+            classify_base_lockfile_installer("requirements.txt"),
+            Ok(BaseLockfileInstaller::PipRequirements)
+        ));
+        assert!(matches!(
+            classify_base_lockfile_installer("deps/requirements-dev.txt"),
+            Ok(BaseLockfileInstaller::PipRequirements)
+        ));
+    }
+
+    #[test]
+    fn classify_base_lockfile_rejects_unsupported_lockfiles() {
+        let err = classify_base_lockfile_installer("conda-lock.yml")
+            .expect_err("unsupported lockfile should error");
+        assert!(err.contains("unsupported lockfile format"));
     }
 }

@@ -785,3 +785,19 @@
 - Phase 8 is complete.
 - The planned v4 server/API/CLI/Python-client rewrite is complete.
 - Remaining work is post-plan stabilization, additional end-to-end testing, and any deliberate follow-on features beyond the v4 implementation plan.
+
+### Post-plan follow-up: external review fixes
+- Attempted `just test-all`, but the full workspace test pass again stalled in the heavy `ozzy-server` test build/link step and did not provide a useful checkpoint signal in this environment.
+- Ran a focused external review pass; Gemini remained unreliable, Claude returned usable findings only after isolating it from user-level plugin/MCP config.
+- Fixed the validated follow-up findings:
+  - endpoints with zero nodes are now rejected
+  - endpoint edge validation now checks source/target type compatibility
+  - `collection<T>` verification accepts `table<T>` witnesses
+  - base+lockfile environment classification now errors on unsupported lockfiles instead of silently treating them as pip requirements
+- Verification for this checkpoint:
+  - `cargo fmt`
+  - `cargo test -p ozzy-core`
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/36_post_phase8_external_followup_review.md`

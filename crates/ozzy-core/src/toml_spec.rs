@@ -10,7 +10,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use ozzy_types::parse::{TypeParseError, parse_type_expr, parse_type_ref};
 use ozzy_types::ports::{TypedPort, TypedPortSet};
-use ozzy_types::syntax::{BuiltinType, TypeDefinition, TypeDefinitions};
+use ozzy_types::relations;
+use ozzy_types::syntax::{BuiltinType, TypeDefinition, TypeDefinitions, TypeExpr, TypeRefExpr};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -744,10 +745,12 @@ impl OzzyToml {
 
             for (idx, edge) in endpoint.edges.iter().enumerate() {
                 let edge_loc = format!("endpoints.{}.edges[{}]", endpoint_name, idx);
+                let source = parse_edge_source(&edge.from);
+                let target = parse_edge_target(&edge.to);
 
-                match parse_edge_target(&edge.to) {
+                match target.as_ref() {
                     Some((node_name, input_name)) => {
-                        if !endpoint.nodes.contains_key(&node_name) {
+                        if !endpoint.nodes.contains_key(node_name.as_str()) {
                             errors.push(ValidationError {
                                 location: format!("{}.to", edge_loc),
                                 message: format!(
@@ -756,17 +759,19 @@ impl OzzyToml {
                                 ),
                                 suggestion: suggest_name(&node_name, node_names.iter().copied()),
                             });
-                        } else if let Some(transform) =
-                            self.transforms.get(&endpoint.nodes[&node_name].transform)
+                        } else if let Some(transform) = self
+                            .transforms
+                            .get(&endpoint.nodes[node_name.as_str()].transform)
                         {
-                            if !transform.inputs.ports.contains_key(&input_name) {
+                            if !transform.inputs.ports.contains_key(input_name.as_str()) {
                                 let input_names: Vec<&str> =
                                     transform.inputs.ports.keys().map(String::as_str).collect();
                                 errors.push(ValidationError {
                                     location: format!("{}.to", edge_loc),
                                     message: format!(
                                         "Input \"{}\" not declared on transform \"{}\".",
-                                        input_name, endpoint.nodes[&node_name].transform
+                                        input_name,
+                                        endpoint.nodes[node_name.as_str()].transform
                                     ),
                                     suggestion: suggest_name(
                                         &input_name,
@@ -774,7 +779,9 @@ impl OzzyToml {
                                     ),
                                 });
                             }
-                            *covered_inputs.entry((node_name, input_name)).or_insert(0) += 1;
+                            *covered_inputs
+                                .entry((node_name.clone(), input_name.clone()))
+                                .or_insert(0) += 1;
                         }
                     }
                     None => errors.push(ValidationError {
@@ -787,7 +794,6 @@ impl OzzyToml {
                     }),
                 }
 
-                let source = parse_edge_source(&edge.from);
                 let empty_ref = match &source {
                     EdgeSource::Input(r) | EdgeSource::Endpoint(r) => r.is_empty(),
                     EdgeSource::Node(r) => r.is_empty(),
@@ -803,9 +809,9 @@ impl OzzyToml {
                     });
                 }
 
-                match source {
+                match &source {
                     EdgeSource::Node(node_ref) => {
-                        if !node_ref.is_empty() && !endpoint.nodes.contains_key(&node_ref) {
+                        if !node_ref.is_empty() && !endpoint.nodes.contains_key(node_ref.as_str()) {
                             errors.push(ValidationError {
                                 location: format!("{}.from", edge_loc),
                                 message: format!(
@@ -817,7 +823,8 @@ impl OzzyToml {
                         }
                     }
                     EdgeSource::Input(input_ref) => {
-                        if !input_ref.is_empty() && !endpoint.inputs.ports.contains_key(&input_ref)
+                        if !input_ref.is_empty()
+                            && !endpoint.inputs.ports.contains_key(input_ref.as_str())
                         {
                             errors.push(ValidationError {
                                 location: format!("{}.from", edge_loc),
@@ -849,6 +856,46 @@ impl OzzyToml {
                             message,
                             suggestion: None,
                         });
+                    }
+                }
+
+                if let Some((target_node, target_input_name)) = target.as_ref() {
+                    if let Some(target_transform) = endpoint
+                        .nodes
+                        .get(target_node)
+                        .and_then(|node| self.transforms.get(&node.transform))
+                    {
+                        if let Some(target_port) =
+                            target_transform.inputs.ports.get(target_input_name)
+                        {
+                            if let Some(source_type_ref) =
+                                self.resolve_edge_source_type_ref(endpoint, &source)
+                            {
+                                match self.source_type_satisfies_target(
+                                    source_type_ref,
+                                    &target_port.ty,
+                                ) {
+                                    Ok(true) => {}
+                                    Ok(false) => errors.push(ValidationError {
+                                        location: format!("{}.from", edge_loc),
+                                        message: format!(
+                                            "Source type \"{}\" is not compatible with target input type \"{}\".",
+                                            type_ref_string(source_type_ref),
+                                            type_ref_string(&target_port.ty),
+                                        ),
+                                        suggestion: None,
+                                    }),
+                                    Err(err) => errors.push(ValidationError {
+                                        location: format!("{}.from", edge_loc),
+                                        message: format!(
+                                            "Failed to compare source and target types: {}",
+                                            err
+                                        ),
+                                        suggestion: None,
+                                    }),
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1035,29 +1082,38 @@ impl OzzyToml {
         endpoint: &EndpointDef,
         errors: &mut Vec<ValidationError>,
     ) {
-        let node_names: HashSet<&str> = endpoint.nodes.keys().map(String::as_str).collect();
-        let mut has_outgoing: HashSet<&str> = HashSet::new();
+        if endpoint.nodes.is_empty() {
+            errors.push(ValidationError {
+                location: format!("endpoints.{}", endpoint_name),
+                message: "Endpoint must declare at least one node.".to_string(),
+                suggestion: None,
+            });
+            return;
+        }
+
+        let node_names: HashSet<String> = endpoint.nodes.keys().cloned().collect();
+        let mut has_outgoing: HashSet<String> = HashSet::new();
 
         for edge in &endpoint.edges {
-            if node_names.contains(edge.from.as_str()) {
-                let to_node = edge.to.split('.').next().unwrap_or(&edge.to);
-                if node_names.contains(to_node) && edge.from.as_str() != to_node {
-                    has_outgoing.insert(edge.from.as_str());
+            if let EdgeSource::Node(from_node) = parse_edge_source(&edge.from) {
+                if node_names.contains(from_node.as_str()) {
+                    if let Some((to_node, _)) = parse_edge_target(&edge.to) {
+                        if node_names.contains(to_node.as_str()) && from_node != to_node {
+                            has_outgoing.insert(from_node);
+                        }
+                    }
                 }
             }
         }
 
         let terminals = node_names
             .iter()
-            .filter(|name| !has_outgoing.contains(**name))
-            .copied()
+            .filter(|name| !has_outgoing.contains(name.as_str()))
+            .cloned()
             .collect::<Vec<_>>();
 
         if terminals.len() > 1 {
-            let mut names = terminals
-                .into_iter()
-                .map(str::to_string)
-                .collect::<Vec<_>>();
+            let mut names = terminals;
             names.sort();
             errors.push(ValidationError {
                 location: format!("endpoints.{}", endpoint_name),
@@ -1068,6 +1124,43 @@ impl OzzyToml {
                 suggestion: None,
             });
         }
+    }
+
+    fn resolve_edge_source_type_ref<'a>(
+        &'a self,
+        endpoint: &'a EndpointDef,
+        source: &EdgeSource,
+    ) -> Option<&'a TypeRefExpr> {
+        match source {
+            EdgeSource::Input(input_name) => {
+                endpoint.inputs.ports.get(input_name).map(|port| &port.ty)
+            }
+            EdgeSource::Node(node_name) => endpoint
+                .nodes
+                .get(node_name)
+                .and_then(|node| self.transforms.get(&node.transform))
+                .and_then(|transform| {
+                    if transform.outputs.ports.len() == 1 {
+                        transform.outputs.ports.values().next()
+                    } else {
+                        None
+                    }
+                })
+                .map(|port| &port.ty),
+            EdgeSource::Endpoint(_) => None,
+        }
+    }
+
+    fn source_type_satisfies_target(
+        &self,
+        source: &TypeRefExpr,
+        target: &TypeRefExpr,
+    ) -> Result<bool, relations::RelationError> {
+        relations::refines(
+            &self.types,
+            &TypeExpr::Ref(source.clone()),
+            &TypeExpr::Ref(target.clone()),
+        )
     }
 }
 
@@ -1091,6 +1184,13 @@ fn parse_typed_port_set(
         );
     }
     Ok(ports)
+}
+
+fn type_ref_string(type_ref: &TypeRefExpr) -> String {
+    match &type_ref.version {
+        Some(version) => format!("{}@{}", type_ref.name, version),
+        None => type_ref.name.clone(),
+    }
 }
 
 fn suggest_name<'a>(target: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<String> {
@@ -1396,5 +1496,69 @@ to = "n.wrong"
                 .iter()
                 .any(|err| err.location == "endpoints.ep.edges[0].to")
         );
+    }
+
+    #[test]
+    fn validate_rejects_endpoints_without_nodes() {
+        let toml = r#"
+[project]
+name = "test"
+owner = "user"
+
+[types]
+Csv = 'csv(delimiter=",", header=true)'
+
+[endpoints.empty]
+[endpoints.empty.inputs.raw]
+type = "Csv"
+"#;
+        let doc = OzzyToml::parse(toml).expect("toml should parse");
+        let errors = doc.validate();
+        assert!(errors.iter().any(|err| {
+            err.location == "endpoints.empty" && err.message.contains("at least one node")
+        }));
+    }
+
+    #[test]
+    fn validate_rejects_incompatible_endpoint_input_types() {
+        let toml = r#"
+[project]
+name = "test"
+owner = "user"
+
+[types]
+Csv = 'csv(delimiter=",", header=true)'
+ParquetData = 'parquet'
+
+[environments.default]
+base = "ozzydb/python:3.12"
+lockfile = "requirements.txt"
+
+[transforms.t]
+source = "t.py:run"
+environment = "default"
+
+[transforms.t.inputs.expected]
+type = "ParquetData"
+
+[transforms.t.outputs.result]
+type = "ParquetData"
+
+[endpoints.ep]
+[endpoints.ep.inputs.raw]
+type = "Csv"
+
+[endpoints.ep.nodes]
+n = { transform = "t" }
+
+[[endpoints.ep.edges]]
+from = "input:raw"
+to = "n.expected"
+"#;
+        let doc = OzzyToml::parse(toml).expect("toml should parse");
+        let errors = doc.validate();
+        assert!(errors.iter().any(|err| {
+            err.location == "endpoints.ep.edges[0].from" && err.message.contains("not compatible")
+        }));
     }
 }

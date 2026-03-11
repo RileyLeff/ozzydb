@@ -814,6 +814,10 @@ fn verify_collection(
 
             Ok(ExecutionOutcome::merge_all(outcomes))
         }
+        VerificationInput::Table(table) => Ok(ExecutionOutcome::merge_all(vec![execute_plan(
+            item_plan,
+            &VerificationInput::Table(table.clone()),
+        )?])),
         _ => Err(VerificationError::InputKindMismatch {
             expected: "collection",
             actual: input.kind_name(),
@@ -1227,6 +1231,37 @@ mod tests {
                         },
                     ],
                     row_count: Some(10),
+                }),
+            )
+            .expect("verification should run");
+
+        assert_eq!(report.verdict, VerificationVerdict::Verified);
+    }
+
+    #[test]
+    fn collection_verification_accepts_table_inputs() {
+        let defs = TypeDefinitions::default();
+        let published = TypeRegistry::default();
+        let registry = BuiltinVerifierRegistry;
+        let report = registry
+            .verify(
+                &defs,
+                &published,
+                &TypeExpr::Collection(Box::new(TypeExpr::Record(RecordExpr {
+                    fields: vec![RecordField {
+                        name: "species".to_string(),
+                        ty: TypeExpr::ref_("string"),
+                        optional: false,
+                    }],
+                    open: false,
+                }))),
+                &VerificationInput::Table(TableWitness {
+                    columns: vec![TableColumnWitness {
+                        name: "species".to_string(),
+                        data_type: "utf8".to_string(),
+                        nullable: false,
+                    }],
+                    row_count: Some(2),
                 }),
             )
             .expect("verification should run");
