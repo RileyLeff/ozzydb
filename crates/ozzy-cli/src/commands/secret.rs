@@ -47,7 +47,10 @@ pub async fn set(name: &str) -> Result<()> {
     }
 
     if !registry_url.starts_with("https://") {
-        eprintln!("Warning: sending secret over non-HTTPS connection ({})", registry_url);
+        eprintln!(
+            "Warning: sending secret over non-HTTPS connection ({})",
+            registry_url
+        );
     }
 
     let body = serde_json::json!({

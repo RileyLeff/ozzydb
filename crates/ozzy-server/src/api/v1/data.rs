@@ -258,8 +258,7 @@ async fn upload_data(
     let deduplicated = existing_ref.is_some();
 
     // Determine storage extension from content type (must match the fetch download path)
-    let storage_ext =
-        super::fetch::content_type_to_extension(&content_type);
+    let storage_ext = super::fetch::content_type_to_extension(&content_type);
 
     // Compute the actual storage key
     let r2_key = state

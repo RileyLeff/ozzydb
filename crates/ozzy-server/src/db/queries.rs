@@ -1700,25 +1700,30 @@ impl Database {
         &self,
         materialized_hash: &str,
         project_id: Uuid,
-        commit_id: Uuid,
+        project_revision_id: Uuid,
         endpoint_name: &str,
         node_name: &str,
-        transform_name: &str,
+        transform_version_id: Uuid,
+        environment_version_id: Uuid,
+        params_hash: &str,
+        input_artifact_bindings: &serde_json::Value,
+        source_hash: &str,
+        secrets_hash: Option<&str>,
+        output_artifact_id: Uuid,
         output_hash: &str,
         output_r2_key: &str,
         output_content_type: &str,
         output_byte_size: i64,
-        platform: &str,
-        verification_tier: i32,
     ) -> Result<MaterializedCacheEntry> {
         let entry = sqlx::query_as::<_, MaterializedCacheEntry>(
             r#"
             INSERT INTO materialized_cache (
-                materialized_hash, project_id, commit_id, endpoint_name, node_name,
-                transform_name, output_hash, output_r2_key, output_content_type,
-                output_byte_size, platform, verification_tier
+                materialized_hash, project_id, project_revision_id, endpoint_name, node_name,
+                transform_version_id, environment_version_id, params_hash, input_artifact_bindings,
+                source_hash, secrets_hash, output_artifact_id, output_hash, output_r2_key,
+                output_content_type, output_byte_size
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             ON CONFLICT (materialized_hash) DO UPDATE SET
                 last_accessed = now(),
                 access_count = materialized_cache.access_count + 1
@@ -1727,16 +1732,20 @@ impl Database {
         )
         .bind(materialized_hash)
         .bind(project_id)
-        .bind(commit_id)
+        .bind(project_revision_id)
         .bind(endpoint_name)
         .bind(node_name)
-        .bind(transform_name)
+        .bind(transform_version_id)
+        .bind(environment_version_id)
+        .bind(params_hash)
+        .bind(input_artifact_bindings)
+        .bind(source_hash)
+        .bind(secrets_hash)
+        .bind(output_artifact_id)
         .bind(output_hash)
         .bind(output_r2_key)
         .bind(output_content_type)
         .bind(output_byte_size)
-        .bind(platform)
-        .bind(verification_tier)
         .fetch_one(&self.pool)
         .await?;
         Ok(entry)

@@ -32,8 +32,7 @@ fn test_r2_config() -> ozzy_server::config::R2Config {
     ozzy_server::config::R2Config {
         endpoint: std::env::var("TEST_R2_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:9002".into()),
-        bucket: std::env::var("TEST_R2_BUCKET")
-            .unwrap_or_else(|_| "ozzy-test".into()),
+        bucket: std::env::var("TEST_R2_BUCKET").unwrap_or_else(|_| "ozzy-test".into()),
         access_key_id: std::env::var("TEST_R2_ACCESS_KEY_ID")
             .unwrap_or_else(|_| "minioadmin".into()),
         secret_access_key: std::env::var("TEST_R2_SECRET_ACCESS_KEY")
@@ -408,8 +407,10 @@ async fn fetch_and_wait(
                 poll_req = poll_req.header("Authorization", format!("Bearer {}", t));
             }
             let poll_resp = poll_req.send().await.expect("Poll request failed");
-            let poll_body: serde_json::Value =
-                poll_resp.json().await.expect("Failed to parse poll response");
+            let poll_body: serde_json::Value = poll_resp
+                .json()
+                .await
+                .expect("Failed to parse poll response");
 
             let job_status = poll_body["status"].as_str().unwrap_or("");
             match job_status {
@@ -472,8 +473,15 @@ fn test_compute_pipeline_basic() {
     TEST_RT.block_on(async {
         let ctx = setup_param_only_test(s, "basic").await;
 
-        let result =
-            fetch_and_wait(s, &ctx.owner, &ctx.slug, "generate-data", Some(&ctx.token), &[]).await;
+        let result = fetch_and_wait(
+            s,
+            &ctx.owner,
+            &ctx.slug,
+            "generate-data",
+            Some(&ctx.token),
+            &[],
+        )
+        .await;
 
         assert_eq!(result.status, 200, "Fetch failed: {}", result.body);
         // Note: content_type comes from MinIO (presigned redirect), not our server.
@@ -498,14 +506,28 @@ fn test_compute_pipeline_cache_hit() {
         let ctx = setup_param_only_test(s, "cache").await;
 
         // First fetch — cache miss, triggers compute
-        let result1 =
-            fetch_and_wait(s, &ctx.owner, &ctx.slug, "generate-data", Some(&ctx.token), &[]).await;
+        let result1 = fetch_and_wait(
+            s,
+            &ctx.owner,
+            &ctx.slug,
+            "generate-data",
+            Some(&ctx.token),
+            &[],
+        )
+        .await;
         assert_eq!(result1.status, 200);
         assert!(!result1.cache_hit, "First fetch should be a cache miss");
 
         // Second fetch — should hit cache (no compute)
-        let result2 =
-            fetch_and_wait(s, &ctx.owner, &ctx.slug, "generate-data", Some(&ctx.token), &[]).await;
+        let result2 = fetch_and_wait(
+            s,
+            &ctx.owner,
+            &ctx.slug,
+            "generate-data",
+            Some(&ctx.token),
+            &[],
+        )
+        .await;
         assert_eq!(result2.status, 200);
         assert!(result2.cache_hit, "Second fetch should be a cache hit");
         assert_eq!(result1.body, result2.body, "Cached output should match");
@@ -613,12 +635,11 @@ fn test_compute_pipeline_yank_blocks_fetch() {
     TEST_RT.block_on(async {
         let ctx = setup_param_only_test(s, "yank").await;
 
-        let user = s
-            .db
-            .get_user_by_username(&ctx.owner)
-            .await
-            .unwrap()
-            .unwrap();
+        let user =
+            s.db.get_user_by_username(&ctx.owner)
+                .await
+                .unwrap()
+                .unwrap();
 
         s.db.insert_endpoint_yank(
             ctx.project_id,
@@ -653,8 +674,7 @@ fn test_private_project_requires_auth() {
         let ctx = setup_param_only_test(s, "priv_auth").await;
 
         // No auth token
-        let result =
-            fetch_and_wait(s, &ctx.owner, &ctx.slug, "generate-data", None, &[]).await;
+        let result = fetch_and_wait(s, &ctx.owner, &ctx.slug, "generate-data", None, &[]).await;
 
         assert!(
             result.status == 401 || result.status == 403,

@@ -124,7 +124,10 @@ impl ContentStorage {
     /// Build an optional S3 client for compute-facing presigned URLs.
     fn build_compute_s3_client(config: &R2Config) -> Option<aws_sdk_s3::Client> {
         let presign_endpoint = config.presign_endpoint.as_deref()?;
-        Some(Self::build_s3_client_with_endpoint(config, presign_endpoint))
+        Some(Self::build_s3_client_with_endpoint(
+            config,
+            presign_endpoint,
+        ))
     }
 
     /// Build an S3 client using a specific endpoint URL (for presign_endpoint support).
@@ -402,11 +405,7 @@ impl ContentStorage {
         let key = self.storage_key(content_hash, extension)?;
 
         let presigning = PresigningConfig::expires_in(ttl).context("Invalid presigning TTL")?;
-        let mut request = self
-            .s3_client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(&key);
+        let mut request = self.s3_client.get_object().bucket(&self.bucket).key(&key);
         if let Some(filename) = download_filename {
             request = request
                 .response_content_disposition(format!("attachment; filename=\"{}\"", filename));

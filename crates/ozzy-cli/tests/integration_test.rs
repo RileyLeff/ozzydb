@@ -130,7 +130,9 @@ fn test_fetch_help() {
         .args(["fetch", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Fetch and execute a remote endpoint"));
+        .stdout(predicate::str::contains(
+            "Fetch and execute a remote endpoint",
+        ));
 }
 
 // ── Error handling (no auth / no ozzy.toml) ─────────────────────
@@ -177,10 +179,7 @@ fn test_data_ls_requires_auth() {
 
 #[test]
 fn test_data_upload_requires_file() {
-    ozzy()
-        .args(["data", "upload"])
-        .assert()
-        .failure();
+    ozzy().args(["data", "upload"]).assert().failure();
 }
 
 #[test]

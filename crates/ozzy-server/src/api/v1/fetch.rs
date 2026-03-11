@@ -348,8 +348,6 @@ async fn check_all_node_caches(
         } else {
             None
         };
-    let platform = ozzy_core::platform::PlatformFingerprint::detect();
-    let platform_hash = platform.hash();
     let edge_map = build_edge_map(endpoint_def);
     let mut node_outputs: HashMap<String, NodeOutput> = HashMap::new();
 
@@ -387,7 +385,6 @@ async fn check_all_node_caches(
             &edge_map,
             &node_outputs,
             &source_dir,
-            &platform_hash,
             project_id,
         )
         .await?;
@@ -402,7 +399,7 @@ async fn check_all_node_caches(
                     content_type: cached.output_content_type,
                     byte_size: cached.output_byte_size,
                     cache_hit: true,
-                    artifact_id: None,
+                    artifact_id: cached.output_artifact_id,
                 },
             );
         } else {
@@ -415,7 +412,8 @@ async fn check_all_node_caches(
 
 /// Compute the materialized hash for a single node.
 ///
-/// Resolves inputs, computes transform hash, and combines into materialized hash.
+/// Resolves bound input artifacts and combines them with transform, environment,
+/// source, params, and secret identity into the v4 cache key.
 async fn compute_materialized_hash(
     state: &AppState,
     node_name: &str,
@@ -427,17 +425,15 @@ async fn compute_materialized_hash(
     edge_map: &HashMap<&str, Vec<(&str, &str)>>,
     node_outputs: &HashMap<String, NodeOutput>,
     source_dir: &Option<tempfile::TempDir>,
-    platform_hash: &str,
     project_id: Uuid,
 ) -> Result<String, ApiError> {
     // Resolve inputs
-    let mut input_hashes: Vec<(&str, String)> = Vec::new();
+    let mut input_artifact_ids: Vec<(&str, String)> = Vec::new();
     let empty_vec = vec![];
     let edges_for_node = edge_map.get(node_name).unwrap_or(&empty_vec);
     for (input_name, source) in edges_for_node {
-        let hash =
-            resolve_edge_source(source, state, project_id, endpoint_inputs, node_outputs).await?;
-        input_hashes.push((input_name, hash));
+        let artifact_id = resolve_edge_source(source, endpoint_inputs, node_outputs).await?;
+        input_artifact_ids.push((input_name, artifact_id));
     }
 
     // Resolve node params
@@ -451,34 +447,20 @@ async fn compute_materialized_hash(
     // Resolve secrets hash
     let secrets_hash = resolve_secrets_hash(state, project_id, transform_def).await?;
 
-    // Resolve environment
-    let (_env_image, env_hash, lockfile_hash) =
-        resolve_environment_image(state, &transform_def.environment).await?;
-
     // Compute source_hash
-    let (source_hash, function_name) = compute_source_hash(transform_def, node_def, source_dir)?;
+    let source_hash = compute_source_hash(transform_def, node_def, source_dir)?;
 
-    let params_schema_hash =
-        compute_params_schema_hash(transform_def).map_err(|e| ApiError::Internal(e.into()))?;
-
-    let transform_hash = ozzy_core::hash::transform_hash(
-        &source_hash,
-        &function_name,
-        &lockfile_hash,
-        &env_hash,
-        &params_schema_hash,
-    );
-
-    let input_refs: Vec<(&str, &str)> = input_hashes
+    let input_refs: Vec<(&str, &str)> = input_artifact_ids
         .iter()
-        .map(|(name, hash)| (*name, hash.as_str()))
+        .map(|(name, artifact_id)| (*name, artifact_id.as_str()))
         .collect();
 
     Ok(ozzy_core::hash::materialized_hash(
         &input_refs,
-        &transform_hash,
+        &transform_def.row_id.to_string(),
+        &transform_def.environment.row_id.to_string(),
+        &source_hash,
         &params_hash,
-        platform_hash,
         secrets_hash.as_deref(),
     ))
 }
@@ -488,9 +470,9 @@ fn compute_source_hash(
     transform_def: &RuntimeTransformDef,
     node_def: &ozzy_core::toml_spec::NodeDef,
     source_dir: &Option<tempfile::TempDir>,
-) -> Result<(String, String), ApiError> {
+) -> Result<String, ApiError> {
     if let Some(source) = &transform_def.source {
-        let (_file_path, func) = crate::runners::parse_source_ref(source).ok_or_else(|| {
+        let (_file_path, _func) = crate::runners::parse_source_ref(source).ok_or_else(|| {
             ApiError::Internal(anyhow::anyhow!(
                 "Invalid source ref '{}' for transform '{}'",
                 source,
@@ -530,31 +512,15 @@ fn compute_source_hash(
                 e
             ))
         })?;
-        let hash = ozzy_core::hash::blake3_hash(&bytes);
-        Ok((hash, func.to_owned()))
+        Ok(ozzy_core::hash::blake3_hash(&bytes))
     } else if let Some(command) = &transform_def.command {
-        Ok((
-            ozzy_core::hash::blake3_hash(command.as_bytes()),
-            "command".to_owned(),
-        ))
+        Ok(ozzy_core::hash::blake3_hash(command.as_bytes()))
     } else {
         Err(ApiError::Internal(anyhow::anyhow!(
             "Transform '{}' has neither source nor command",
             node_def.transform
         )))
     }
-}
-
-/// Compute params schema hash for a transform.
-pub(crate) fn compute_params_schema_hash(
-    transform_def: &RuntimeTransformDef,
-) -> Result<String, serde_json::Error> {
-    if transform_def.params_schema == serde_json::json!({}) {
-        return Ok(ozzy_core::hash::blake3_hash(b""));
-    }
-
-    let schema_str = serde_json::to_string(&transform_def.params_schema)?;
-    Ok(ozzy_core::hash::blake3_hash(schema_str.as_bytes()))
 }
 
 // ── Background job execution is now in compute::orchestrator ──────
@@ -924,11 +890,9 @@ pub(crate) fn build_edge_map<'a>(
     map
 }
 
-/// Resolve an edge source to a content hash.
+/// Resolve an edge source to the bound artifact identity.
 async fn resolve_edge_source(
     source: &str,
-    _state: &AppState,
-    _project_id: Uuid,
     endpoint_inputs: &BTreeMap<String, ResolvedEndpointInput>,
     node_outputs: &HashMap<String, NodeOutput>,
 ) -> Result<String, ApiError> {
@@ -946,7 +910,7 @@ async fn resolve_edge_source_inner(
         let binding = endpoint_inputs.get(input_name).ok_or_else(|| {
             anyhow::anyhow!("Endpoint input '{}' is not bound for execution", input_name)
         })?;
-        Ok(format!("artifact:{}", binding.artifact.id))
+        Ok(binding.artifact.id.to_string())
     } else if source.starts_with("endpoint:") {
         anyhow::bail!("Cross-project endpoint dependencies ('{source}') are not yet implemented")
     } else {
@@ -956,7 +920,7 @@ async fn resolve_edge_source_inner(
                 source
             )
         })?;
-        Ok(output.output_hash.clone())
+        Ok(output.artifact_id.to_string())
     }
 }
 
@@ -1072,27 +1036,17 @@ pub(crate) fn endpoint_requires_source_code(
     Ok(false)
 }
 
-/// Resolve the environment image for a transform.
-async fn resolve_environment_image(
-    state: &AppState,
-    env_def: &RuntimeEnvironmentDef,
-) -> Result<(Option<crate::db::EnvironmentImage>, String, String), ApiError> {
-    resolve_environment_image_inner(state, env_def)
-        .await
-        .map_err(ApiError::Internal)
-}
-
 pub(crate) async fn resolve_environment_image_anyhow(
     state: &AppState,
     env_def: &RuntimeEnvironmentDef,
-) -> Result<(Option<crate::db::EnvironmentImage>, String, String), anyhow::Error> {
+) -> Result<Option<crate::db::EnvironmentImage>, anyhow::Error> {
     resolve_environment_image_inner(state, env_def).await
 }
 
 async fn resolve_environment_image_inner(
     state: &AppState,
     env_def: &RuntimeEnvironmentDef,
-) -> Result<(Option<crate::db::EnvironmentImage>, String, String), anyhow::Error> {
+) -> Result<Option<crate::db::EnvironmentImage>, anyhow::Error> {
     match &env_def.definition {
         ozzy_core::toml_spec::PublishedEnvironmentDef::Prebuilt { image } => {
             let env_hash = crate::environments::hash::compute_env_hash(&env_def.definition);
@@ -1107,17 +1061,13 @@ async fn resolve_environment_image_inner(
                 built_at: Some(chrono::Utc::now()),
                 created_at: chrono::Utc::now(),
             };
-            let lockfile_hash =
-                crate::environments::hash::compute_lockfile_hash(&env_def.definition);
-            Ok((Some(env_image), env_hash, lockfile_hash))
+            Ok(Some(env_image))
         }
         ozzy_core::toml_spec::PublishedEnvironmentDef::BaseLockfile { .. }
         | ozzy_core::toml_spec::PublishedEnvironmentDef::Dockerfile { .. } => {
             let env_hash = crate::environments::hash::compute_env_hash(&env_def.definition);
             let env_image = state.db.get_environment_image(&env_hash).await?;
-            let lockfile_hash =
-                crate::environments::hash::compute_lockfile_hash(&env_def.definition);
-            Ok((env_image, env_hash, lockfile_hash))
+            Ok(env_image)
         }
     }
 }

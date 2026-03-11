@@ -201,14 +201,23 @@ impl FlyBackend {
     ///
     /// The Fly wait endpoint caps `timeout` at 60s, so we poll in a loop
     /// with 30s intervals until the overall deadline is reached.
-    async fn wait_for_machine(&self, machine_id: &str, instance_id: &str, timeout_secs: u64) -> Result<()> {
+    async fn wait_for_machine(
+        &self,
+        machine_id: &str,
+        instance_id: &str,
+        timeout_secs: u64,
+    ) -> Result<()> {
         let deadline = Instant::now() + std::time::Duration::from_secs(timeout_secs);
         let poll_secs: u64 = 30;
 
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                anyhow::bail!("Fly Machine {} timed out after {}s", machine_id, timeout_secs);
+                anyhow::bail!(
+                    "Fly Machine {} timed out after {}s",
+                    machine_id,
+                    timeout_secs
+                );
             }
             let this_timeout = remaining.as_secs().min(poll_secs).max(1);
 

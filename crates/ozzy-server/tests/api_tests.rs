@@ -67,8 +67,11 @@ async fn build_test_app() -> Option<Router> {
     let storage = ContentStorage::from_config(&config).ok()?;
     let db = Database::new(pool);
     let git = ozzy_server::GitHubProvider::new(None, db.clone());
-    let compute =
-        ozzy_server::compute::ComputeRegistry::from_config(&config.compute, config.docker.as_ref(), config.fly.as_ref());
+    let compute = ozzy_server::compute::ComputeRegistry::from_config(
+        &config.compute,
+        config.docker.as_ref(),
+        config.fly.as_ref(),
+    );
     let state = AppState {
         config: Arc::new(config),
         db,

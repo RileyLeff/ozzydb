@@ -54,7 +54,10 @@ pub async fn run(
 
     if let Some(r) = git_ref {
         if r.is_empty() {
-            bail!("Empty ref in '{}'. Omit '@' or provide a ref name.", endpoint);
+            bail!(
+                "Empty ref in '{}'. Omit '@' or provide a ref name.",
+                endpoint
+            );
         }
     }
 

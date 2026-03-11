@@ -251,7 +251,11 @@ impl DockerProviderConfig {
         let enabled = std::env::var("DOCKER_COMPUTE_ENABLED")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var("COMPUTE_ENABLED").ok().filter(|s| !s.is_empty()))
+            .or_else(|| {
+                std::env::var("COMPUTE_ENABLED")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
             .unwrap_or_else(|| "false".into())
             .parse()
             .unwrap_or(false);
@@ -265,16 +269,28 @@ impl DockerProviderConfig {
             runtime: std::env::var("DOCKER_COMPUTE_RUNTIME")
                 .ok()
                 .filter(|s| !s.is_empty())
-                .or_else(|| std::env::var("COMPUTE_DOCKER_RUNTIME").ok().filter(|s| !s.is_empty())),
+                .or_else(|| {
+                    std::env::var("COMPUTE_DOCKER_RUNTIME")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                }),
             memory_limit: std::env::var("DOCKER_COMPUTE_MEMORY_LIMIT")
                 .ok()
                 .filter(|s| !s.is_empty())
-                .or_else(|| std::env::var("COMPUTE_MEMORY_LIMIT").ok().filter(|s| !s.is_empty()))
+                .or_else(|| {
+                    std::env::var("COMPUTE_MEMORY_LIMIT")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                })
                 .unwrap_or_else(|| "2g".into()),
             cpu_limit: std::env::var("DOCKER_COMPUTE_CPU_LIMIT")
                 .ok()
                 .filter(|s| !s.is_empty())
-                .or_else(|| std::env::var("COMPUTE_CPU_LIMIT").ok().filter(|s| !s.is_empty()))
+                .or_else(|| {
+                    std::env::var("COMPUTE_CPU_LIMIT")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                })
                 .unwrap_or_else(|| "1".into()),
         })
     }

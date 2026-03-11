@@ -310,12 +310,18 @@ pub async fn token_create(name: &str, scope: &str, expires: Option<u32>) -> Resu
         if let Some(rest) = scope.strip_prefix("project:") {
             let parts: Vec<&str> = rest.splitn(2, '/').collect();
             if parts.len() != 2 {
-                bail!("Invalid scope '{}': project scope must be 'project:owner/slug'", scope);
+                bail!(
+                    "Invalid scope '{}': project scope must be 'project:owner/slug'",
+                    scope
+                );
             }
             super::shared::validate_name(parts[0], "scope owner")?;
             super::shared::validate_name(parts[1], "scope project")?;
         } else {
-            bail!("Invalid scope '{}': must be 'account' or 'project:owner/slug'", scope);
+            bail!(
+                "Invalid scope '{}': must be 'account' or 'project:owner/slug'",
+                scope
+            );
         }
     }
 

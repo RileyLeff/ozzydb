@@ -534,3 +534,39 @@
   - `cargo check -p ozzy-core -p ozzy-types -p ozzy-server --tests`
 - Review artifact:
   - `planning/reviews/v4/23_phase5_2_typed_fetch_review.md`
+
+### Phase 5.3: Cache identity rewrite
+- Replaced the old v3-style materialized cache identity with a v4 cache key based on:
+  - sorted `(input_name, artifact_id)` bindings
+  - published `TransformVersion` identity
+  - published `EnvironmentVersion` identity
+  - `source_hash`
+  - `params_hash`
+  - optional `secrets_hash`
+- Added `migrations/011_v4_materialized_cache_identity.sql` to replace the old cache row shape with a v4 row that stores:
+  - `project_revision_id`
+  - `transform_version_id`
+  - `environment_version_id`
+  - `params_hash`
+  - `input_artifact_bindings`
+  - `source_hash`
+  - `secrets_hash`
+  - `output_artifact_id`
+- Removed the live runtime dependence on:
+  - `transform_hash(...)`
+  - `platform_hash`
+  - `verification_tier`
+- Cache hits now propagate `output_artifact_id` through `NodeOutput`, so downstream nodes hash on artifact identity instead of output content hash.
+- Invocation input bindings are now strict artifact-bound JSON objects and no longer silently carry `null` artifact IDs or redundant content hashes.
+- Rewrote the DB integration test for `materialized_cache` to use v4 project revision, transform/environment version, and output artifact fixtures.
+- Verification for this checkpoint:
+  - `cargo fmt`
+  - `cargo test -p ozzy-core`
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/24_phase5_3_review.md`
+
+
+## Current Phase: Phase 5 underway
+## Current Step: Phase 5.4 next; cache identity rewrite is complete

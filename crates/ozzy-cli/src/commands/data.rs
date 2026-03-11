@@ -86,8 +86,8 @@ pub async fn upload(
             bail!("File not found: {}", file_path);
         }
 
-        let file_bytes = std::fs::read(path)
-            .with_context(|| format!("Failed to read {}", file_path))?;
+        let file_bytes =
+            std::fs::read(path).with_context(|| format!("Failed to read {}", file_path))?;
 
         let file_name = path
             .file_name()
@@ -95,8 +95,8 @@ pub async fn upload(
             .unwrap_or("unnamed");
 
         // Build multipart form
-        let file_part = reqwest::multipart::Part::bytes(file_bytes)
-            .file_name(file_name.to_string());
+        let file_part =
+            reqwest::multipart::Part::bytes(file_bytes).file_name(file_name.to_string());
 
         let mut form = reqwest::multipart::Form::new()
             .part("file", file_part)
@@ -136,7 +136,11 @@ pub async fn upload(
             upload.content_type,
             upload.byte_size,
             upload.hash.get(..12).unwrap_or(&upload.hash),
-            if upload.deduplicated { ", deduplicated" } else { "" }
+            if upload.deduplicated {
+                ", deduplicated"
+            } else {
+                ""
+            }
         );
         if let Some(ver) = upload.collection_version {
             println!("  Added to collection (version {})", ver);
@@ -219,7 +223,11 @@ pub async fn show(name: &str) -> Result<()> {
     println!("Name:         {}", detail.name);
     println!("Hash:         {}", detail.hash);
     println!("Content-Type: {}", detail.content_type);
-    println!("Size:         {} ({})", format_bytes(detail.byte_size), detail.byte_size);
+    println!(
+        "Size:         {} ({})",
+        format_bytes(detail.byte_size),
+        detail.byte_size
+    );
     println!("Uploaded by:  {}", detail.uploaded_by);
     println!("Created:      {}", detail.created_at);
 
@@ -244,11 +252,7 @@ pub async fn show(name: &str) -> Result<()> {
 }
 
 /// Update metadata on a data atom.
-pub async fn describe(
-    name: &str,
-    set_description: Option<&str>,
-    history: bool,
-) -> Result<()> {
+pub async fn describe(name: &str, set_description: Option<&str>, history: bool) -> Result<()> {
     shared::validate_name(name, "data atom")?;
     let creds = shared::require_auth()?;
     let project = shared::load_project_from_toml()?;
@@ -398,7 +402,12 @@ pub async fn download(name: &str, output: Option<&str>) -> Result<()> {
         let out_path = output.unwrap_or(name);
         std::fs::write(out_path, &bytes)
             .with_context(|| format!("Failed to write {}", out_path))?;
-        println!("Downloaded {} ({} bytes) to {}", name, bytes.len(), out_path);
+        println!(
+            "Downloaded {} ({} bytes) to {}",
+            name,
+            bytes.len(),
+            out_path
+        );
         return Ok(());
     }
 
@@ -410,9 +419,13 @@ pub async fn download(name: &str, output: Option<&str>) -> Result<()> {
     // Direct response (local storage mode) — no hash header available
     let bytes = resp.bytes().await?;
     let out_path = output.unwrap_or(name);
-    std::fs::write(out_path, &bytes)
-        .with_context(|| format!("Failed to write {}", out_path))?;
-    println!("Downloaded {} ({} bytes) to {}", name, bytes.len(), out_path);
+    std::fs::write(out_path, &bytes).with_context(|| format!("Failed to write {}", out_path))?;
+    println!(
+        "Downloaded {} ({} bytes) to {}",
+        name,
+        bytes.len(),
+        out_path
+    );
 
     Ok(())
 }

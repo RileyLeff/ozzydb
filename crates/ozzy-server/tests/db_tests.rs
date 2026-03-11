@@ -1109,25 +1109,92 @@ async fn test_materialized_cache() -> Result<()> {
         )
         .await?;
 
+    let env = db
+        .insert_v4_environment_version(
+            project.id,
+            user.id,
+            "python_sci",
+            "1",
+            serde_json::json!({
+                "kind": "prebuilt",
+                "image": "ghcr.io/example/python:3.12"
+            }),
+        )
+        .await?;
+    let transform = db
+        .insert_v4_transform_version(
+            project.id,
+            user.id,
+            "quality_control",
+            "1",
+            env.id,
+            Some("transforms/qc.py:run"),
+            None,
+            None,
+            serde_json::json!({}),
+            false,
+            &[],
+        )
+        .await?;
+    let registry_revision = db.insert_v4_registry_revision(project.id, user.id).await?;
+    let project_revision = db
+        .insert_v4_project_revision(
+            project.id,
+            commit.id,
+            registry_revision.id,
+            "ozzy_hash",
+            "[project]\nname = 'test'\n",
+            serde_json::json!({}),
+            serde_json::json!({}),
+            serde_json::json!({}),
+            serde_json::json!({}),
+            user.id,
+        )
+        .await?;
+    let output_artifact = db
+        .insert_v4_artifact(
+            project.id,
+            ozzy_server::db::v4::ArtifactKind::Blob,
+            Some("output_hash_123"),
+            None,
+            None,
+            user.id,
+        )
+        .await?;
+
     let mat_hash = format!("mat_{:032x}", rand::random::<u128>());
+    let input_artifact_bindings = serde_json::json!({
+        "raw": {
+            "source": "input:raw",
+            "artifact_id": Uuid::new_v4().to_string()
+        }
+    });
     let entry = db
         .insert_materialized_cache(
             &mat_hash,
             project.id,
-            commit.id,
+            project_revision.id,
             "analysis",
             "qc_node",
-            "quality_control",
+            transform.id,
+            env.id,
+            "params_hash_123",
+            &input_artifact_bindings,
+            "source_hash_123",
+            Some("secrets_hash_123"),
+            output_artifact.id,
             "output_hash_123",
             "cache/output_hash_123",
             "application/vnd.apache.parquet",
             1024,
-            "linux-x86_64",
-            1,
         )
         .await?;
     assert_eq!(entry.materialized_hash, mat_hash);
     assert_eq!(entry.access_count, 1);
+    assert_eq!(entry.project_revision_id, project_revision.id);
+    assert_eq!(entry.transform_version_id, transform.id);
+    assert_eq!(entry.environment_version_id, env.id);
+    assert_eq!(entry.output_artifact_id, output_artifact.id);
 
     // Get
     let found = db.get_materialized_cache(&mat_hash).await?.unwrap();
@@ -1158,16 +1225,20 @@ async fn test_materialized_cache() -> Result<()> {
         .insert_materialized_cache(
             &mat_hash,
             project.id,
-            commit.id,
+            project_revision.id,
             "analysis",
             "qc_node",
-            "quality_control",
+            transform.id,
+            env.id,
+            "params_hash_123",
+            &input_artifact_bindings,
+            "source_hash_123",
+            Some("secrets_hash_123"),
+            output_artifact.id,
             "output_hash_123",
             "cache/output_hash_123",
             "application/vnd.apache.parquet",
             1024,
-            "linux-x86_64",
-            1,
         )
         .await?;
     assert_eq!(entry2.access_count, 3); // was 2, upsert adds 1

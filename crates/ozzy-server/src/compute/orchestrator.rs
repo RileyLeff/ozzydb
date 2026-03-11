@@ -83,8 +83,6 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
         None
     };
     let edge_map = super::super::api::v1::fetch::build_edge_map(endpoint_def);
-    let platform = ozzy_core::platform::PlatformFingerprint::detect();
-    let platform_hash = platform.hash();
 
     // Upload source code tarball to R2 for download by compute containers.
     // Done once per job (not per-node) since all nodes share the same commit's source.
@@ -139,12 +137,9 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
             let state = state.clone();
             let node_name = node_name.clone();
             let job_endpoint_name = job.endpoint_name.clone();
-            let commit = commit.clone();
             let project_id = project.id;
             let resolved_params = resolved_params.clone();
             let endpoint_inputs = endpoint_inputs.clone();
-            let platform_hash = platform_hash.clone();
-            let platform = platform.clone();
             let transforms = published.runtime.transforms.clone();
             let snapshot = published.snapshot.clone();
             let project_revision_id = published.row.id;
@@ -170,14 +165,11 @@ async fn run_job_inner(state: &AppState, job_id: Uuid) -> Result<(), anyhow::Err
                     &transforms,
                     snapshot.as_ref(),
                     project_revision_id,
-                    &commit,
                     invocation_actor_id,
                     project_id,
                     &job_endpoint_name,
                     &resolved_params,
                     &endpoint_inputs,
-                    &platform_hash,
-                    &platform,
                     &edge_map_for_node,
                     &node_outputs_snapshot,
                     source_dir_path.as_deref(),
@@ -255,14 +247,11 @@ async fn execute_node(
     transforms: &HashMap<String, RuntimeTransformDef>,
     snapshot: &RegistrySnapshot,
     project_revision_id: Uuid,
-    commit: &crate::db::Commit,
     invocation_actor_id: Uuid,
     project_id: Uuid,
     endpoint_name: &str,
     resolved_params: &serde_json::Value,
     endpoint_inputs: &BTreeMap<String, super::super::api::v1::fetch::ResolvedEndpointInput>,
-    platform_hash: &str,
-    platform: &ozzy_core::platform::PlatformFingerprint,
     edges_for_node: &[(String, String)],
     node_outputs: &HashMap<String, NodeOutput>,
     source_dir: Option<&std::path::Path>,
@@ -292,18 +281,14 @@ async fn execute_node(
     )?;
 
     // Resolve inputs
-    let mut input_hashes: Vec<(String, String)> = Vec::new();
+    let mut input_artifact_ids: Vec<(String, String)> = Vec::new();
     for (input_name, source) in edges_for_node {
-        let hash = resolve_edge_source(source, endpoint_inputs, node_outputs).await?;
-        input_hashes.push((input_name.clone(), hash));
+        let artifact_id = resolve_edge_source(source, endpoint_inputs, node_outputs).await?;
+        input_artifact_ids.push((input_name.clone(), artifact_id));
     }
 
-    let invocation_input_bindings = build_invocation_input_bindings(
-        edges_for_node,
-        &input_hashes,
-        endpoint_inputs,
-        node_outputs,
-    )?;
+    let invocation_input_bindings =
+        build_invocation_input_bindings(edges_for_node, endpoint_inputs, node_outputs)?;
 
     // Resolve params
     let node_params = super::super::api::v1::fetch::resolve_node_params(
@@ -318,37 +303,26 @@ async fn execute_node(
     let secrets_hash = resolve_secrets_hash(state, project_id, transform_def).await?;
 
     // Resolve environment
-    let (env_image, env_hash, lockfile_hash) =
-        super::super::api::v1::fetch::resolve_environment_image_anyhow(
-            state,
-            &transform_def.environment,
-        )
-        .await?;
+    let env_image = super::super::api::v1::fetch::resolve_environment_image_anyhow(
+        state,
+        &transform_def.environment,
+    )
+    .await?;
 
     // Compute source hash
-    let (source_hash, function_name) = compute_source_hash(transform_def, node_def, source_dir)?;
+    let source_hash = compute_source_hash(transform_def, node_def, source_dir)?;
 
-    let params_schema_hash =
-        super::super::api::v1::fetch::compute_params_schema_hash(transform_def)?;
-
-    let transform_hash = ozzy_core::hash::transform_hash(
-        &source_hash,
-        &function_name,
-        &lockfile_hash,
-        &env_hash,
-        &params_schema_hash,
-    );
-
-    let input_refs: Vec<(&str, &str)> = input_hashes
+    let input_refs: Vec<(&str, &str)> = input_artifact_ids
         .iter()
-        .map(|(name, hash)| (name.as_str(), hash.as_str()))
+        .map(|(name, artifact_id)| (name.as_str(), artifact_id.as_str()))
         .collect();
 
     let mat_hash = ozzy_core::hash::materialized_hash(
         &input_refs,
-        &transform_hash,
+        &transform_def.row_id.to_string(),
+        &transform_def.environment.row_id.to_string(),
+        &source_hash,
         &params_hash,
-        platform_hash,
         secrets_hash.as_deref(),
     );
 
@@ -371,7 +345,7 @@ async fn execute_node(
             content_type: cached.output_content_type,
             byte_size: cached.output_byte_size,
             cache_hit: true,
-            artifact_id: None,
+            artifact_id: cached.output_artifact_id,
         });
     }
 
@@ -384,7 +358,7 @@ async fn execute_node(
             Some(node_name),
             node_params.clone(),
             &params_hash,
-            invocation_input_bindings,
+            invocation_input_bindings.clone(),
             json!({}),
             "running",
             Some(invocation_actor_id),
@@ -734,22 +708,25 @@ async fn execute_node(
     };
 
     // Insert materialized cache record
-    let platform_str = serde_json::to_string(platform)?;
     state
         .db
         .insert_materialized_cache(
             &mat_hash,
             project_id,
-            commit.id,
+            project_revision_id,
             endpoint_name,
             node_name,
-            &transform_def.versioned_name.to_string(),
+            transform_def.row_id,
+            transform_def.environment.row_id,
+            &params_hash,
+            &invocation_input_bindings,
+            &source_hash,
+            secrets_hash.as_deref(),
+            output_artifact.id,
             &output_hash,
             &output_r2_key,
             &output_content_type,
             output_byte_size,
-            &platform_str,
-            1,
         )
         .await?;
 
@@ -772,7 +749,7 @@ async fn execute_node(
         content_type: output_content_type,
         byte_size: output_byte_size,
         cache_hit: false,
-        artifact_id: Some(output_artifact.id),
+        artifact_id: output_artifact.id,
     })
 }
 
@@ -787,7 +764,7 @@ pub(crate) struct NodeOutput {
     pub content_type: String,
     pub byte_size: i64,
     pub cache_hit: bool,
-    pub artifact_id: Option<Uuid>,
+    pub artifact_id: Uuid,
 }
 
 fn decode_job_input_bindings(
@@ -1146,37 +1123,38 @@ fn describe_type_expr(expr: &TypeExpr) -> String {
 
 fn build_invocation_input_bindings(
     edges_for_node: &[(String, String)],
-    input_hashes: &[(String, String)],
     endpoint_inputs: &BTreeMap<String, super::super::api::v1::fetch::ResolvedEndpointInput>,
     node_outputs: &HashMap<String, NodeOutput>,
 ) -> Result<serde_json::Value, anyhow::Error> {
-    let input_hash_map = input_hashes
-        .iter()
-        .map(|(name, hash)| (name.as_str(), hash.as_str()))
-        .collect::<HashMap<_, _>>();
-
     let mut bindings = serde_json::Map::new();
     for (input_name, source) in edges_for_node {
-        let content_hash = input_hash_map.get(input_name.as_str()).ok_or_else(|| {
-            anyhow::anyhow!("Input '{}' is missing a resolved content hash", input_name)
-        })?;
         let artifact_id = if let Some(endpoint_input_name) = source.strip_prefix("input:") {
             endpoint_inputs
                 .get(endpoint_input_name)
-                .map(|binding| serde_json::Value::String(binding.artifact.id.to_string()))
-                .unwrap_or(serde_json::Value::Null)
+                .map(|binding| binding.artifact.id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Endpoint input '{}' is not available for node input '{}'",
+                        endpoint_input_name,
+                        input_name
+                    )
+                })?
         } else {
             node_outputs
                 .get(source)
-                .and_then(|output| output.artifact_id)
-                .map(|id| serde_json::Value::String(id.to_string()))
-                .unwrap_or(serde_json::Value::Null)
+                .map(|output| output.artifact_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Node '{}' output is not available for node input '{}'",
+                        source,
+                        input_name
+                    )
+                })?
         };
         bindings.insert(
             input_name.clone(),
             json!({
                 "source": source,
-                "content_hash": content_hash,
                 "artifact_id": artifact_id,
             }),
         );
@@ -1279,7 +1257,7 @@ fn create_source_tarball(source_dir: &std::path::Path) -> Result<Vec<u8>, anyhow
     Ok(gz.finish()?)
 }
 
-/// Resolve an edge source to a content hash.
+/// Resolve an edge source to the bound input artifact ID.
 async fn resolve_edge_source(
     source: &str,
     endpoint_inputs: &BTreeMap<String, super::super::api::v1::fetch::ResolvedEndpointInput>,
@@ -1289,7 +1267,7 @@ async fn resolve_edge_source(
         let binding = endpoint_inputs
             .get(input_name)
             .ok_or_else(|| anyhow::anyhow!("Endpoint input '{}' is not available", input_name))?;
-        Ok(format!("artifact:{}", binding.artifact.id))
+        Ok(binding.artifact.id.to_string())
     } else if source.starts_with("endpoint:") {
         anyhow::bail!("Cross-project endpoint dependencies ('{source}') are not yet implemented")
     } else {
@@ -1299,7 +1277,7 @@ async fn resolve_edge_source(
                 source
             )
         })?;
-        Ok(output.output_hash.clone())
+        Ok(output.artifact_id.to_string())
     }
 }
 
@@ -1308,9 +1286,9 @@ fn compute_source_hash(
     transform_def: &RuntimeTransformDef,
     node_def: &ozzy_core::toml_spec::NodeDef,
     source_dir: Option<&std::path::Path>,
-) -> Result<(String, String), anyhow::Error> {
+) -> Result<String, anyhow::Error> {
     if let Some(source) = &transform_def.source {
-        let (_file_path, func) = crate::runners::parse_source_ref(source).ok_or_else(|| {
+        let (_file_path, _func) = crate::runners::parse_source_ref(source).ok_or_else(|| {
             anyhow::anyhow!(
                 "Invalid source ref '{}' for transform '{}'",
                 source,
@@ -1347,13 +1325,9 @@ fn compute_source_hash(
                 e
             )
         })?;
-        let hash = ozzy_core::hash::blake3_hash(&bytes);
-        Ok((hash, func.to_owned()))
+        Ok(ozzy_core::hash::blake3_hash(&bytes))
     } else if let Some(command) = &transform_def.command {
-        Ok((
-            ozzy_core::hash::blake3_hash(command.as_bytes()),
-            "command".to_owned(),
-        ))
+        Ok(ozzy_core::hash::blake3_hash(command.as_bytes()))
     } else {
         anyhow::bail!(
             "Transform '{}' has neither source nor command",
@@ -1599,15 +1573,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_invocation_input_bindings_carries_hashes_and_node_artifacts() {
+    fn test_build_invocation_input_bindings_carries_artifact_bindings() {
         let upstream_artifact_id = Uuid::new_v4();
         let edges = vec![
             ("raw".to_string(), "input:raw".to_string()),
             ("cleaned".to_string(), "step1".to_string()),
-        ];
-        let input_hashes = vec![
-            ("raw".to_string(), "hash_raw".to_string()),
-            ("cleaned".to_string(), "hash_step1".to_string()),
         ];
         let endpoint_inputs = BTreeMap::from([(
             "raw".to_string(),
@@ -1633,22 +1603,19 @@ mod tests {
                 content_type: "application/json".to_string(),
                 byte_size: 7,
                 cache_hit: false,
-                artifact_id: Some(upstream_artifact_id),
+                artifact_id: upstream_artifact_id,
             },
         )]);
 
         let bindings =
-            build_invocation_input_bindings(&edges, &input_hashes, &endpoint_inputs, &node_outputs)
-                .unwrap();
+            build_invocation_input_bindings(&edges, &endpoint_inputs, &node_outputs).unwrap();
 
         assert_eq!(bindings["raw"]["source"], "input:raw");
-        assert_eq!(bindings["raw"]["content_hash"], "hash_raw");
         assert_eq!(
             bindings["raw"]["artifact_id"],
             serde_json::Value::String(endpoint_inputs["raw"].artifact.id.to_string())
         );
         assert_eq!(bindings["cleaned"]["source"], "step1");
-        assert_eq!(bindings["cleaned"]["content_hash"], "hash_step1");
         assert_eq!(
             bindings["cleaned"]["artifact_id"],
             serde_json::Value::String(upstream_artifact_id.to_string())

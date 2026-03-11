@@ -3,9 +3,15 @@
 //! All artifacts in OzzyDB are identified by their content hash:
 //! - data_atom_hash = blake3(raw_bytes)
 //! - collection_hash = blake3(sorted member hashes)
-//! - transform_hash = blake3(source_hash + function_name + lockfile_hash + environment_image_hash + params_schema_hash)
 //! - secrets_hash = blake3(sorted(secret_name + version_id) pairs)
-//! - materialized_hash = blake3(sorted(input_name, input_hash) + transform_hash + params_hash + platform_hash + [secrets_hash])
+//! - materialized_hash = blake3(
+//!     sorted(input_name, input_artifact_id) +
+//!     transform_version_id +
+//!     environment_version_id +
+//!     source_hash +
+//!     params_hash +
+//!     [secrets_hash]
+//!   )
 
 use blake3::Hasher;
 use std::fs::File;
@@ -42,25 +48,6 @@ pub fn blake3_hash_components(components: &[&str]) -> String {
     blake3_hash(combined.as_bytes())
 }
 
-/// Compute the hash of a transform (v2).
-///
-/// transform_hash = blake3(source_hash + function_name + lockfile_hash + environment_image_hash + params_schema_hash)
-pub fn transform_hash(
-    source_hash: &str,
-    function_name: &str,
-    lockfile_hash: &str,
-    environment_image_hash: &str,
-    params_schema_hash: &str,
-) -> String {
-    blake3_hash_components(&[
-        source_hash,
-        function_name,
-        lockfile_hash,
-        environment_image_hash,
-        params_schema_hash,
-    ])
-}
-
 /// Compute the secrets hash for a transform execution.
 ///
 /// secrets_hash = blake3(sorted(secret_name + version_id) pairs)
@@ -88,17 +75,19 @@ pub fn secrets_hash(secrets: &[(&str, &str)]) -> Option<String> {
 /// Compute the materialized hash (cache key) for a transform execution.
 ///
 /// materialized_hash = blake3(
-///   sorted(input_name, input_hash) pairs +
-///   transform_hash +
+///   sorted(input_name, input_artifact_id) pairs +
+///   transform_version_id +
+///   environment_version_id +
+///   source_hash +
 ///   params_hash +
-///   platform_hash +
 ///   secrets_hash           // only if transform declares secrets
 /// )
 pub fn materialized_hash(
-    inputs: &[(&str, &str)], // (input_name, input_hash) pairs
-    transform_hash: &str,
+    inputs: &[(&str, &str)], // (input_name, input_artifact_id) pairs
+    transform_version_id: &str,
+    environment_version_id: &str,
+    source_hash: &str,
     params_hash: &str,
-    platform_hash: &str,
     secrets_hash: Option<&str>,
 ) -> String {
     // Sort inputs by name for determinism
@@ -106,15 +95,16 @@ pub fn materialized_hash(
     sorted_inputs.sort_by_key(|(name, _)| *name);
 
     // Single-pass hash over all components per spec:
-    // blake3(input_name1 \0 input_hash1 \0 ... \0 transform_hash \0 params_hash \0 platform_hash [\0 secrets_hash])
+    // blake3(input_name1 \0 input_artifact_id1 \0 ... \0 transform_version_id \0 environment_version_id \0 source_hash \0 params_hash [\0 secrets_hash])
     let mut parts: Vec<&str> = Vec::new();
     for (name, hash) in &sorted_inputs {
         parts.push(name);
         parts.push(hash);
     }
-    parts.push(transform_hash);
+    parts.push(transform_version_id);
+    parts.push(environment_version_id);
+    parts.push(source_hash);
     parts.push(params_hash);
-    parts.push(platform_hash);
     if let Some(sh) = secrets_hash {
         parts.push(sh);
     }
@@ -162,30 +152,6 @@ mod tests {
         assert_eq!(hash.len(), 64); // BLAKE3 = 256-bit = 64 hex chars
     }
 
-    // -- transform_hash --
-
-    #[test]
-    fn test_transform_hash_stable() {
-        let h1 = transform_hash("src_abc", "my_func", "lock_def", "env_ghi", "params_jkl");
-        let h2 = transform_hash("src_abc", "my_func", "lock_def", "env_ghi", "params_jkl");
-        assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 64);
-    }
-
-    #[test]
-    fn test_transform_hash_changes_with_environment() {
-        let h1 = transform_hash("src", "func", "lock", "env_v1", "params");
-        let h2 = transform_hash("src", "func", "lock", "env_v2", "params");
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
-    fn test_transform_hash_changes_with_source() {
-        let h1 = transform_hash("src_v1", "func", "lock", "env", "params");
-        let h2 = transform_hash("src_v2", "func", "lock", "env", "params");
-        assert_ne!(h1, h2);
-    }
-
     // -- secrets_hash --
 
     #[test]
@@ -226,8 +192,8 @@ mod tests {
     #[test]
     fn test_materialized_hash_stable() {
         let inputs = [("x", "hash_x")];
-        let h1 = materialized_hash(&inputs, "transform", "params", "platform", None);
-        let h2 = materialized_hash(&inputs, "transform", "params", "platform", None);
+        let h1 = materialized_hash(&inputs, "transform", "env", "source", "params", None);
+        let h2 = materialized_hash(&inputs, "transform", "env", "source", "params", None);
         assert_eq!(h1, h2);
     }
 
@@ -236,24 +202,25 @@ mod tests {
         let inputs1 = [("left", "hash_a"), ("right", "hash_b")];
         let inputs2 = [("right", "hash_b"), ("left", "hash_a")];
 
-        let h1 = materialized_hash(&inputs1, "transform", "params", "platform", None);
-        let h2 = materialized_hash(&inputs2, "transform", "params", "platform", None);
+        let h1 = materialized_hash(&inputs1, "transform", "env", "source", "params", None);
+        let h2 = materialized_hash(&inputs2, "transform", "env", "source", "params", None);
         assert_eq!(h1, h2);
     }
 
     #[test]
     fn test_materialized_hash_with_secrets() {
         let inputs = [("x", "hash_x")];
-        let h_no_secrets = materialized_hash(&inputs, "t", "p", "plat", None);
-        let h_with_secrets = materialized_hash(&inputs, "t", "p", "plat", Some("secrets_abc"));
+        let h_no_secrets = materialized_hash(&inputs, "t", "env", "src", "p", None);
+        let h_with_secrets =
+            materialized_hash(&inputs, "t", "env", "src", "p", Some("secrets_abc"));
         assert_ne!(h_no_secrets, h_with_secrets);
     }
 
     #[test]
     fn test_materialized_hash_secrets_change() {
         let inputs = [("x", "hash_x")];
-        let h1 = materialized_hash(&inputs, "t", "p", "plat", Some("secrets_v1"));
-        let h2 = materialized_hash(&inputs, "t", "p", "plat", Some("secrets_v2"));
+        let h1 = materialized_hash(&inputs, "t", "env", "src", "p", Some("secrets_v1"));
+        let h2 = materialized_hash(&inputs, "t", "env", "src", "p", Some("secrets_v2"));
         assert_ne!(h1, h2);
     }
 
@@ -261,8 +228,8 @@ mod tests {
     fn test_materialized_hash_different_inputs() {
         let inputs1 = [("x", "hash_a")];
         let inputs2 = [("x", "hash_b")];
-        let h1 = materialized_hash(&inputs1, "t", "p", "plat", None);
-        let h2 = materialized_hash(&inputs2, "t", "p", "plat", None);
+        let h1 = materialized_hash(&inputs1, "t", "env", "src", "p", None);
+        let h2 = materialized_hash(&inputs2, "t", "env", "src", "p", None);
         assert_ne!(h1, h2);
     }
 
@@ -308,15 +275,6 @@ mod tests {
     }
 
     #[test]
-    fn test_golden_transform_hash() {
-        // Pin a specific transform hash so we detect accidental changes to the formula
-        let h = transform_hash("src", "func", "lock", "env", "params");
-        // This is blake3("src\0func\0lock\0env\0params")
-        let expected = blake3_hash(b"src\0func\0lock\0env\0params");
-        assert_eq!(h, expected);
-    }
-
-    #[test]
     fn test_golden_secrets_hash() {
         // Pin: secrets_hash([("A","v1"),("B","v2")]) = blake3("A\0v1\0B\0v2")
         let h = secrets_hash(&[("A", "v1"), ("B", "v2")]).unwrap();
@@ -334,19 +292,19 @@ mod tests {
 
     #[test]
     fn test_golden_materialized_hash() {
-        // Single-pass: blake3("x\0hash_x\0t\0p\0plat")
+        // Single-pass: blake3("x\0hash_x\0t\0env\0src\0p")
         let inputs = [("x", "hash_x")];
-        let h = materialized_hash(&inputs, "t", "p", "plat", None);
-        let expected = blake3_hash(b"x\0hash_x\0t\0p\0plat");
+        let h = materialized_hash(&inputs, "t", "env", "src", "p", None);
+        let expected = blake3_hash(b"x\0hash_x\0t\0env\0src\0p");
         assert_eq!(h, expected);
     }
 
     #[test]
     fn test_golden_materialized_hash_with_secrets() {
-        // Single-pass: blake3("x\0hash_x\0t\0p\0plat\0s")
+        // Single-pass: blake3("x\0hash_x\0t\0env\0src\0p\0s")
         let inputs = [("x", "hash_x")];
-        let h = materialized_hash(&inputs, "t", "p", "plat", Some("s"));
-        let expected = blake3_hash(b"x\0hash_x\0t\0p\0plat\0s");
+        let h = materialized_hash(&inputs, "t", "env", "src", "p", Some("s"));
+        let expected = blake3_hash(b"x\0hash_x\0t\0env\0src\0p\0s");
         assert_eq!(h, expected);
     }
 
