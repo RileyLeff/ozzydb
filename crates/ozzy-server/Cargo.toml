@@ -34,6 +34,7 @@ sqlx.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
+csv.workspace = true
 
 # Object storage
 object_store.workspace = true

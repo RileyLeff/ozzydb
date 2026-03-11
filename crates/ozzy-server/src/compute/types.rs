@@ -25,6 +25,7 @@ pub struct ComputeRequest {
     pub image: String,
     pub env_vars: HashMap<String, String>,
     pub timeout_secs: u64,
+    pub network_enabled: bool,
 }
 
 /// Loader hint for a blob-like input artifact.

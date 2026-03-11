@@ -61,6 +61,10 @@ impl DockerBackend {
             cmd.args(["--runtime", runtime]);
         }
 
+        if !request.network_enabled {
+            cmd.args(["--network", "none"]);
+        }
+
         // All env vars from orchestrator (includes OZZY_*, determinism vars, etc.)
         for (key, value) in &request.env_vars {
             cmd.args(["-e", &format!("{}={}", key, value)]);

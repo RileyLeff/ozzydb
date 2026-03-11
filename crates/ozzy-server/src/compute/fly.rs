@@ -50,6 +50,10 @@ impl ComputeBackend for FlyBackend {
 
 impl FlyBackend {
     async fn run_inner(&self, request: &ComputeRequest) -> Result<ComputeResult> {
+        if !request.network_enabled {
+            anyhow::bail!("Fly backend does not yet support network-disabled transforms");
+        }
+
         let start = Instant::now();
         let job_uuid = uuid::Uuid::new_v4();
         let machine_name = format!("ozzy-job-{}", job_uuid);

@@ -23,6 +23,7 @@ use crate::registry::{
     RegistrySnapshot, RuntimeEnvironmentDef, RuntimeTransformDef,
     load_published_project_revision_by_commit,
 };
+use crate::verification::ensure_conformance_verified;
 
 /// Build the fetch router.
 pub fn router() -> Router<AppState> {
@@ -175,6 +176,7 @@ async fn fetch_endpoint(
     let (all_cached, node_outputs) = check_all_node_caches(
         &state,
         &commit,
+        published.snapshot.as_ref(),
         endpoint_def,
         &published.runtime.transforms,
         &resolved_params,
@@ -331,6 +333,7 @@ async fn fetch_endpoint(
 async fn check_all_node_caches(
     state: &AppState,
     commit: &crate::db::Commit,
+    snapshot: &RegistrySnapshot,
     endpoint_def: &ozzy_core::toml_spec::EndpointDef,
     transforms: &HashMap<String, RuntimeTransformDef>,
     resolved_params: &serde_json::Value,
@@ -390,6 +393,53 @@ async fn check_all_node_caches(
         .await?;
 
         if let Some(cached) = state.db.get_materialized_cache(&mat_hash).await? {
+            let cached_artifact = state
+                .db
+                .get_v4_artifact(cached.output_artifact_id)
+                .await
+                .map_err(|e| ApiError::Internal(e.into()))?
+                .ok_or_else(|| {
+                    ApiError::Internal(anyhow::anyhow!(
+                        "Materialized cache '{}' references missing artifact '{}'",
+                        mat_hash,
+                        cached.output_artifact_id
+                    ))
+                })?;
+            let (_, output_port) = single_output_port(&node_def.transform, transform_def)
+                .map_err(ApiError::Internal)?;
+            let (_, output_type) = snapshot
+                .resolve_type_ref(&output_port.ty)
+                .map_err(|e| ApiError::Internal(e.into()))?;
+            let conformance = state
+                .db
+                .get_v4_conformance_record(cached_artifact.id, output_type.id)
+                .await
+                .map_err(|e| ApiError::Internal(e.into()))?
+                .ok_or_else(|| {
+                    ApiError::Internal(anyhow::anyhow!(
+                        "Materialized cache '{}' references artifact '{}' without output conformance for type '{}'",
+                        mat_hash,
+                        cached_artifact.id,
+                        output_port.ty.name
+                    ))
+                })?;
+            let conformance = ensure_conformance_verified(
+                state,
+                snapshot,
+                &cached_artifact,
+                &conformance,
+                &output_port.ty,
+            )
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?;
+            if conformance.status == "rejected" {
+                return Err(ApiError::Internal(anyhow::anyhow!(
+                    "Materialized cache '{}' references rejected artifact '{}' for output type '{}'",
+                    mat_hash,
+                    cached_artifact.id,
+                    output_port.ty.name
+                )));
+            }
             state.db.touch_materialized_cache(&mat_hash).await?;
             node_outputs.insert(
                 node_name.clone(),
@@ -547,7 +597,7 @@ fn validate_and_resolve_params(
 
     for (name, param_def) in &endpoint.params {
         let value = if let Some(v) = consumer_params.get(name) {
-            let coerced = coerce_param_value(v, &param_def.type_);
+            let coerced = coerce_param_value(v, &param_def.type_)?;
             validate_param_value(name, &coerced, param_def)?;
             coerced
         } else if let Some(default) = &param_def.default {
@@ -642,6 +692,11 @@ pub(crate) async fn validate_and_resolve_endpoint_inputs(
                 ))
             })?;
 
+        let conformance =
+            ensure_conformance_verified(state, snapshot, &artifact, &conformance, &port.ty)
+                .await
+                .map_err(|e| ApiError::Internal(e.into()))?;
+
         if conformance.status == "rejected" {
             return Err(ApiError::BadRequest(format!(
                 "Artifact '{}' was rejected for required endpoint input type '{}'",
@@ -677,28 +732,44 @@ fn build_job_input_bindings(
 }
 
 /// Coerce a query-string parameter value to the declared type.
-fn coerce_param_value(value: &serde_json::Value, declared_type: &str) -> serde_json::Value {
+fn coerce_param_value(
+    value: &serde_json::Value,
+    declared_type: &str,
+) -> Result<serde_json::Value, ApiError> {
     if let serde_json::Value::String(s) = value {
         match declared_type {
             "float" | "number" => {
-                if let Ok(n) = s.parse::<f64>() {
-                    return serde_json::Value::from(n);
-                }
+                let n = s.parse::<f64>().map_err(|_| {
+                    ApiError::BadRequest(format!(
+                        "Parameter value '{}' is not a valid {}",
+                        s, declared_type
+                    ))
+                })?;
+                return Ok(serde_json::Value::from(n));
             }
             "int" | "integer" => {
-                if let Ok(n) = s.parse::<i64>() {
-                    return serde_json::Value::from(n);
-                }
+                let n = s.parse::<i64>().map_err(|_| {
+                    ApiError::BadRequest(format!(
+                        "Parameter value '{}' is not a valid {}",
+                        s, declared_type
+                    ))
+                })?;
+                return Ok(serde_json::Value::from(n));
             }
             "bool" | "boolean" => match s.as_str() {
-                "true" | "1" | "yes" => return serde_json::Value::Bool(true),
-                "false" | "0" | "no" => return serde_json::Value::Bool(false),
-                _ => {}
+                "true" | "1" | "yes" => return Ok(serde_json::Value::Bool(true)),
+                "false" | "0" | "no" => return Ok(serde_json::Value::Bool(false)),
+                _ => {
+                    return Err(ApiError::BadRequest(format!(
+                        "Parameter value '{}' is not a valid {}",
+                        s, declared_type
+                    )));
+                }
             },
             _ => {}
         }
     }
-    value.clone()
+    Ok(value.clone())
 }
 
 /// Validate a parameter value against its definition.
@@ -865,13 +936,25 @@ fn find_terminal_node_inner(
         _ => {
             let mut names: Vec<&str> = terminals;
             names.sort();
-            tracing::warn!(
-                "Endpoint has multiple terminal nodes: {:?}. Using '{}'.",
-                names,
-                names[0]
-            );
-            Ok(names[0])
+            anyhow::bail!("Endpoint has multiple terminal nodes: {:?}", names)
         }
+    }
+}
+
+pub(crate) fn single_output_port<'a>(
+    transform_name: &str,
+    transform_def: &'a RuntimeTransformDef,
+) -> Result<(&'a str, &'a ozzy_types::ports::TypedPort), anyhow::Error> {
+    match transform_def.outputs.ports.iter().next() {
+        Some((name, port)) if transform_def.outputs.ports.len() == 1 => Ok((name.as_str(), port)),
+        Some(_) => anyhow::bail!(
+            "Transform '{}' has multiple outputs at runtime; explicit output-port edges are not implemented yet",
+            transform_name
+        ),
+        None => anyhow::bail!(
+            "Transform '{}' has no output ports at runtime",
+            transform_name
+        ),
     }
 }
 
@@ -1628,25 +1711,25 @@ mod tests {
     #[test]
     fn test_coerce_param_value_float() {
         let v = serde_json::json!("12.5");
-        let c = coerce_param_value(&v, "float");
+        let c = coerce_param_value(&v, "float").expect("float coercion");
         assert_eq!(c, serde_json::json!(12.5));
     }
 
     #[test]
     fn test_coerce_param_value_int() {
         let v = serde_json::json!("42");
-        let c = coerce_param_value(&v, "int");
+        let c = coerce_param_value(&v, "int").expect("int coercion");
         assert_eq!(c, serde_json::json!(42));
     }
 
     #[test]
     fn test_coerce_param_value_bool() {
         assert_eq!(
-            coerce_param_value(&serde_json::json!("true"), "bool"),
+            coerce_param_value(&serde_json::json!("true"), "bool").expect("bool coercion"),
             serde_json::json!(true)
         );
         assert_eq!(
-            coerce_param_value(&serde_json::json!("false"), "bool"),
+            coerce_param_value(&serde_json::json!("false"), "bool").expect("bool coercion"),
             serde_json::json!(false)
         );
     }
@@ -1654,14 +1737,14 @@ mod tests {
     #[test]
     fn test_coerce_param_value_string_passthrough() {
         let v = serde_json::json!("hello");
-        let c = coerce_param_value(&v, "string");
+        let c = coerce_param_value(&v, "string").expect("string passthrough");
         assert_eq!(c, serde_json::json!("hello"));
     }
 
     #[test]
     fn test_coerce_param_value_already_typed() {
         let v = serde_json::json!(12.5);
-        let c = coerce_param_value(&v, "float");
+        let c = coerce_param_value(&v, "float").expect("typed passthrough");
         assert_eq!(c, serde_json::json!(12.5));
     }
 

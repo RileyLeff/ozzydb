@@ -17,6 +17,7 @@ use crate::AppState;
 use crate::registry::{
     RegistrySnapshot, RuntimeTransformDef, load_published_project_revision_by_commit,
 };
+use crate::verification::{ensure_conformance_verified, verify_output_bytes};
 use ozzy_types::syntax::{BuiltinConstructor, BuiltinType, TypeExpr};
 
 /// Run a job to completion: load context, execute DAG in parallel waves, update status.
@@ -328,6 +329,48 @@ async fn execute_node(
 
     // Check materialized cache
     if let Some(cached) = state.db.get_materialized_cache(&mat_hash).await? {
+        let cached_artifact = state
+            .db
+            .get_v4_artifact(cached.output_artifact_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Materialized cache '{}' references missing artifact '{}'",
+                    mat_hash,
+                    cached.output_artifact_id
+                )
+            })?;
+        let (_, output_port) =
+            super::super::api::v1::fetch::single_output_port(&node_def.transform, transform_def)?;
+        let (_, output_type) = snapshot.resolve_type_ref(&output_port.ty)?;
+        let conformance = state
+            .db
+            .get_v4_conformance_record(cached_artifact.id, output_type.id)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Materialized cache '{}' references artifact '{}' without conformance for output type '{}'",
+                    mat_hash,
+                    cached_artifact.id,
+                    output_port.ty.name
+                )
+            })?;
+        let conformance = ensure_conformance_verified(
+            state,
+            snapshot,
+            &cached_artifact,
+            &conformance,
+            &output_port.ty,
+        )
+        .await?;
+        if conformance.status == "rejected" {
+            anyhow::bail!(
+                "Materialized cache '{}' references rejected artifact '{}' for output type '{}'",
+                mat_hash,
+                cached_artifact.id,
+                output_port.ty.name
+            );
+        }
         state.db.touch_materialized_cache(&mat_hash).await?;
         tracing::info!(
             "Job {}: cache hit for node '{}': {}",
@@ -571,6 +614,7 @@ async fn execute_node(
         image: env_image_ref,
         env_vars,
         timeout_secs: state.config.compute.timeout_secs,
+        network_enabled: transform_def.network,
     };
 
     // Execute compute and download output from R2, ensuring cleanup on all paths
@@ -672,12 +716,11 @@ async fn execute_node(
         .await?;
     let output_r2_key = state.storage.storage_key(&output_hash, &output_ext)?;
 
-    let (output_port_name, output_type_row_id) =
+    let (output_port_name, output_type_row_id, output_type_ref) =
         resolve_single_output_type(snapshot, transform_def)?;
-
-    let (_, output_artifact, _) = match state
+    let (output_artifact, output_conformance, output_bindings) = match state
         .db
-        .persist_v4_invocation_success(
+        .persist_v4_invocation_output(
             invocation.id,
             project_id,
             &output_port_name,
@@ -706,6 +749,97 @@ async fn execute_node(
             return Err(err.into());
         }
     };
+
+    let verification_report = match verify_output_bytes(
+        snapshot,
+        &output_type_ref,
+        &output_content_type,
+        &output_bytes,
+    ) {
+        Ok(report) => report,
+        Err(err) => {
+            let _ = state
+                .db
+                .record_v4_verification_failure(output_conformance.id, &err.as_failure())
+                .await;
+            if let Err(mark_err) = state
+                .db
+                .mark_v4_invocation_failed(invocation.id, &err.to_string())
+                .await
+            {
+                return Err(anyhow::anyhow!(
+                    "node '{}' output verification setup failed: {}; additionally failed to mark invocation {} failed: {}",
+                    node_name,
+                    err,
+                    invocation.id,
+                    mark_err
+                ));
+            }
+            return Err(err.into());
+        }
+    };
+
+    if let Err(err) = state
+        .db
+        .record_v4_verification_report(output_conformance.id, &verification_report)
+        .await
+    {
+        if let Err(mark_err) = state
+            .db
+            .mark_v4_invocation_failed(invocation.id, &err.to_string())
+            .await
+        {
+            return Err(anyhow::anyhow!(
+                "node '{}' failed to record output verification report: {}; additionally failed to mark invocation {} failed: {}",
+                node_name,
+                err,
+                invocation.id,
+                mark_err
+            ));
+        }
+        return Err(err.into());
+    }
+
+    if verification_report.verdict == ozzy_types::verify::VerificationVerdict::Rejected {
+        let rejection = verification_report.diagnostics.join("; ");
+        let message = format!(
+            "Transform '{}' produced output rejected by '{}': {}",
+            node_def.transform,
+            output_type_ref.name,
+            if rejection.is_empty() {
+                "verification rejected"
+            } else {
+                &rejection
+            }
+        );
+        if let Err(mark_err) = state
+            .db
+            .mark_v4_invocation_failed(invocation.id, &message)
+            .await
+        {
+            return Err(anyhow::anyhow!(
+                "node '{}' output verification rejected: {}; additionally failed to mark invocation {} failed: {}",
+                node_name,
+                message,
+                invocation.id,
+                mark_err
+            ));
+        }
+        anyhow::bail!(message);
+    }
+
+    if let Err(err) = state
+        .db
+        .mark_v4_invocation_succeeded(invocation.id, output_bindings)
+        .await
+    {
+        return Err(anyhow::anyhow!(
+            "node '{}' completed output verification but failed to mark invocation {} succeeded: {}",
+            node_name,
+            invocation.id,
+            err
+        ));
+    }
 
     // Insert materialized cache record
     state
@@ -1063,7 +1197,10 @@ fn infer_blob_loader_from_expr(
             "Composite type '{}' cannot be loaded as a blob",
             describe_type_expr(expr)
         ),
-        _ => Ok(crate::compute::InputLoader::Bytes),
+        _ => anyhow::bail!(
+            "Type '{}' does not declare an executable blob loader",
+            describe_type_expr(expr)
+        ),
     }
 }
 
@@ -1166,22 +1303,17 @@ fn build_invocation_input_bindings(
 fn resolve_single_output_type(
     snapshot: &RegistrySnapshot,
     transform_def: &RuntimeTransformDef,
-) -> Result<(String, Uuid), anyhow::Error> {
-    let (output_name, output_port) =
-        transform_def.outputs.ports.iter().next().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Transform '{}' has no output ports",
-                transform_def.versioned_name
-            )
-        })?;
-    if transform_def.outputs.ports.len() != 1 {
-        anyhow::bail!(
-            "Transform '{}' has multiple output ports; runtime output binding is not yet port-addressable",
-            transform_def.versioned_name
-        );
-    }
+) -> Result<(String, Uuid, ozzy_types::syntax::TypeRefExpr), anyhow::Error> {
+    let (output_name, output_port) = super::super::api::v1::fetch::single_output_port(
+        &transform_def.versioned_name.to_string(),
+        transform_def,
+    )?;
     let (_, stored_type) = snapshot.resolve_type_ref(&output_port.ty)?;
-    Ok((output_name.clone(), stored_type.id))
+    Ok((
+        output_name.to_string(),
+        stored_type.id,
+        output_port.ty.clone(),
+    ))
 }
 
 /// Compute execution waves: groups of nodes whose dependencies are all in earlier waves.

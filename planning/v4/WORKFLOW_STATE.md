@@ -582,6 +582,29 @@
 - Review artifact:
   - `planning/reviews/v4/25_phase5_4_review.md`
 
+### Phase 5 external-review fix pass
+- Fixed all concrete findings from `planning/reviews/v4/26_phase5_external_review.md`.
+- Enforced `network = false` at the compute boundary:
+  - Docker disables networking with `--network none`
+  - Fly fails explicitly for network-disabled transforms
+- Removed trust-based output conformance on the node success path:
+  - output artifacts are now verified before the invocation is marked succeeded
+  - rejected output verification fails the invocation
+- Removed the remaining semantic fallbacks:
+  - multiple terminal nodes now error instead of warning and selecting one
+  - authored `endpoint:` edge sources now fail validation
+  - invalid parameter coercions now error immediately
+  - blob-loader inference no longer falls back to `Bytes`
+- Hardened cache-hit reuse so cached output artifacts must still exist and have verifiable conformance for the published output type.
+- Added server-side artifact verification helpers and extended `ozzy-types` verification input handling so `bytes` and `json` outputs can be verified correctly in the v4 runtime path.
+- Verification for this checkpoint:
+  - `cargo fmt`
+  - `cargo test -p ozzy-types`
+  - `cargo test -p ozzy-core`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/27_phase5_external_review_fixes.md`
+
 
 ## Current Phase: Phase 6 next
 ## Current Step: Phase 6.1 next; execution integration is complete

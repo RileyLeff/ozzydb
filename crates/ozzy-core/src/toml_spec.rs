@@ -6,7 +6,7 @@
 //! parses raw TOML into typed Rust data and rejects malformed or ambiguous
 //! authored state instead of silently defaulting it.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use ozzy_types::parse::{TypeParseError, parse_type_expr, parse_type_ref};
 use ozzy_types::ports::{TypedPort, TypedPortSet};
@@ -833,21 +833,22 @@ impl OzzyToml {
                         }
                     }
                     EdgeSource::Endpoint(ref_str) => {
-                        if ref_str.contains('/') {
-                            let pin_valid = ref_str
-                                .split_once('@')
-                                .is_some_and(|(_, pin)| !pin.is_empty());
-                            if !pin_valid {
-                                errors.push(ValidationError {
-                                    location: format!("{}.from", edge_loc),
-                                    message: format!(
-                                        "Cross-project endpoint ref \"{}\" must include @sha_or_tag.",
-                                        ref_str
-                                    ),
-                                    suggestion: None,
-                                });
-                            }
-                        }
+                        let message = if ref_str.contains('/') {
+                            format!(
+                                "Endpoint source \"{}\" is not implemented in v4 yet. Cross-project endpoint refs cannot be published.",
+                                ref_str
+                            )
+                        } else {
+                            format!(
+                                "Endpoint source \"{}\" is not implemented in v4 yet. Use endpoint inputs or node outputs instead.",
+                                ref_str
+                            )
+                        };
+                        errors.push(ValidationError {
+                            location: format!("{}.from", edge_loc),
+                            message,
+                            suggestion: None,
+                        });
                     }
                 }
             }
@@ -883,6 +884,7 @@ impl OzzyToml {
             }
 
             self.validate_no_cycles(endpoint_name, endpoint, errors);
+            self.validate_single_terminal(endpoint_name, endpoint, errors);
 
             const RESERVED_PARAM_NAMES: &[&str] = &["ref", "format"];
             let mut bind_targets: HashMap<String, Vec<String>> = HashMap::new();
@@ -1022,6 +1024,47 @@ impl OzzyToml {
             errors.push(ValidationError {
                 location: format!("endpoints.{}", endpoint_name),
                 message: "Endpoint DAG contains a cycle.".to_string(),
+                suggestion: None,
+            });
+        }
+    }
+
+    fn validate_single_terminal(
+        &self,
+        endpoint_name: &str,
+        endpoint: &EndpointDef,
+        errors: &mut Vec<ValidationError>,
+    ) {
+        let node_names: HashSet<&str> = endpoint.nodes.keys().map(String::as_str).collect();
+        let mut has_outgoing: HashSet<&str> = HashSet::new();
+
+        for edge in &endpoint.edges {
+            if node_names.contains(edge.from.as_str()) {
+                let to_node = edge.to.split('.').next().unwrap_or(&edge.to);
+                if node_names.contains(to_node) && edge.from.as_str() != to_node {
+                    has_outgoing.insert(edge.from.as_str());
+                }
+            }
+        }
+
+        let terminals = node_names
+            .iter()
+            .filter(|name| !has_outgoing.contains(**name))
+            .copied()
+            .collect::<Vec<_>>();
+
+        if terminals.len() > 1 {
+            let mut names = terminals
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            names.sort();
+            errors.push(ValidationError {
+                location: format!("endpoints.{}", endpoint_name),
+                message: format!(
+                    "Endpoint has multiple terminal nodes: {:?}. Endpoints must resolve to exactly one terminal node.",
+                    names
+                ),
                 suggestion: None,
             });
         }

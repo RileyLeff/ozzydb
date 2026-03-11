@@ -29,6 +29,7 @@ blake3 = "1"
 # Data formats
 arrow = { version = "54", features = ["ipc", "json"] }
 parquet = { version = "54", features = ["arrow", "zstd", "lz4"] }
+csv = "1"
 
 # Local database for cache index
 rusqlite = { version = "0.32", features = ["bundled"] }

@@ -17,6 +17,7 @@ mod publication;
 pub mod registry;
 pub mod runners;
 pub mod storage;
+pub mod verification;
 
 use std::sync::Arc;
 

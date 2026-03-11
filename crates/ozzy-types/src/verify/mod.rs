@@ -37,6 +37,8 @@ pub struct VerificationReport {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum VerificationInput {
+    Bytes(Vec<u8>),
+    Json(Value),
     Scalar(Literal),
     Csv(CsvWitness),
     Table(TableWitness),
@@ -50,6 +52,8 @@ pub enum VerificationInput {
 impl VerificationInput {
     fn kind_name(&self) -> &'static str {
         match self {
+            Self::Bytes(_) => "bytes",
+            Self::Json(_) => "json",
             Self::Scalar(_) => "scalar",
             Self::Csv(_) => "csv_witness",
             Self::Table(_) => "table_witness",
@@ -342,6 +346,8 @@ fn verify_builtin(
     input: &VerificationInput,
 ) -> Result<ExecutionOutcome, VerificationError> {
     match input {
+        VerificationInput::Bytes(bytes) => verify_bytes_builtin(builtin, bytes),
+        VerificationInput::Json(value) => verify_json_builtin(builtin, value),
         VerificationInput::Scalar(literal) => verify_scalar_builtin(builtin, literal),
         VerificationInput::TableColumn(column) => verify_column_builtin(builtin, column),
         VerificationInput::ParquetFile(path) if builtin == BuiltinType::Parquet => {
@@ -352,16 +358,85 @@ fn verify_builtin(
             expected: match builtin {
                 BuiltinType::Parquet => "parquet_file",
                 BuiltinType::Bytes
+                | BuiltinType::Json
                 | BuiltinType::Utf8
                 | BuiltinType::String
                 | BuiltinType::Bool
                 | BuiltinType::Int64
                 | BuiltinType::Float64
                 | BuiltinType::Date
-                | BuiltinType::DateTime => "scalar or table_column_witness",
-                BuiltinType::Json => "scalar",
+                | BuiltinType::DateTime => "bytes, json, scalar, or table_column_witness",
             },
             actual: input.kind_name(),
+        }),
+    }
+}
+
+fn verify_bytes_builtin(
+    builtin: BuiltinType,
+    bytes: &[u8],
+) -> Result<ExecutionOutcome, VerificationError> {
+    match builtin {
+        BuiltinType::Bytes => Ok(ExecutionOutcome::verified(json!({
+            "kind": "bytes_builtin",
+            "builtin": builtin.as_str(),
+            "length": bytes.len(),
+        }))),
+        BuiltinType::Utf8 | BuiltinType::String => {
+            let evidence = json!({
+                "kind": "bytes_text_builtin",
+                "builtin": builtin.as_str(),
+                "length": bytes.len(),
+            });
+            Ok(if std::str::from_utf8(bytes).is_ok() {
+                ExecutionOutcome::verified(evidence)
+            } else {
+                ExecutionOutcome::rejected(
+                    format!("bytes do not satisfy builtin '{}'", builtin.as_str()),
+                    evidence,
+                )
+            })
+        }
+        _ => Err(VerificationError::InputKindMismatch {
+            expected: match builtin {
+                BuiltinType::Json => "json",
+                BuiltinType::Bool
+                | BuiltinType::Int64
+                | BuiltinType::Float64
+                | BuiltinType::Date
+                | BuiltinType::DateTime => "scalar or table_column_witness",
+                BuiltinType::Parquet => "parquet_file",
+                BuiltinType::Bytes | BuiltinType::Utf8 | BuiltinType::String => unreachable!(),
+            },
+            actual: "bytes",
+        }),
+    }
+}
+
+fn verify_json_builtin(
+    builtin: BuiltinType,
+    value: &Value,
+) -> Result<ExecutionOutcome, VerificationError> {
+    match builtin {
+        BuiltinType::Json => Ok(ExecutionOutcome::verified(json!({
+            "kind": "json_builtin",
+            "builtin": builtin.as_str(),
+            "value": value,
+        }))),
+        _ => Err(VerificationError::InputKindMismatch {
+            expected: match builtin {
+                BuiltinType::Bool
+                | BuiltinType::Int64
+                | BuiltinType::Float64
+                | BuiltinType::Utf8
+                | BuiltinType::String
+                | BuiltinType::Date
+                | BuiltinType::DateTime => "scalar or table_column_witness",
+                BuiltinType::Bytes => "bytes",
+                BuiltinType::Parquet => "parquet_file",
+                BuiltinType::Json => unreachable!(),
+            },
+            actual: "json",
         }),
     }
 }
@@ -1153,6 +1228,40 @@ mod tests {
                     ],
                     row_count: Some(10),
                 }),
+            )
+            .expect("verification should run");
+
+        assert_eq!(report.verdict, VerificationVerdict::Verified);
+    }
+
+    #[test]
+    fn bytes_builtin_accepts_raw_bytes() {
+        let defs = TypeDefinitions::default();
+        let published = TypeRegistry::default();
+        let registry = BuiltinVerifierRegistry;
+        let report = registry
+            .verify(
+                &defs,
+                &published,
+                &TypeExpr::ref_("bytes"),
+                &VerificationInput::Bytes(vec![0_u8, 1, 2]),
+            )
+            .expect("verification should run");
+
+        assert_eq!(report.verdict, VerificationVerdict::Verified);
+    }
+
+    #[test]
+    fn json_builtin_accepts_json_values() {
+        let defs = TypeDefinitions::default();
+        let published = TypeRegistry::default();
+        let registry = BuiltinVerifierRegistry;
+        let report = registry
+            .verify(
+                &defs,
+                &published,
+                &TypeExpr::ref_("json"),
+                &VerificationInput::Json(json!({"a": 1})),
             )
             .expect("verification should run");
 

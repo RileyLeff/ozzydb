@@ -877,7 +877,7 @@ impl Database {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn persist_v4_invocation_success(
+    pub async fn persist_v4_invocation_output(
         &self,
         invocation_id: Uuid,
         project_id: Uuid,
@@ -886,7 +886,7 @@ impl Database {
         output_type_version_id: Uuid,
         output_content_type: &str,
         created_by: Uuid,
-    ) -> Result<(StoredInvocation, StoredArtifact, StoredConformanceRecord), V4QueryError> {
+    ) -> Result<(StoredArtifact, StoredConformanceRecord, Value), V4QueryError> {
         self.validate_v4_conformance_subject_for_project(project_id, output_type_version_id)
             .await?;
 
@@ -957,30 +957,16 @@ impl Database {
             )
         })?;
 
-        let invocation = sqlx::query_as::<_, StoredInvocation>(
-            r#"
-            UPDATE v4_invocations
-            SET status = 'succeeded',
-                output_bindings = $2,
-                completed_at = now(),
-                started_at = COALESCE(started_at, created_at)
-            WHERE id = $1
-            RETURNING *
-            "#,
-        )
-        .bind(invocation_id)
-        .bind(json!({
+        let output_bindings = json!({
             output_port_name: {
                 "artifact_id": artifact.id,
                 "content_hash": output_hash,
                 "content_type": output_content_type,
             }
-        }))
-        .fetch_one(&mut *tx)
-        .await?;
+        });
 
         tx.commit().await?;
-        Ok((invocation, artifact, conformance))
+        Ok((artifact, conformance, output_bindings))
     }
 
     pub async fn insert_v4_artifact(
