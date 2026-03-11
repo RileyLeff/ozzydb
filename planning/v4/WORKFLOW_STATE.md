@@ -606,8 +606,8 @@
   - `planning/reviews/v4/27_phase5_external_review_fixes.md`
 
 
-## Current Phase: Phase 7 in progress
-## Current Step: Phase 7.2 next; the CLI now targets the live v4 API
+## Current Phase: Phase 7 complete
+## Current Step: Phase 8.1 next; both clients now target the live v4 API
 
 ### Phase 6.1: Rewrite endpoint inspection APIs
 - Added a shared v4 inspection layer in `crates/ozzy-server/src/api/v1/inspection.rs`.
@@ -719,3 +719,22 @@
   - `cargo check -p ozzy-server --tests`
 - Review artifact:
   - `planning/reviews/v4/31_phase7_1_review.md`
+
+### Phase 7.2: Rewrite Python client for v4 fetch and inspection
+- Removed the obsolete project/data/collection client ontology.
+- Reworked the Python client around the live v4 API:
+  - typed endpoint fetch
+  - endpoint inspection
+  - artifact upload/list/get/download
+  - manifest artifact creation
+  - artifact conformance inspection/declaration
+- Replaced the stale response dataclasses with v4 client types for:
+  - typed endpoint inputs/ports
+  - transform/environment inspection
+  - artifacts and manifests
+  - conformance records and verification attempts
+- Bumped the Python package version to `0.3.0` because the public client surface is intentionally breaking from the old API.
+- Verification for this checkpoint:
+  - `cd clients/python && .venv/bin/pytest -q`
+- Review artifact:
+  - `planning/reviews/v4/32_phase7_2_review.md`

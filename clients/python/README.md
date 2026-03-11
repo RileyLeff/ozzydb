@@ -1,14 +1,10 @@
 # OzzyDB Python Client
 
-Python client for OzzyDB - the data management platform for scientific computing.
+Python client for OzzyDB v4.
 
 ## Installation
 
 ```bash
-# Using uv (recommended)
-uv pip install ozzydb
-
-# Or from source
 cd clients/python
 uv pip install -e .
 ```
@@ -18,127 +14,71 @@ uv pip install -e .
 ```python
 import ozzydb as ozzy
 
-# Fetch data from the registry
-df = ozzy.fetch("rileyleff/sapflux/corrected_readings", qc_threshold=12.0)
+# Fetch endpoint output
+result = ozzy.fetch(
+    "rileyleff/sapflux/corrected_readings",
+    species="oak",
+    threshold=12.0,
+)
 
-# Fetch as pandas DataFrame
-df = ozzy.fetch("rileyleff/sapflux/corrected_readings", as_pandas=True)
+# Bind explicit artifact inputs to typed endpoint input ports
+result = ozzy.fetch(
+    "rileyleff/sapflux/corrected_readings",
+    inputs={"raw": "123e4567-e89b-12d3-a456-426614174000"},
+)
 
-# Lazy fetch (returns polars LazyFrame, parquet only)
-lf = ozzy.fetch_lazy("rileyleff/sapflux/corrected_readings")
-result = lf.filter(pl.col("year") == 2024).collect()
+# Inspect an endpoint without executing it
+endpoint = ozzy.inspect("rileyleff/sapflux/corrected_readings")
+print(endpoint.terminal_node)
+print(endpoint.inputs)
+print(endpoint.nodes)
 
-# Inspect endpoint metadata without executing
-meta = ozzy.inspect("rileyleff/sapflux/corrected_readings")
-print(meta.params)
-print(meta.nodes)
+# Upload a blob artifact
+uploaded = ozzy.upload_artifact("rileyleff/sapflux", "data/raw.parquet")
+print(uploaded.artifact_id)
 
-# Inspect a project
-project = ozzy.inspect_project("rileyleff/sapflux")
-print(project.refs)
-print(project.commit_count)
+# Create manifest artifacts
+bundle = ozzy.create_bundle_artifact(
+    "rileyleff/sapflux",
+    {"raw": uploaded.artifact_id},
+)
+collection = ozzy.create_collection_artifact(
+    "rileyleff/sapflux",
+    [uploaded.artifact_id],
+)
 
-# Upload data
-result = ozzy.upload("rileyleff/sapflux", "data/raw.parquet", name="raw")
-print(result.hash)
+# Inspect artifacts and conformance
+artifact = ozzy.get_artifact("rileyleff/sapflux", uploaded.artifact_id)
+conformance = ozzy.get_artifact_conformance("rileyleff/sapflux", uploaded.artifact_id)
 
-# Download data
-data = ozzy.download("rileyleff/sapflux", "raw")
-# Or as a DataFrame:
-df = ozzy.download_dataframe("rileyleff/sapflux", "raw")
+# Declare conformance against a published version-pinned type
+record = ozzy.declare_conformance(
+    "rileyleff/sapflux",
+    uploaded.artifact_id,
+    "RawCsv@1",
+)
 
-# Local execution (requires ozzy CLI)
-df = ozzy.run("corrected_readings", qc_threshold=12.0)
+# Download a blob artifact. Tabular formats are decoded to polars by default.
+downloaded = ozzy.download_artifact("rileyleff/sapflux", uploaded.artifact_id)
 ```
 
-## API Reference
+## Public API
 
-### `ozzy.fetch(ref, *, as_pandas=False, ref_name=None, **params)`
+- `fetch(ref, *, inputs=None, ref_name=None, as_pandas=False, **params)`
+- `fetch_lazy(ref, *, inputs=None, ref_name=None, **params)`
+- `inspect(ref, *, ref_name=None)`
+- `list_endpoints(project, *, ref_name=None)`
+- `upload_artifact(project, file, *, content_type=None)`
+- `list_artifacts(project)`
+- `get_artifact(project, artifact_id)`
+- `download_artifact(project, artifact_id, *, as_pandas=False)`
+- `create_bundle_artifact(project, entries)`
+- `create_collection_artifact(project, items)`
+- `get_artifact_conformance(project, artifact_id)`
+- `declare_conformance(project, artifact_id, type_ref, *, verify=True)`
 
-Fetch endpoint output from the OzzyDB registry.
+## Notes
 
-**Arguments:**
-- `ref`: Remote reference in `"owner/project/endpoint"` format
-- `as_pandas`: If True, return a pandas DataFrame instead of polars
-- `ref_name`: Git ref (branch/tag) to resolve against
-- `**params`: Endpoint parameters
-
-**Returns:** `polars.DataFrame`, `pandas.DataFrame`, or `bytes`
-
-### `ozzy.fetch_lazy(ref, *, ref_name=None, **params)`
-
-Fetch endpoint output as a polars LazyFrame (parquet only).
-
-**Returns:** `polars.LazyFrame`
-
-### `ozzy.inspect(ref, *, ref_name=None)`
-
-Inspect endpoint metadata without executing it.
-
-**Returns:** `EndpointDetail` with params, nodes, edges
-
-### `ozzy.inspect_project(ref)`
-
-Inspect a project's metadata.
-
-**Returns:** `ProjectDetail` with refs, collaborators, commit count
-
-### `ozzy.run(endpoint, *, cwd=None, as_pandas=False, force=False, **params)`
-
-Execute an endpoint locally via the ozzy CLI.
-
-**Arguments:**
-- `endpoint`: Endpoint name from local `ozzy.toml`
-- `cwd`: Working directory (defaults to current directory)
-- `as_pandas`: Return pandas DataFrame instead of polars
-- `force`: Force re-execution, ignoring cache
-- `**params`: Endpoint parameters
-
-**Returns:** `polars.DataFrame`, `pandas.DataFrame`, or `bytes`
-
-### `ozzy.upload(project, file, *, name=None, content_type=None, collection=None)`
-
-Upload a data atom to the registry.
-
-**Returns:** `UploadResult` with name, hash, byte_size
-
-### `ozzy.download(project, name)`
-
-Download a data atom as raw bytes.
-
-**Returns:** `bytes`
-
-### `ozzy.download_dataframe(project, name, *, as_pandas=False)`
-
-Download a data atom and read it as a DataFrame.
-
-**Returns:** `polars.DataFrame` or `pandas.DataFrame`
-
-### `ozzy.OzzyClient(base_url=None, token=None)`
-
-HTTP client for the OzzyDB API. Uses credentials from `~/.config/ozzy/credentials.json` if available.
-
-## Authentication
-
-The client reads credentials from `~/.config/ozzy/credentials.json` (created by `ozzy auth login`). You can also pass a token explicitly:
-
-```python
-client = ozzy.OzzyClient(token="your-api-token")
-df = ozzy.fetch("owner/project/endpoint", client=client)
-```
-
-## Requirements
-
-- Python >= 3.10
-- polars >= 1.0.0
-- pyarrow >= 15.0.0
-- requests >= 2.28.0
-- ozzy CLI (only for `run()` — not needed for remote operations)
-
-## Development
-
-```bash
-cd clients/python
-uv sync --all-groups
-uv run pytest -v
-```
+- This client targets the v4 API directly.
+- It does not preserve the old data-atom / collection / project-inspection API surface.
+- Endpoint parameter values are sent as JSON values, not query-string strings.

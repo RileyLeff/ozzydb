@@ -1,154 +1,67 @@
-"""OzzyDB type definitions — dataclasses matching v2 server API responses."""
+"""OzzyDB Python client types for the v4 API."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields as dc_fields
+from dataclasses import dataclass, fields as dc_fields
 from typing import Any
 
 
-# ── Projects ─────────────────────────────────────────────────────
+@dataclass
+class ArtifactManifestEntry:
+    artifact_id: str
 
 
 @dataclass
-class RefInfo:
-    name: str
-    ref_type: str
-    commit_sha: str | None
+class ArtifactManifest:
+    kind: str
+    entries: dict[str, ArtifactManifestEntry] | None = None
+    items: list[ArtifactManifestEntry] | None = None
 
 
 @dataclass
-class CollaboratorInfo:
-    username: str
-    role: str
-
-
-@dataclass
-class ProjectInfo:
-    owner: str
-    slug: str
-    description: str | None
-    visibility: str
-    created_at: str
-    updated_at: str
-
-
-@dataclass
-class ProjectDetail:
-    owner: str
-    slug: str
-    description: str | None
-    visibility: str
-    created_at: str
-    updated_at: str
-    commit_count: int
-    refs: list[RefInfo]
-    collaborators: list[CollaboratorInfo]
-
-
-# ── Data Atoms ───────────────────────────────────────────────────
-
-
-@dataclass
-class DataAtom:
-    id: str
-    name: str
-    hash: str
-    content_type: str
-    byte_size: int
-    yanked: bool
-    created_at: str
-
-
-@dataclass
-class DataAtomDetail:
-    id: str
-    name: str
-    hash: str
-    content_type: str
-    byte_size: int
-    yanked: bool
-    created_at: str
-    uploaded_by: str
-    yank_reason: str | None
-    yanked_at: str | None
-    metadata: dict[str, Any]
-
-
-@dataclass
-class MetadataEntry:
-    field: str
-    value: Any
-    set_by: str
-    created_at: str
-
-
-@dataclass
-class UploadResult:
-    name: str
-    hash: str
+class UploadArtifactResult:
+    artifact_id: str
+    content_hash: str
     content_type: str
     byte_size: int
     deduplicated: bool
-    collection_version: int | None
-
-
-# ── Collections ──────────────────────────────────────────────────
+    created_at: str | None = None
 
 
 @dataclass
-class MemberInfo:
-    member_type: str
-    member_ref: str
-    member_hash: str
-    ordinal: int
-
-
-@dataclass
-class VersionDetail:
-    version_number: int
-    hash: str
-    created_by: str
-    created_at: str
-    members: list[MemberInfo]
-
-
-@dataclass
-class VersionLogEntry:
-    version_number: int
-    hash: str
-    created_by: str
-    created_at: str
-
-
-@dataclass
-class CollectionInfo:
+class ArtifactSummary:
     id: str
-    name: str
-    yanked: bool
+    artifact_kind: str
+    content_hash: str | None
+    source_invocation_id: str | None
     created_at: str
-    latest_version: int | None
-    member_count: int | None
 
 
 @dataclass
-class CollectionDetail:
+class ArtifactDetail:
     id: str
-    name: str
-    yanked: bool
-    yank_reason: str | None
-    yanked_at: str | None
+    artifact_kind: str
+    content_hash: str | None
+    manifest: ArtifactManifest | None
+    source_invocation_id: str | None
     created_at: str
-    version: VersionDetail | None
 
 
 @dataclass
-class FlattenedAtom:
+class TypeRefDetail:
+    reference: str
     name: str
-    hash: str
-    path: list[str]
+    version: str
+    type_version_id: str
+    canonical_type_key: str
+    expr: Any
 
 
-# ── Endpoints ────────────────────────────────────────────────────
+@dataclass
+class TypedPortDetail:
+    name: str
+    description: str | None
+    type_ref: TypeRefDetail
 
 
 @dataclass
@@ -172,15 +85,36 @@ class ParamDetail:
 
 
 @dataclass
+class TransformEnvironmentRef:
+    versioned_name: str
+    environment_version_id: str
+
+
+@dataclass
+class TransformInspection:
+    authored_name: str
+    versioned_name: str
+    transform_version_id: str
+    description: str | None
+    source: str | None
+    command: str | None
+    network: bool
+    secrets: list[str]
+    environment: TransformEnvironmentRef
+    inputs: list[TypedPortDetail]
+    outputs: list[TypedPortDetail]
+
+
+@dataclass
 class NodeDetail:
-    transform: str
+    name: str
     params: dict[str, Any]
-    machine: str | None
+    transform: TransformInspection
 
 
 @dataclass
 class EdgeDetail:
-    from_node: str  # server JSON key is "from" — Python reserved word
+    from_: str
     to: str
 
 
@@ -188,8 +122,11 @@ class EdgeDetail:
 class EndpointSummary:
     name: str
     description: str | None
+    inputs: list[TypedPortDetail]
     params: list[ParamSummary]
     node_count: int
+    edge_count: int
+    terminal_node: str
 
 
 @dataclass
@@ -197,8 +134,12 @@ class EndpointDetail:
     name: str
     description: str | None
     commit_sha: str
+    project_revision_id: str
+    registry_revision_id: str
+    terminal_node: str
+    inputs: list[TypedPortDetail]
     params: list[ParamDetail]
-    nodes: dict[str, NodeDetail]
+    nodes: list[NodeDetail]
     edges: list[EdgeDetail]
 
 
@@ -208,136 +149,211 @@ class DagResponse:
     content: str
 
 
-# ── Commits ──────────────────────────────────────────────────────
-
-
 @dataclass
-class CommitSummary:
+class TypeVersionDetail:
     id: str
-    git_commit_sha: str
-    git_provider: str
-    git_repo: str
-    message: str | None
-    pushed_by: str
-    created_at: str
-
-
-@dataclass
-class CommitDetail:
-    id: str
-    git_commit_sha: str
-    git_provider: str
-    git_repo: str
-    message: str | None
-    pushed_by: str
-    created_at: str
-    ozzy_toml_hash: str
-    environments: dict[str, Any]
-    transforms: dict[str, Any]
-    endpoints: dict[str, Any]
-
-
-# ── Secrets ──────────────────────────────────────────────────────
-
-
-@dataclass
-class SecretInfo:
     name: str
-    version_id: str
+    version: str
+    canonical_type_key: str
+    expr: Any
+    created_at: str | None = None
+
+
+@dataclass
+class VerificationAttemptDetail:
+    id: str
+    verifier: str
+    attempt_kind: str
+    verdict: str | None
+    diagnostics: Any
+    evidence: Any | None
+    failure_error: str | None
+    created_at: str
+
+
+@dataclass
+class ConformanceRecordDetail:
+    id: str
+    status: str
+    type_version: TypeVersionDetail
     created_at: str
     updated_at: str
-
-
-# ── Fetch Metadata ───────────────────────────────────────────────
+    attempts: list[VerificationAttemptDetail]
 
 
 @dataclass
-class FetchMetadata:
-    """Metadata extracted from fetch response headers."""
-
-    hash: str | None = None
-    cache: str | None = None
-    verification: str | None = None
-    content_type: str = "application/octet-stream"
+class ArtifactConformance:
+    artifact_id: str
+    records: list[ConformanceRecordDetail]
 
 
-# ── Deserialization helpers ──────────────────────────────────────
-
-
-def _from_dict(cls, data: dict) -> Any:
-    """Create a dataclass instance from a dict, handling nested types."""
-    if cls is ProjectDetail:
-        return ProjectDetail(
-            owner=data["owner"],
-            slug=data["slug"],
-            description=data.get("description"),
-            visibility=data["visibility"],
+def _from_dict(cls, data: dict[str, Any]) -> Any:
+    """Create a typed client object from API JSON."""
+    if cls is ArtifactManifestEntry:
+        return ArtifactManifestEntry(artifact_id=data["artifact_id"])
+    if cls is ArtifactManifest:
+        kind = data["kind"]
+        if kind == "bundle":
+            return ArtifactManifest(
+                kind=kind,
+                entries={
+                    name: _from_dict(ArtifactManifestEntry, entry)
+                    for name, entry in data.get("entries", {}).items()
+                },
+            )
+        if kind == "collection":
+            return ArtifactManifest(
+                kind=kind,
+                items=[
+                    _from_dict(ArtifactManifestEntry, item)
+                    for item in data.get("items", [])
+                ],
+            )
+        return ArtifactManifest(kind=kind)
+    if cls is ArtifactDetail:
+        manifest = data.get("manifest")
+        return ArtifactDetail(
+            id=data["id"],
+            artifact_kind=data["artifact_kind"],
+            content_hash=data.get("content_hash"),
+            manifest=_from_dict(ArtifactManifest, manifest) if manifest else None,
+            source_invocation_id=data.get("source_invocation_id"),
             created_at=data["created_at"],
-            updated_at=data["updated_at"],
-            commit_count=data["commit_count"],
-            refs=[_from_dict(RefInfo, r) for r in data.get("refs", [])],
-            collaborators=[
-                _from_dict(CollaboratorInfo, c)
-                for c in data.get("collaborators", [])
-            ],
+        )
+    if cls is ArtifactSummary:
+        return ArtifactSummary(**{k: data.get(k) for k in dc_fields_dict(ArtifactSummary)})
+    if cls is TypeRefDetail:
+        return TypeRefDetail(
+            reference=data["reference"],
+            name=data["name"],
+            version=data["version"],
+            type_version_id=data["type_version_id"],
+            canonical_type_key=data["canonical_type_key"],
+            expr=data.get("expr"),
+        )
+    if cls is TypedPortDetail:
+        return TypedPortDetail(
+            name=data["name"],
+            description=data.get("description"),
+            type_ref=_from_dict(TypeRefDetail, data["type"]),
+        )
+    if cls is ParamSummary:
+        return ParamSummary(
+            name=data["name"],
+            type=data["type"],
+            description=data.get("description"),
+            default=data.get("default"),
+        )
+    if cls is ParamDetail:
+        return ParamDetail(
+            name=data["name"],
+            type=data["type"],
+            description=data.get("description"),
+            default=data.get("default"),
+            min=data.get("min"),
+            max=data.get("max"),
+            enum=data.get("enum"),
+            binds=data["binds"],
+        )
+    if cls is TransformEnvironmentRef:
+        return TransformEnvironmentRef(
+            versioned_name=data["versioned_name"],
+            environment_version_id=data["environment_version_id"],
+        )
+    if cls is TransformInspection:
+        return TransformInspection(
+            authored_name=data["authored_name"],
+            versioned_name=data["versioned_name"],
+            transform_version_id=data["transform_version_id"],
+            description=data.get("description"),
+            source=data.get("source"),
+            command=data.get("command"),
+            network=data["network"],
+            secrets=list(data.get("secrets", [])),
+            environment=_from_dict(TransformEnvironmentRef, data["environment"]),
+            inputs=[_from_dict(TypedPortDetail, port) for port in data.get("inputs", [])],
+            outputs=[_from_dict(TypedPortDetail, port) for port in data.get("outputs", [])],
+        )
+    if cls is NodeDetail:
+        return NodeDetail(
+            name=data["name"],
+            params=data.get("params", {}),
+            transform=_from_dict(TransformInspection, data["transform"]),
+        )
+    if cls is EdgeDetail:
+        return EdgeDetail(from_=data["from"], to=data["to"])
+    if cls is EndpointSummary:
+        return EndpointSummary(
+            name=data["name"],
+            description=data.get("description"),
+            inputs=[_from_dict(TypedPortDetail, port) for port in data.get("inputs", [])],
+            params=[_from_dict(ParamSummary, param) for param in data.get("params", [])],
+            node_count=data["node_count"],
+            edge_count=data["edge_count"],
+            terminal_node=data["terminal_node"],
         )
     if cls is EndpointDetail:
         return EndpointDetail(
             name=data["name"],
             description=data.get("description"),
             commit_sha=data["commit_sha"],
-            params=[_from_dict(ParamDetail, p) for p in data.get("params", [])],
-            nodes={
-                k: _from_dict(NodeDetail, v)
-                for k, v in data.get("nodes", {}).items()
-            },
-            edges=[_from_dict(EdgeDetail, e) for e in data.get("edges", [])],
+            project_revision_id=data["project_revision_id"],
+            registry_revision_id=data["registry_revision_id"],
+            terminal_node=data["terminal_node"],
+            inputs=[_from_dict(TypedPortDetail, port) for port in data.get("inputs", [])],
+            params=[_from_dict(ParamDetail, param) for param in data.get("params", [])],
+            nodes=[_from_dict(NodeDetail, node) for node in data.get("nodes", [])],
+            edges=[_from_dict(EdgeDetail, edge) for edge in data.get("edges", [])],
         )
-    if cls is EndpointSummary:
-        return EndpointSummary(
-            name=data["name"],
-            description=data.get("description"),
-            params=[_from_dict(ParamSummary, p) for p in data.get("params", [])],
-            node_count=data["node_count"],
-        )
-    if cls is CollectionDetail:
-        version = data.get("version")
-        return CollectionDetail(
+    if cls is TypeVersionDetail:
+        return TypeVersionDetail(
             id=data["id"],
             name=data["name"],
-            yanked=data["yanked"],
-            yank_reason=data.get("yank_reason"),
-            yanked_at=data.get("yanked_at"),
-            created_at=data["created_at"],
-            version=_from_dict(VersionDetail, version) if version else None,
+            version=data["version"],
+            canonical_type_key=data["canonical_type_key"],
+            expr=data.get("expr"),
+            created_at=data.get("created_at"),
         )
-    if cls is VersionDetail:
-        return VersionDetail(
-            version_number=data["version_number"],
-            hash=data["hash"],
-            created_by=data["created_by"],
+    if cls is VerificationAttemptDetail:
+        return VerificationAttemptDetail(
+            id=data["id"],
+            verifier=data["verifier"],
+            attempt_kind=data["attempt_kind"],
+            verdict=data.get("verdict"),
+            diagnostics=data.get("diagnostics"),
+            evidence=data.get("evidence"),
+            failure_error=data.get("failure_error"),
             created_at=data["created_at"],
-            members=[
-                _from_dict(MemberInfo, m) for m in data.get("members", [])
+        )
+    if cls is ConformanceRecordDetail:
+        return ConformanceRecordDetail(
+            id=data["id"],
+            status=data["status"],
+            type_version=_from_dict(TypeVersionDetail, data["type_version"]),
+            created_at=data["created_at"],
+            updated_at=data["updated_at"],
+            attempts=[
+                _from_dict(VerificationAttemptDetail, attempt)
+                for attempt in data.get("attempts", [])
             ],
         )
-    if cls is EdgeDetail:
-        # Server JSON uses "from" which is a Python reserved word
-        return EdgeDetail(from_node=data["from"], to=data["to"])
-    if cls is CommitDetail:
-        return CommitDetail(
-            id=data["id"],
-            git_commit_sha=data["git_commit_sha"],
-            git_provider=data["git_provider"],
-            git_repo=data["git_repo"],
-            message=data.get("message"),
-            pushed_by=data["pushed_by"],
-            created_at=data["created_at"],
-            ozzy_toml_hash=data["ozzy_toml_hash"],
-            environments=data.get("environments", {}),
-            transforms=data.get("transforms", {}),
-            endpoints=data.get("endpoints", {}),
+    if cls is ArtifactConformance:
+        return ArtifactConformance(
+            artifact_id=data["artifact_id"],
+            records=[_from_dict(ConformanceRecordDetail, record) for record in data.get("records", [])],
         )
-    # Simple dataclasses — construct from dict, filtering to known fields
+    if cls is UploadArtifactResult:
+        return UploadArtifactResult(
+            artifact_id=data["artifact_id"],
+            content_hash=data["content_hash"],
+            content_type=data["content_type"],
+            byte_size=data["byte_size"],
+            deduplicated=data["deduplicated"],
+            created_at=data.get("created_at"),
+        )
     known = {f.name for f in dc_fields(cls)}
     return cls(**{k: v for k, v in data.items() if k in known})
+
+
+def dc_fields_dict(cls) -> dict[str, Any]:
+    return {f.name: f for f in dc_fields(cls)}

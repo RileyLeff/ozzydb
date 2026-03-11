@@ -1,14 +1,14 @@
 [project]
 name = "ozzydb"
-version = "0.2.0"
-description = "Python client for OzzyDB - version control for data transformations"
+version = "0.3.0"
+description = "Python client for OzzyDB v4"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "Riley Leff" }
 ]
-keywords = ["data", "versioning", "reproducibility", "science", "parquet"]
+keywords = ["data", "versioning", "reproducibility", "science", "artifacts"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -24,6 +24,7 @@ dependencies = [
     "polars>=1.0.0",
     "pyarrow>=15.0.0",
     "requests>=2.28.0",
+    "blake3>=1.0.0",
 ]
 
 [project.optional-dependencies]
