@@ -564,7 +564,23 @@ fn contains_builtin(expr: &TypeExpr, builtin: BuiltinType) -> bool {
 }
 
 fn describe_type_expr(expr: &TypeExpr) -> String {
-    serde_json::to_string(expr).unwrap_or_else(|_| "<type-expr>".to_string())
+    match expr {
+        TypeExpr::Builtin(builtin) => builtin.as_str().to_string(),
+        TypeExpr::Ref(type_ref) => match &type_ref.version {
+            Some(version) => format!("{}@{}", type_ref.name, version),
+            None => type_ref.name.clone(),
+        },
+        TypeExpr::Intersection(parts) => parts
+            .iter()
+            .map(describe_type_expr)
+            .collect::<Vec<_>>()
+            .join(" & "),
+        TypeExpr::Constructor(constructor) => constructor.name.as_str().to_string(),
+        TypeExpr::Record(_) => "record".to_string(),
+        TypeExpr::Collection(_) => "collection".to_string(),
+        TypeExpr::Table(_) => "table".to_string(),
+        TypeExpr::Never => "never".to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

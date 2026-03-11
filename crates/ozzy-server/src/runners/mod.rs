@@ -61,7 +61,7 @@ pub fn validate_source_ref(source: &str) -> Result<(&str, &str), &'static str> {
 ///
 /// Returns `None` for unrecognized extensions so callers can surface a clear error.
 pub fn detect_runner_type(source: &str) -> Option<RunnerType> {
-    let (file_path, _) = parse_source_ref(source).unwrap_or((source, ""));
+    let (file_path, _) = parse_source_ref(source)?;
     if file_path.ends_with(".py") {
         Some(RunnerType::Python)
     } else if file_path.ends_with(".R") || file_path.ends_with(".r") {

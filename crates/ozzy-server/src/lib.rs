@@ -2,9 +2,10 @@
 
 //! OzzyDB Registry Server Library
 //!
-//! v2: The server stores data atoms, manages environments, orchestrates compute,
-//! and caches materialized results. Auth, storage, and project ownership survive
-//! from v1; compute and the wire protocol are being rebuilt.
+//! The server owns the v4 registry, artifact, and execution control plane.
+//! Auth, storage, and project ownership survive from earlier versions, but the
+//! runtime model is now centered on typed artifacts, registry snapshots, and
+//! published project revisions.
 
 pub mod api;
 pub mod auth;

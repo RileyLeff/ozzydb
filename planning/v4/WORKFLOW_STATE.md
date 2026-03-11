@@ -1,7 +1,7 @@
 # v4 Workflow State
 
-## Current Phase: Phase 5 underway
-## Current Step: Phase 5.3 next; typed fetch rewrite is complete
+## Current Phase: Phase 8 underway
+## Current Step: Phase 8.3 next; stabilization review is complete
 
 ## Completed Steps
 
@@ -755,3 +755,19 @@
   - `cargo check -p ozzy-server --tests`
 - Review artifact:
   - `planning/reviews/v4/33_phase8_1_review.md`
+
+
+### Phase 8.2: Review and simplify aggressively
+- Removed remaining fallback-style error-body handling from the GitHub and Fly integration paths.
+- Removed the fallback parser branch from runner detection.
+- Replaced the verification type-description fallback with explicit rendering.
+- Cleaned stale v2/v3 wording in comments and tests.
+- Removed the standing `unused_parens` warning noise in `db_tests.rs`.
+- Verification for this checkpoint:
+  - `cargo fmt`
+  - `cargo test -p ozzy-cli`
+  - `cargo test -p ozzy-core`
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/34_phase8_2_review.md`

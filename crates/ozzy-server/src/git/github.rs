@@ -20,6 +20,10 @@ use crate::db::Database;
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const USER_AGENT: &str = "OzzyDB";
 
+async fn read_error_body(resp: reqwest::Response, context: &'static str) -> Result<String> {
+    resp.text().await.context(context)
+}
+
 /// Errors specific to git provider operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -150,7 +154,8 @@ impl GitHubProvider {
                 Err(GitError::InstallationNotFound(owner.to_string()).into())
             }
             status => {
-                let body = resp.text().await.unwrap_or_default();
+                let body =
+                    read_error_body(resp, "Failed to read GitHub archive error body").await?;
                 Err(GitError::Api { status, body }.into())
             }
         }
@@ -199,7 +204,7 @@ impl GitHubProvider {
                 Err(GitError::InstallationNotFound(owner.to_string()).into())
             }
             status => {
-                let body = resp.text().await.unwrap_or_default();
+                let body = read_error_body(resp, "Failed to read GitHub file error body").await?;
                 Err(GitError::Api { status, body }.into())
             }
         }
@@ -278,7 +283,8 @@ impl GitHubProvider {
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_error_body(resp, "Failed to read GitHub installation token error body")
+                .await?;
             return Err(anyhow!(
                 "Failed to get installation token (HTTP {}): {}",
                 status,
@@ -319,7 +325,8 @@ impl GitHubProvider {
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
+            let body =
+                read_error_body(resp, "Failed to read GitHub ref resolution error body").await?;
             return Err(GitError::Api { status, body }.into());
         }
 

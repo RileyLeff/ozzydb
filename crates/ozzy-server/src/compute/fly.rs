@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 use super::types::{ComputeBackend, ComputeRequest, ComputeResult};
 use crate::config::FlyConfig;
 
+async fn read_error_body(resp: reqwest::Response, context: &'static str) -> Result<String> {
+    resp.text().await.context(context)
+}
+
 /// Fly Machines compute backend.
 #[derive(Clone)]
 pub struct FlyBackend {
@@ -116,10 +120,11 @@ impl FlyBackend {
 
         if !create_resp.status().is_success() {
             let status = create_resp.status();
-            let body = create_resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "no body".into());
+            let body = read_error_body(
+                create_resp,
+                "Failed to read Fly machine creation error body",
+            )
+            .await?;
             anyhow::bail!("Fly Machine creation failed ({}): {}", status, body);
         }
 
@@ -249,7 +254,7 @@ impl FlyBackend {
             }
 
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_else(|_| "no body".into());
+            let body = read_error_body(resp, "Failed to read Fly wait error body").await?;
             anyhow::bail!("Fly Machine wait failed ({}): {}", status, body);
         }
     }
@@ -272,7 +277,7 @@ impl FlyBackend {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_else(|_| "no body".into());
+            let body = read_error_body(resp, "Failed to read Fly machine state error body").await?;
             anyhow::bail!("Failed to get machine state ({}): {}", status, body);
         }
 
@@ -303,7 +308,7 @@ impl FlyBackend {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_else(|_| "no body".into());
+            let body = read_error_body(resp, "Failed to read Fly destroy error body").await?;
             anyhow::bail!("Failed to destroy machine ({}): {}", status, body);
         }
 
@@ -334,7 +339,7 @@ impl FlyBackend {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_else(|_| "no body".into());
+            let body = read_error_body(resp, "Failed to read Fly list machines error body").await?;
             anyhow::bail!("Failed to list machines ({}): {}", status, body);
         }
 

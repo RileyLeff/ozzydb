@@ -194,7 +194,7 @@ from ozzy import transform
 
 @transform(
     inputs={"raw": "raw"},
-    output_schema={"id": "int64", "value": "float64"}
+    outputs={"result": "cleaned"}
 )
 def clean_data(raw: pl.DataFrame) -> pl.DataFrame:
     return raw.select(["id", "value"]).drop_nulls()

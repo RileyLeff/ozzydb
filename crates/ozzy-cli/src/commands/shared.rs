@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn test_validate_name_accepts_valid() {
-        assert!(validate_name("my-dataset_v2", "data atom").is_ok());
+        assert!(validate_name("my-dataset_v2", "artifact").is_ok());
         assert!(validate_name("ABC123", "test").is_ok());
     }
 

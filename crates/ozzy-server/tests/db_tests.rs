@@ -50,7 +50,7 @@ async fn test_upsert_and_get_user() -> Result<()> {
         return Ok(());
     };
 
-    let github_id = (rand::random::<i64>() & i64::MAX);
+    let github_id = rand::random::<i64>() & i64::MAX;
     let login = unique_name("user");
 
     let user = db
@@ -100,7 +100,7 @@ async fn test_create_and_get_project() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -139,7 +139,7 @@ async fn test_get_or_create_project() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -169,7 +169,7 @@ async fn test_collaborators() -> Result<()> {
 
     let owner = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("owner"),
             None,
             None,
@@ -177,7 +177,7 @@ async fn test_collaborators() -> Result<()> {
         .await?;
     let collab = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("collab"),
             None,
             None,
@@ -236,7 +236,7 @@ async fn test_tokens() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -281,7 +281,7 @@ async fn test_project_scoped_token() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -319,7 +319,7 @@ async fn test_session_token_upsert() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -360,7 +360,7 @@ async fn test_commits() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -410,7 +410,7 @@ async fn test_refs() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -508,7 +508,7 @@ async fn test_github_installations() -> Result<()> {
         return Ok(());
     };
 
-    let install_id = (rand::random::<i64>() & i64::MAX);
+    let install_id = rand::random::<i64>() & i64::MAX;
     let login = unique_name("org");
 
     let inst = db
@@ -547,7 +547,7 @@ async fn test_update_and_delete_project() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -585,7 +585,7 @@ async fn test_secrets() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -712,7 +712,7 @@ async fn test_materialized_cache() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -880,7 +880,7 @@ async fn test_create_and_get_job() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -940,7 +940,7 @@ async fn test_find_active_job_dedup() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -1002,7 +1002,7 @@ async fn test_update_job_status_timestamps() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -1054,7 +1054,7 @@ async fn test_update_node_status() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -1106,7 +1106,7 @@ async fn test_set_job_output_and_error() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -1182,7 +1182,7 @@ async fn test_list_jobs() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,
@@ -1228,7 +1228,7 @@ async fn test_cleanup_expired_jobs() -> Result<()> {
 
     let user = db
         .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
+            rand::random::<i64>() & i64::MAX,
             &unique_name("user"),
             None,
             None,

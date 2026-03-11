@@ -53,7 +53,10 @@ pub async fn initiate_device_flow(config: &Config) -> Result<GitHubDeviceCodeRes
         .context("Failed to initiate device flow")?;
 
     if !response.status().is_success() {
-        let text = response.text().await.unwrap_or_default();
+        let text = response
+            .text()
+            .await
+            .context("Failed to read GitHub device flow error body")?;
         anyhow::bail!("GitHub device flow failed: {}", text);
     }
 
