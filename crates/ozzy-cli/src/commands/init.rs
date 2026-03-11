@@ -88,22 +88,30 @@ pub fn run(cwd: &Path) -> Result<()> {
     }
     toml.push('\n');
 
-    // Transform and endpoint placeholders
+    // Type, transform, and endpoint placeholders
+    toml.push_str("# Add local type aliases here:\n");
+    toml.push_str("# [types]\n");
+    toml.push_str("# RawCsv = 'csv(delimiter=\",\", header=true) & table<{ value: float64 }>'\n");
+    toml.push('\n');
     toml.push_str("# Add transforms here:\n");
     toml.push_str("# [transforms.my_transform]\n");
     toml.push_str("# source = \"transforms/my_transform.py:my_function\"\n");
     toml.push_str("# environment = \"default\"\n");
-    toml.push_str("# inputs.data = \"parquet\"\n");
-    toml.push_str("# output = \"parquet\"\n");
+    toml.push_str("# [transforms.my_transform.inputs.raw]\n");
+    toml.push_str("# type = \"RawCsv\"\n");
+    toml.push_str("# [transforms.my_transform.outputs.result]\n");
+    toml.push_str("# type = \"RawCsv\"\n");
     toml.push('\n');
     toml.push_str("# Add endpoints here:\n");
     toml.push_str("# [endpoints.my_endpoint]\n");
     toml.push_str("# description = \"...\"\n");
+    toml.push_str("# [endpoints.my_endpoint.inputs.raw]\n");
+    toml.push_str("# type = \"RawCsv\"\n");
     toml.push_str("# [endpoints.my_endpoint.nodes]\n");
     toml.push_str("# step = { transform = \"my_transform\" }\n");
     toml.push_str("# [[endpoints.my_endpoint.edges]]\n");
-    toml.push_str("# from = \"data:my_data\"\n");
-    toml.push_str("# to = \"step.data\"\n");
+    toml.push_str("# from = \"input:raw\"\n");
+    toml.push_str("# to = \"step.raw\"\n");
 
     std::fs::write(&toml_path, &toml).context("Failed to write ozzy.toml")?;
 
@@ -119,11 +127,12 @@ pub fn run(cwd: &Path) -> Result<()> {
     println!("\nCreated ozzy.toml");
     println!();
     println!("Next steps:");
-    println!("  1. Upload data:       ozzy data upload <file>");
-    println!("  2. Add transforms:    edit ozzy.toml [transforms] section");
-    println!("  3. Define endpoints:  edit ozzy.toml [endpoints] section");
-    println!("  4. Push to registry:  ozzy push");
-    println!("  5. Fetch results:     ozzy fetch <owner/project/endpoint>");
+    println!("  1. Upload artifacts:  ozzy artifact upload <file>");
+    println!("  2. Add types:         edit ozzy.toml [types] section");
+    println!("  3. Add transforms:    edit ozzy.toml [transforms] section");
+    println!("  4. Define endpoints:  edit ozzy.toml [endpoints] section");
+    println!("  5. Push to registry:  ozzy push");
+    println!("  6. Fetch results:     ozzy fetch <owner/project/endpoint>");
 
     Ok(())
 }

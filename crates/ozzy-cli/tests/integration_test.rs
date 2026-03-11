@@ -1,9 +1,8 @@
-//! Integration tests for OzzyDB CLI (v3).
+//! Integration tests for OzzyDB CLI (v4).
 //!
-//! v3 commands that talk to the registry (push, data, collection, endpoint,
-//! secret, fetch) require a running server, so they're tested in the server's
-//! E2E test suite. These tests cover offline behaviour: init, help text,
-//! error messages for missing config, and argument parsing.
+//! Commands that talk to the registry require a running server, so these tests
+//! cover offline behaviour: init, help text, error messages for missing config,
+//! and argument parsing.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -13,8 +12,6 @@ use tempfile::tempdir;
 fn ozzy() -> Command {
     Command::cargo_bin("ozzy").unwrap()
 }
-
-// ── Init ────────────────────────────────────────────────────────
 
 #[test]
 fn test_init_project() {
@@ -55,8 +52,6 @@ fn test_init_already_exists() {
         .stdout(predicate::str::contains("already initialized"));
 }
 
-// ── Help text ───────────────────────────────────────────────────
-
 #[test]
 fn test_help_output() {
     ozzy()
@@ -67,30 +62,15 @@ fn test_help_output() {
 }
 
 #[test]
-fn test_data_help() {
+fn test_artifact_help() {
     ozzy()
-        .args(["data", "--help"])
+        .args(["artifact", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("upload"))
-        .stdout(predicate::str::contains("ls"))
-        .stdout(predicate::str::contains("show"))
-        .stdout(predicate::str::contains("yank"))
-        .stdout(predicate::str::contains("download"));
-}
-
-#[test]
-fn test_collection_help() {
-    ozzy()
-        .args(["collection", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("create"))
-        .stdout(predicate::str::contains("add"))
-        .stdout(predicate::str::contains("rm"))
-        .stdout(predicate::str::contains("ls"))
-        .stdout(predicate::str::contains("log"))
-        .stdout(predicate::str::contains("flatten"));
+        .stdout(predicate::str::contains("bundle"))
+        .stdout(predicate::str::contains("collection"))
+        .stdout(predicate::str::contains("conformance"));
 }
 
 #[test]
@@ -132,34 +112,12 @@ fn test_fetch_help() {
         .success()
         .stdout(predicate::str::contains(
             "Fetch and execute a remote endpoint",
-        ));
+        ))
+        .stdout(predicate::str::contains("--input"));
 }
-
-// ── Error handling (no auth / no ozzy.toml) ─────────────────────
 
 #[test]
 fn test_push_requires_auth() {
-    let dir = tempdir().unwrap();
-
-    // Create minimal ozzy.toml
-    fs::write(
-        dir.path().join("ozzy.toml"),
-        "[project]\nname = \"test\"\nowner = \"alice\"\n[git]\nprovider = \"github\"\nrepo = \"alice/test\"\n[remote]\nurl = \"http://localhost:9999\"\n",
-    )
-    .unwrap();
-
-    // Push should fail because not logged in (no credentials file)
-    ozzy()
-        .current_dir(dir.path())
-        .env("HOME", dir.path()) // Isolate credential lookup
-        .args(["push"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("Not logged in"));
-}
-
-#[test]
-fn test_data_ls_requires_auth() {
     let dir = tempdir().unwrap();
 
     fs::write(
@@ -171,24 +129,40 @@ fn test_data_ls_requires_auth() {
     ozzy()
         .current_dir(dir.path())
         .env("HOME", dir.path())
-        .args(["data", "ls"])
+        .args(["push"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("Not logged in"));
 }
 
 #[test]
-fn test_data_upload_requires_file() {
-    ozzy().args(["data", "upload"]).assert().failure();
+fn test_artifact_ls_requires_auth() {
+    let dir = tempdir().unwrap();
+
+    fs::write(
+        dir.path().join("ozzy.toml"),
+        "[project]\nname = \"test\"\nowner = \"alice\"\n[git]\nprovider = \"github\"\nrepo = \"alice/test\"\n[remote]\nurl = \"http://localhost:9999\"\n",
+    )
+    .unwrap();
+
+    ozzy()
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .args(["artifact", "ls"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Not logged in"));
+}
+
+#[test]
+fn test_artifact_upload_requires_file() {
+    ozzy().args(["artifact", "upload"]).assert().failure();
 }
 
 #[test]
 fn test_push_requires_ozzy_toml() {
     let dir = tempdir().unwrap();
 
-    // Create fake credentials so auth passes.
-    // On macOS, dirs::config_dir() → $HOME/Library/Application Support
-    // On Linux, dirs::config_dir() → $HOME/.config
     let config_dir = if cfg!(target_os = "macos") {
         dir.path().join("Library/Application Support/ozzy")
     } else {
@@ -201,7 +175,6 @@ fn test_push_requires_ozzy_toml() {
     )
     .unwrap();
 
-    // Push should fail because no ozzy.toml
     ozzy()
         .current_dir(dir.path())
         .env("HOME", dir.path())
@@ -210,8 +183,6 @@ fn test_push_requires_ozzy_toml() {
         .failure()
         .stderr(predicate::str::contains("ozzy.toml"));
 }
-
-// ── Transform scaffold ──────────────────────────────────────────
 
 #[test]
 fn test_transform_scaffold() {
@@ -225,8 +196,6 @@ fn test_transform_scaffold() {
 
     assert!(dir.path().join("transforms/my_transform.py").exists());
 }
-
-// ── Cache (offline) ─────────────────────────────────────────────
 
 #[test]
 fn test_cache_operations() {
@@ -246,8 +215,6 @@ fn test_cache_operations() {
         .success();
 }
 
-// ── Fetch argument parsing ──────────────────────────────────────
-
 #[test]
 fn test_fetch_rejects_bad_endpoint_ref() {
     ozzy()
@@ -255,4 +222,13 @@ fn test_fetch_rejects_bad_endpoint_ref() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("Expected: owner/project/endpoint"));
+}
+
+#[test]
+fn test_fetch_rejects_non_json_param_values() {
+    ozzy()
+        .args(["fetch", "alice/test/run", "--param", "species=oak"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Strings must be quoted"));
 }

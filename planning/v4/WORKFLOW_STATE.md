@@ -606,8 +606,8 @@
   - `planning/reviews/v4/27_phase5_external_review_fixes.md`
 
 
-## Current Phase: Phase 7 next
-## Current Step: Phase 7.1 next; the v4 public API contract is now in place
+## Current Phase: Phase 7 in progress
+## Current Step: Phase 7.2 next; the CLI now targets the live v4 API
 
 ### Phase 6.1: Rewrite endpoint inspection APIs
 - Added a shared v4 inspection layer in `crates/ozzy-server/src/api/v1/inspection.rs`.
@@ -685,3 +685,37 @@
   - `cargo check -p ozzy-server --tests`
 - Review artifact:
   - `planning/reviews/v4/30_phase6_contract_cleanup_review.md`
+
+### Phase 7.1: Rewrite CLI around the v4 API
+- Removed the dead v3 CLI ontology instead of preserving compatibility wrappers:
+  - deleted `ozzy data ...`
+  - deleted `ozzy collection ...`
+- Added first-class `ozzy artifact ...` commands for the live v4 artifact API:
+  - `upload`
+  - `ls`
+  - `show`
+  - `download`
+  - `bundle`
+  - `collection`
+  - `conformance`
+- Reworked `ozzy fetch` around the live JSON request body:
+  - typed `inputs` bindings
+  - strict JSON parameter parsing
+  - no legacy query-param encoding
+- Reworked `ozzy endpoint` inspection around the live v4 inspection responses:
+  - typed endpoint inputs
+  - terminal node
+  - project/registry revision IDs
+  - resolved transform/environment/type identities
+- Updated `ozzy init` and transform scaffolding so newly created examples are v4-shaped:
+  - `[types]` aliases
+  - typed transform input/output ports
+  - endpoint `input:<name>` edge sources
+- Verification for this checkpoint:
+  - `cargo fmt`
+  - `cargo test -p ozzy-cli`
+  - `cargo test -p ozzy-core`
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/31_phase7_1_review.md`

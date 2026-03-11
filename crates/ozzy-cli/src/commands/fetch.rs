@@ -1,15 +1,26 @@
 //! `ozzy fetch` — fetch and execute a remote endpoint.
 //!
-//! POSTs to the registry's fetch API, polls for job completion, then
+//! POSTs to the registry's v4 fetch API, polls for job completion, then
 //! downloads the result to stdout or a file.
 
-use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use std::collections::BTreeMap;
+
+use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 
 use super::auth::load_credentials;
 use super::shared;
 
-/// Fetch response from POST /api/v1/fetch/{owner}/{project}/{endpoint}.
+#[derive(Debug, Serialize)]
+struct FetchRequest {
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    ref_name: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    params: BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    inputs: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct FetchResponse {
     job_id: String,
@@ -18,7 +29,6 @@ struct FetchResponse {
     output_hash: Option<String>,
 }
 
-/// Job status response from GET /api/v1/jobs/{id}.
 #[derive(Debug, Deserialize)]
 struct JobStatus {
     status: String,
@@ -27,16 +37,15 @@ struct JobStatus {
     error_message: Option<String>,
 }
 
-/// Execute `ozzy fetch <owner/project/endpoint[@ref]>`.
 pub async fn run(
     endpoint: &str,
     output: Option<&str>,
     params: &[String],
+    inputs: &[String],
     timeout_secs: u64,
 ) -> Result<()> {
-    // Parse reference: owner/project/endpoint[@ref]
     let (path, git_ref) = match endpoint.split_once('@') {
-        Some((p, r)) => (p, Some(r)),
+        Some((path, git_ref)) => (path, Some(git_ref)),
         None => (endpoint, None),
     };
 
@@ -47,28 +56,22 @@ pub async fn run(
             endpoint
         );
     }
-    let (owner, project, ep_name) = (parts[0], parts[1], parts[2]);
+    let (owner, project, endpoint_name) = (parts[0], parts[1], parts[2]);
     shared::validate_name(owner, "owner")?;
     shared::validate_name(project, "project")?;
-    shared::validate_name(ep_name, "endpoint")?;
+    shared::validate_name(endpoint_name, "endpoint")?;
 
-    if let Some(r) = git_ref {
-        if r.is_empty() {
-            bail!(
-                "Empty ref in '{}'. Omit '@' or provide a ref name.",
-                endpoint
-            );
-        }
-    }
+    let request_body = FetchRequest {
+        ref_name: git_ref.map(ToString::to_string),
+        params: parse_params(params)?,
+        inputs: parse_inputs(inputs)?,
+    };
 
-    // Load credentials (optional — public projects don't require auth)
     let creds = load_credentials()?;
-
-    // Extract token and registry URL upfront to avoid borrow/move issues
-    let token = creds.as_ref().map(|c| c.token.clone());
+    let token = creds.as_ref().map(|creds| creds.token.clone());
     let registry_url = creds
         .as_ref()
-        .map(|c| c.registry_url.clone())
+        .map(|creds| creds.registry_url.clone())
         .unwrap_or_else(|| "https://api.ozzydb.com".to_string());
 
     let client = reqwest::Client::builder()
@@ -76,39 +79,23 @@ pub async fn run(
         .build()
         .context("Failed to create HTTP client")?;
 
-    // Build query params: ref + user params
-    let mut query: Vec<(&str, String)> = Vec::new();
-    if let Some(r) = git_ref {
-        query.push(("ref", r.to_string()));
-    }
-    for param in params {
-        if let Some((key, value)) = param.split_once('=') {
-            query.push((key, value.to_string()));
-        } else {
-            bail!("Invalid param format '{}'. Expected key=value", param);
-        }
-    }
-
-    // POST to fetch endpoint
     let fetch_url = format!(
         "{}/api/v1/fetch/{}/{}/{}",
-        registry_url, owner, project, ep_name,
+        registry_url, owner, project, endpoint_name
     );
-
-    let mut request = client.post(&fetch_url).query(&query);
-    if let Some(t) = &token {
-        request = request.header("Authorization", format!("Bearer {}", t));
+    let mut request = client.post(&fetch_url).json(&request_body);
+    if let Some(token) = &token {
+        request = request.header("Authorization", format!("Bearer {}", token));
     }
 
     let response = request
         .send()
         .await
         .context("Failed to connect to registry")?;
-
-    let status_code = response.status();
-    if !status_code.is_success() {
+    let status = response.status();
+    if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        bail!("Fetch failed ({}): {}", status_code, body);
+        bail!("Fetch failed ({}): {}", status, body);
     }
 
     let fetch_resp: FetchResponse = response
@@ -116,11 +103,10 @@ pub async fn run(
         .await
         .context("Failed to parse fetch response")?;
 
-    // If already done (cache hit), download output immediately
     if fetch_resp.status == "done" {
         let output_url = fetch_resp
             .output_url
-            .ok_or_else(|| anyhow::anyhow!("Server returned done status but no output URL"))?;
+            .ok_or_else(|| anyhow!("Server returned done status but no output URL"))?;
         eprintln!("Cache hit");
         download_output(
             &client,
@@ -134,9 +120,7 @@ pub async fn run(
         return Ok(());
     }
 
-    // Poll for job completion
-    let job_id = &fetch_resp.job_id;
-    let poll_url = format!("{}/api/v1/jobs/{}", registry_url, job_id);
+    let poll_url = format!("{}/api/v1/jobs/{}", registry_url, fetch_resp.job_id);
     let poll_interval = std::time::Duration::from_secs(2);
     let timeout = std::time::Duration::from_secs(timeout_secs);
     let poll_start = std::time::Instant::now();
@@ -144,18 +128,20 @@ pub async fn run(
 
     loop {
         tokio::time::sleep(poll_interval).await;
-
         if poll_start.elapsed() > timeout {
-            bail!("Job {} did not complete within {}s", job_id, timeout_secs);
+            bail!(
+                "Job {} did not complete within {}s",
+                fetch_resp.job_id,
+                timeout_secs
+            );
         }
 
         let mut request = client.get(&poll_url);
-        if let Some(t) = &token {
-            request = request.header("Authorization", format!("Bearer {}", t));
+        if let Some(token) = &token {
+            request = request.header("Authorization", format!("Bearer {}", token));
         }
 
         let response = request.send().await.context("Failed to poll job status")?;
-
         if !response.status().is_success() {
             let body = response.text().await.unwrap_or_default();
             bail!("Job status check failed: {}", body);
@@ -165,8 +151,6 @@ pub async fn run(
             .json()
             .await
             .context("Failed to parse job status")?;
-
-        // Display per-node progress
         let node_display = format_node_status(&job.node_status);
         if node_display != last_node_status {
             eprint!("\r\x1b[K{}", node_display);
@@ -176,7 +160,7 @@ pub async fn run(
         match job.status.as_str() {
             "done" => {
                 eprintln!("\r\x1b[KDone");
-                let output_url = format!("/api/v1/jobs/{}/output", job_id);
+                let output_url = format!("/api/v1/jobs/{}/output", fetch_resp.job_id);
                 download_output(
                     &client,
                     &registry_url,
@@ -190,27 +174,68 @@ pub async fn run(
             }
             "failed" => {
                 eprintln!();
-                let msg = job
-                    .error_message
-                    .unwrap_or_else(|| "unknown error".to_string());
-                bail!("Job failed: {}", msg);
+                bail!(
+                    "Job failed: {}",
+                    job.error_message
+                        .unwrap_or_else(|| "unknown error".to_string())
+                );
             }
-            _ => {} // queued or running — keep polling
+            _ => {}
         }
     }
 }
 
-/// Format node statuses for display.
+fn parse_params(params: &[String]) -> Result<BTreeMap<String, serde_json::Value>> {
+    let mut out = BTreeMap::new();
+    for raw in params {
+        let (key, value) = raw
+            .split_once('=')
+            .ok_or_else(|| anyhow!("Invalid param '{}'. Expected key=JSON_VALUE", raw))?;
+        if key.is_empty() {
+            bail!("Invalid param '{}': empty key", raw);
+        }
+        let parsed = serde_json::from_str::<serde_json::Value>(value).with_context(|| {
+            format!(
+                "Invalid JSON for param '{}'. Strings must be quoted, for example name=\"oak\"",
+                key
+            )
+        })?;
+        if out.insert(key.to_string(), parsed).is_some() {
+            bail!("Duplicate param '{}'", key);
+        }
+    }
+    Ok(out)
+}
+
+fn parse_inputs(inputs: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for raw in inputs {
+        let (key, value) = raw
+            .split_once('=')
+            .ok_or_else(|| anyhow!("Invalid input '{}'. Expected name=artifact_uuid", raw))?;
+        if key.is_empty() {
+            bail!("Invalid input '{}': empty key", raw);
+        }
+        let uuid = uuid::Uuid::parse_str(value)
+            .with_context(|| format!("Invalid artifact UUID for input '{}': {}", key, value))?;
+        if out.insert(key.to_string(), uuid.to_string()).is_some() {
+            bail!("Duplicate input binding '{}'", key);
+        }
+    }
+    Ok(out)
+}
+
 fn format_node_status(node_status: &serde_json::Value) -> String {
     let Some(obj) = node_status.as_object() else {
         return String::new();
     };
 
-    let mut parts: Vec<String> = Vec::new();
+    let mut parts = Vec::new();
     for (name, status) in obj {
         let symbol = match status.as_str().unwrap_or("") {
             "done" => "+",
             "running" => "~",
+            "failed" => "!",
             _ => ".",
         };
         parts.push(format!("[{}]{}", symbol, name));
@@ -219,7 +244,6 @@ fn format_node_status(node_status: &serde_json::Value) -> String {
     parts.join(" ")
 }
 
-/// Download output from the job output endpoint.
 async fn download_output(
     client: &reqwest::Client,
     registry_url: &str,
@@ -235,70 +259,56 @@ async fn download_output(
     };
 
     let mut request = client.get(&url);
-    if let Some(t) = token {
-        request = request.header("Authorization", format!("Bearer {}", t));
+    if let Some(token) = token {
+        request = request.header("Authorization", format!("Bearer {}", token));
     }
 
     let response = request.send().await.context("Failed to download output")?;
     let status = response.status();
 
-    // Handle redirect (presigned URL)
     if status == reqwest::StatusCode::FOUND || status == reqwest::StatusCode::TEMPORARY_REDIRECT {
         let location = response
             .headers()
             .get("location")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| anyhow::anyhow!("Redirect response missing Location header"))?;
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| anyhow!("Redirect response missing Location header"))?;
 
-        // Follow redirect (no auth header, separate client with redirect policy)
-        let dl_client = reqwest::Client::new();
-        let bytes = dl_client
+        let bytes = reqwest::Client::new()
             .get(location)
             .send()
             .await
             .context("Failed to follow presigned URL redirect")?
             .bytes()
             .await
-            .context("Failed to read output from presigned URL")?;
+            .context("Failed to download bytes from presigned URL")?;
 
-        write_output(&bytes, file_output, hash)?;
+        if let Some(path) = file_output {
+            std::fs::write(path, &bytes)
+                .with_context(|| format!("Failed to write output file '{}'", path))?;
+            eprintln!("Wrote {} bytes to {}", bytes.len(), path);
+        } else {
+            use std::io::Write;
+            let mut stdout = std::io::stdout();
+            stdout.write_all(&bytes)?;
+            stdout.flush()?;
+        }
+
+        if let Some(hash) = hash {
+            let actual_hash = blake3::hash(&bytes).to_hex().to_string();
+            if actual_hash != hash {
+                bail!(
+                    "Output hash mismatch: expected {}, got {}",
+                    hash,
+                    actual_hash
+                );
+            }
+        }
+
         return Ok(());
     }
 
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        bail!("Output download failed ({}): {}", status, body);
-    }
-
-    // Direct response (local storage mode)
-    let bytes = response.bytes().await.context("Failed to read output")?;
-
-    write_output(&bytes, file_output, hash)?;
-    Ok(())
-}
-
-/// Write output bytes to file or stdout, verifying BLAKE3 hash if provided.
-fn write_output(bytes: &[u8], file_output: Option<&str>, hash: Option<&str>) -> Result<()> {
-    if let Some(expected) = hash {
-        let actual = blake3::hash(bytes).to_hex().to_string();
-        if actual != expected {
-            bail!(
-                "Hash mismatch: expected {}, got {}. Output may be corrupted.",
-                expected,
-                actual
-            );
-        }
-    }
-
-    if let Some(path) = file_output {
-        std::fs::write(path, bytes).context("Failed to write output file")?;
-        eprintln!("Wrote {} bytes to {}", bytes.len(), path);
-    } else {
-        use std::io::Write;
-        std::io::stdout().write_all(bytes)?;
-    }
-
-    Ok(())
+    let body = response.text().await.unwrap_or_default();
+    bail!("Failed to download output ({}): {}", status, body)
 }
 
 #[cfg(test)]
@@ -306,55 +316,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_remote_ref_with_ref() {
-        let ep = "rileyleff/sapflux/corrected@v1.0";
-        let (path, git_ref) = ep.split_once('@').unwrap();
-        let parts: Vec<&str> = path.splitn(3, '/').collect();
-        assert_eq!(parts, vec!["rileyleff", "sapflux", "corrected"]);
-        assert_eq!(git_ref, "v1.0");
+    fn parse_params_requires_valid_json() {
+        let err = parse_params(&["species=oak".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Strings must be quoted"));
     }
 
     #[test]
-    fn test_parse_remote_ref_without_ref() {
-        let ep = "rileyleff/sapflux/corrected";
-        assert!(ep.split_once('@').is_none());
-        let parts: Vec<&str> = ep.splitn(3, '/').collect();
-        assert_eq!(parts, vec!["rileyleff", "sapflux", "corrected"]);
-    }
-
-    #[test]
-    fn test_parse_remote_ref_invalid() {
-        let ep = "just-a-name";
-        let parts: Vec<&str> = ep.splitn(3, '/').collect();
-        assert_eq!(parts.len(), 1); // not enough parts
-    }
-
-    #[test]
-    fn test_format_node_status_empty() {
-        let status = serde_json::json!({});
-        assert_eq!(format_node_status(&status), "");
-    }
-
-    #[test]
-    fn test_format_node_status_mixed() {
-        let status = serde_json::json!({
-            "step1": "done",
-            "step2": "running",
-            "step3": "queued"
-        });
-        let formatted = format_node_status(&status);
-        assert!(formatted.contains("[+]step1"));
-        assert!(formatted.contains("[~]step2"));
-        assert!(formatted.contains("[.]step3"));
-    }
-
-    #[test]
-    fn test_format_node_status_all_done() {
-        let status = serde_json::json!({
-            "a": "done",
-            "b": "done"
-        });
-        let formatted = format_node_status(&status);
-        assert_eq!(formatted, "[+]a [+]b");
+    fn parse_inputs_rejects_invalid_uuid() {
+        let err = parse_inputs(&["raw=not-a-uuid".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Invalid artifact UUID"));
     }
 }

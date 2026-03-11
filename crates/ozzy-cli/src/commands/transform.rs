@@ -4,9 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-/// Run the transform scaffold command.
 pub fn scaffold(cwd: &Path, name: &str, lang: &str) -> Result<()> {
-    // Validate name
     if name.is_empty()
         || !name
             .chars()
@@ -31,38 +29,26 @@ fn scaffold_python(cwd: &Path, name: &str) -> Result<()> {
         bail!("File already exists: transforms/{}.py", name);
     }
 
-    // Convert dashes to underscores for valid Python identifiers
     let func_name = name.replace('-', "_");
-
     let content = format!(
         r#"def {func_name}(inputs, params):
-    """TODO: Implement transform logic.
+    \"\"\"TODO: Implement transform logic.
 
     Args:
-        inputs: dict of input data (keys match ozzy.toml input declarations)
-        params: dict of parameters (keys match ozzy.toml param declarations)
+        inputs: dict of typed inputs keyed by ozzy.toml input port names
+        params: dict of endpoint/node parameters
 
     Returns:
-        Output data (DataFrame, bytes, list for collections, etc.)
-    """
-    raise NotImplementedError("Implement this transform")
+        A value matching the declared output port type.
+    \"\"\"
+    raise NotImplementedError(\"Implement this transform\")
 "#,
         func_name = func_name
     );
 
     std::fs::write(&file_path, content).context("Failed to write transform file")?;
 
-    println!("Created transforms/{}.py", name);
-    println!();
-    println!("Add this to your ozzy.toml:");
-    println!();
-    println!("[transforms.{}]", name);
-    println!("source = \"transforms/{}.py:{}\"", name, func_name);
-    println!("environment = \"default\"");
-    println!("inputs.data = \"parquet\"");
-    println!("output = \"parquet\"");
-    println!("# params.threshold = {{ type = \"float\" }}");
-
+    print_scaffold_instructions(name, &func_name, "py");
     Ok(())
 }
 
@@ -75,17 +61,15 @@ fn scaffold_r(cwd: &Path, name: &str) -> Result<()> {
         bail!("File already exists: transforms/{}.R", name);
     }
 
-    // Convert dashes to underscores (R also uses <- assignment, dashes are operators)
     let func_name = name.replace('-', "_");
-
     let content = format!(
         r#"#' TODO: Implement transform logic.
 #'
-#' @param inputs Named list of input data (keys match ozzy.toml input declarations)
-#' @param params Named list of parameters (keys match ozzy.toml param declarations)
-#' @return Output data (data.frame, raw bytes, list for collections, etc.)
+#' @param inputs Named list of typed inputs keyed by ozzy.toml input port names
+#' @param params Named list of endpoint/node parameters
+#' @return A value matching the declared output port type.
 {func_name} <- function(inputs, params) {{
-  stop("Implement this transform")
+  stop(\"Implement this transform\")
 }}
 "#,
         func_name = func_name
@@ -93,18 +77,27 @@ fn scaffold_r(cwd: &Path, name: &str) -> Result<()> {
 
     std::fs::write(&file_path, content).context("Failed to write transform file")?;
 
-    println!("Created transforms/{}.R", name);
+    print_scaffold_instructions(name, &func_name, "R");
+    Ok(())
+}
+
+fn print_scaffold_instructions(name: &str, func_name: &str, ext: &str) {
+    println!("Created transforms/{}.{}", name, ext);
     println!();
-    println!("Add this to your ozzy.toml:");
+    println!("Add something like this to ozzy.toml:");
+    println!();
+    println!("[types]");
+    println!("RawInput = 'csv(delimiter=\",\", header=true) & table<{{ value: float64 }}>'");
     println!();
     println!("[transforms.{}]", name);
-    println!("source = \"transforms/{}.R:{}\"", name, func_name);
+    println!("source = \"transforms/{}.{}:{}\"", name, ext, func_name);
     println!("environment = \"default\"");
-    println!("inputs.data = \"parquet\"");
-    println!("output = \"parquet\"");
-    println!("# params.threshold = {{ type = \"float\" }}");
-
-    Ok(())
+    println!("[transforms.{}.inputs.raw]", name);
+    println!("type = \"RawInput\"");
+    println!("[transforms.{}.outputs.result]", name);
+    println!("type = \"RawInput\"");
+    println!("# [transforms.{}.params.threshold]", name);
+    println!("# type = \"float\"");
 }
 
 #[cfg(test)]
@@ -146,7 +139,6 @@ mod tests {
         assert!(path.exists());
 
         let content = std::fs::read_to_string(&path).unwrap();
-        // Function name should use underscores, not dashes
         assert!(content.contains("def my_transform(inputs, params):"));
         assert!(!content.contains("def my-transform"));
     }
@@ -169,7 +161,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         scaffold(dir.path(), "my_transform", "python").unwrap();
 
-        // Second scaffold should fail
         let result = scaffold(dir.path(), "my_transform", "python");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));

@@ -20,16 +20,10 @@ enum Commands {
     /// Initialize a new OzzyDB project
     Init,
 
-    /// Manage datasets
-    Data {
+    /// Manage first-class artifacts
+    Artifact {
         #[command(subcommand)]
-        command: DataCommands,
-    },
-
-    /// Manage collections
-    Collection {
-        #[command(subcommand)]
-        command: CollectionCommands,
+        command: ArtifactCommands,
     },
 
     /// Inspect endpoints
@@ -47,9 +41,13 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
 
-        /// Endpoint parameters (key=value, can be repeated)
+        /// Endpoint parameters as key=JSON_VALUE. Strings must be quoted JSON.
         #[arg(short, long = "param")]
         params: Vec<String>,
+
+        /// Endpoint input bindings as input_name=artifact_uuid
+        #[arg(long = "input")]
+        inputs: Vec<String>,
 
         /// Timeout in seconds for job completion (default: 600)
         #[arg(long, default_value = "600")]
@@ -93,118 +91,62 @@ enum Commands {
     },
 }
 
-// --- Subcommand enums ---
-
 #[derive(Subcommand)]
-enum DataCommands {
-    /// Upload one or more datasets
+enum ArtifactCommands {
+    /// Upload one or more blob artifacts
     Upload {
-        /// Files to upload (supports globs)
+        /// Files to upload
         files: Vec<String>,
 
-        /// Dataset name (only valid with a single file; defaults to filename stem)
+        /// Explicit content type override
         #[arg(long)]
-        name: Option<String>,
-
-        /// Description
-        #[arg(long)]
-        description: Option<String>,
-
-        /// Tags (comma-separated)
-        #[arg(long)]
-        tags: Option<String>,
-
-        /// Add to collection after upload
-        #[arg(long)]
-        collection: Option<String>,
+        content_type: Option<String>,
     },
 
-    /// List datasets
+    /// List artifacts in the current project
     Ls,
 
-    /// Show dataset details
+    /// Show artifact details
     Show {
-        /// Dataset name
-        name: String,
+        /// Artifact UUID
+        artifact_id: String,
     },
 
-    /// Update dataset metadata
-    Describe {
-        /// Dataset name
-        name: String,
-
-        /// Set description
-        #[arg(long)]
-        set_description: Option<String>,
-
-        /// Show metadata history
-        #[arg(long)]
-        history: bool,
-    },
-
-    /// Yank a dataset (retract with reason)
-    Yank {
-        /// Dataset name
-        name: String,
-
-        /// Reason for yanking
-        #[arg(long)]
-        reason: String,
-    },
-
-    /// Download a dataset
+    /// Download a blob artifact
     Download {
-        /// Dataset name
-        name: String,
+        /// Artifact UUID
+        artifact_id: String,
 
-        /// Output file path (defaults to original filename)
+        /// Output file path (defaults to artifact-<uuid>.<ext>)
         #[arg(short, long)]
         output: Option<String>,
     },
-}
 
-#[derive(Subcommand)]
-enum CollectionCommands {
-    /// Create a collection
-    Create {
-        /// Collection name
-        name: String,
+    /// Create a bundle manifest artifact from named entries
+    Bundle {
+        /// Bundle entries as name=artifact_uuid
+        #[arg(long = "entry")]
+        entries: Vec<String>,
     },
 
-    /// Add members to a collection
-    Add {
-        /// Collection name
-        name: String,
-
-        /// Members to add (data:x, endpoint:y, collection:z)
-        members: Vec<String>,
+    /// Create a collection manifest artifact from artifact UUIDs
+    Collection {
+        /// Collection item artifact UUIDs
+        items: Vec<String>,
     },
 
-    /// Remove members from a collection
-    Rm {
-        /// Collection name
-        name: String,
+    /// Declare or verify artifact conformance
+    Conformance {
+        /// Artifact UUID
+        artifact_id: String,
 
-        /// Members to remove
-        members: Vec<String>,
-    },
+        /// Version-pinned published type reference (for example std/Foo@2)
+        #[arg(long = "type")]
+        type_ref: String,
 
-    /// List collections (or members of a collection)
-    Ls {
-        /// Collection name (omit to list all)
-        name: Option<String>,
-    },
-
-    /// Show collection version history
-    Log {
-        /// Collection name
-        name: String,
-    },
-
-    /// Show all leaf-level atoms in a collection
-    Flatten {
-        /// Collection name
-        name: String,
+        /// Declare conformance without immediate verification
+        #[arg(long, default_value_t = false)]
+        no_verify: bool,
     },
 }
 
@@ -217,7 +159,7 @@ enum EndpointCommands {
         r#ref: Option<String>,
     },
 
-    /// Show endpoint details (params, DAG, verification status)
+    /// Show endpoint details
     Show {
         /// Endpoint name
         name: String,
@@ -227,27 +169,13 @@ enum EndpointCommands {
         r#ref: Option<String>,
     },
 
-    /// Yank an endpoint version
-    Yank {
-        /// Endpoint name
-        name: String,
-
-        /// Ref or commit SHA of the version to yank
-        #[arg(long, short)]
-        r#ref: String,
-
-        /// Reason for yanking
-        #[arg(long)]
-        reason: String,
-    },
-
     /// Show endpoint DAG
     Dag {
         /// Endpoint name
         name: String,
 
-        /// Output format (ascii, mermaid, json, svg)
-        #[arg(long, default_value = "ascii", value_parser = ["ascii", "mermaid", "json", "svg"])]
+        /// Output format (mermaid or json)
+        #[arg(long, default_value = "mermaid", value_parser = ["mermaid", "json"])]
         format: String,
 
         /// Ref to inspect (defaults to current branch)
@@ -387,9 +315,10 @@ async fn main() -> Result<()> {
             endpoint,
             output,
             params,
+            inputs,
             timeout,
         } => {
-            commands::fetch::run(&endpoint, output.as_deref(), &params, timeout).await?;
+            commands::fetch::run(&endpoint, output.as_deref(), &params, &inputs, timeout).await?;
         }
         Commands::Cache { command } => match command {
             CacheCommands::Ls => {
@@ -405,61 +334,37 @@ async fn main() -> Result<()> {
         Commands::Push { r#ref, message } => {
             commands::push::run(r#ref.as_deref(), message.as_deref()).await?;
         }
-        Commands::Data { command } => match command {
-            DataCommands::Upload {
+        Commands::Artifact { command } => match command {
+            ArtifactCommands::Upload {
                 files,
-                name,
-                description,
-                tags,
-                collection,
+                content_type,
             } => {
-                commands::data::upload(
-                    &files,
-                    name.as_deref(),
-                    description.as_deref(),
-                    tags.as_deref(),
-                    collection.as_deref(),
-                )
-                .await?;
+                commands::artifact::upload(&files, content_type.as_deref()).await?;
             }
-            DataCommands::Ls => {
-                commands::data::ls().await?;
+            ArtifactCommands::Ls => {
+                commands::artifact::ls().await?;
             }
-            DataCommands::Show { name } => {
-                commands::data::show(&name).await?;
+            ArtifactCommands::Show { artifact_id } => {
+                commands::artifact::show(&artifact_id).await?;
             }
-            DataCommands::Describe {
-                name,
-                set_description,
-                history,
+            ArtifactCommands::Download {
+                artifact_id,
+                output,
             } => {
-                commands::data::describe(&name, set_description.as_deref(), history).await?;
+                commands::artifact::download(&artifact_id, output.as_deref()).await?;
             }
-            DataCommands::Yank { name, reason } => {
-                commands::data::yank(&name, &reason).await?;
+            ArtifactCommands::Bundle { entries } => {
+                commands::artifact::bundle(&entries).await?;
             }
-            DataCommands::Download { name, output } => {
-                commands::data::download(&name, output.as_deref()).await?;
+            ArtifactCommands::Collection { items } => {
+                commands::artifact::collection(&items).await?;
             }
-        },
-        Commands::Collection { command } => match command {
-            CollectionCommands::Create { name } => {
-                commands::collection::create(&name).await?;
-            }
-            CollectionCommands::Add { name, members } => {
-                commands::collection::add(&name, &members).await?;
-            }
-            CollectionCommands::Rm { name, members } => {
-                commands::collection::rm(&name, &members).await?;
-            }
-            CollectionCommands::Ls { name } => {
-                commands::collection::ls(name.as_deref()).await?;
-            }
-            CollectionCommands::Log { name } => {
-                commands::collection::log(&name).await?;
-            }
-            CollectionCommands::Flatten { name } => {
-                commands::collection::flatten(&name).await?;
+            ArtifactCommands::Conformance {
+                artifact_id,
+                type_ref,
+                no_verify,
+            } => {
+                commands::artifact::conformance(&artifact_id, &type_ref, !no_verify).await?;
             }
         },
         Commands::Endpoint { command } => match command {
@@ -468,13 +373,6 @@ async fn main() -> Result<()> {
             }
             EndpointCommands::Show { name, r#ref } => {
                 commands::endpoint::show(&name, r#ref.as_deref()).await?;
-            }
-            EndpointCommands::Yank {
-                name,
-                r#ref,
-                reason,
-            } => {
-                commands::endpoint::yank(&name, &r#ref, &reason).await?;
             }
             EndpointCommands::Dag {
                 name,
