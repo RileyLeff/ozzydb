@@ -4,8 +4,17 @@
 test:
     cargo test --workspace
 
+_require-docker:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker info >/dev/null 2>&1 || {
+        echo "Docker daemon is not running. Start Docker and retry." >&2
+        exit 1
+    }
+
 # Start test infrastructure (postgres + minio for integration/E2E tests)
 test-infra-up:
+    just _require-docker
     docker compose -f docker-compose.test.yml up -d
     @echo "Waiting for services..."
     @until docker compose -f docker-compose.test.yml exec -T postgres pg_isready -U ozzy_test -q 2>/dev/null; do sleep 1; done
@@ -27,8 +36,27 @@ test-docker:
 test-e2e:
     cargo test -p ozzy-server --test e2e_tests -- --ignored
 
-# Run all tests including integration and E2E
+# Run all tests including integration and E2E.
+# This recipe is self-contained: it brings the test stack up, waits for it,
+# runs the full suite, and tears the stack down on exit.
 test-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    cleanup() {
+        docker compose -f docker-compose.test.yml down
+    }
+
+    just _require-docker
+    trap cleanup EXIT
+
+    docker compose -f docker-compose.test.yml up -d
+    echo "Waiting for services..."
+    until docker compose -f docker-compose.test.yml exec -T postgres pg_isready -U ozzy_test -q 2>/dev/null; do
+        sleep 1
+    done
+    echo "Test infrastructure ready."
+
     cargo test --workspace
     cargo test -p ozzy-server --test integration_tests -- --ignored
     cargo test -p ozzy-server --test e2e_tests -- --ignored
