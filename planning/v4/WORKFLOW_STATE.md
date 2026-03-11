@@ -607,4 +607,31 @@
 
 
 ## Current Phase: Phase 6 next
-## Current Step: Phase 6.1 next; execution integration is complete
+## Current Step: Phase 6.2 next; endpoint/project inspection rewrite is complete
+
+### Phase 6.1: Rewrite endpoint inspection APIs
+- Added a shared v4 inspection layer in `crates/ozzy-server/src/api/v1/inspection.rs`.
+- Reworked endpoint inspection so responses are derived from:
+  - `PublishedProjectRevision`
+  - `RegistrySnapshot`
+  - bound runtime transforms and environments
+- Endpoint list/detail responses now expose:
+  - typed endpoint inputs
+  - terminal node
+  - resolved transform version/environment identities per node
+  - resolved typed transform input/output ports
+  - `project_revision_id`
+  - `registry_revision_id`
+- Commit detail no longer dumps raw published JSON payloads. It now exposes a structured `project_revision` object with:
+  - published environments
+  - published transforms
+  - endpoint summaries
+  - `project_meta`
+- `get_endpoint_dag(...?format=json)` now serializes the structured endpoint inspection view instead of the raw endpoint definition.
+- `PublishedProjectRevision` now retains authored environment bindings and authored transform definitions so inspection can reflect the published object graph cleanly.
+- Verification for this checkpoint:
+  - `cargo fmt`
+  - `cargo test -p ozzy-core`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/28_phase6_1_review.md`

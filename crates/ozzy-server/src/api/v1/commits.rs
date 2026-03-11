@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::access::enforce_read_access;
 use super::auth::ApiError;
+use super::inspection::{ProjectRevisionDetail, build_project_revision_detail};
 use crate::AppState;
 use crate::auth::middleware::MaybeAuthUser;
 use crate::registry::load_published_project_revision_by_commit;
@@ -59,10 +60,7 @@ struct CommitDetail {
     message: Option<String>,
     pushed_by: String,
     created_at: DateTime<Utc>,
-    environments: serde_json::Value,
-    transforms: serde_json::Value,
-    endpoints: serde_json::Value,
-    project_meta: serde_json::Value,
+    project_revision: ProjectRevisionDetail,
 }
 
 // ============================================================================
@@ -148,9 +146,7 @@ async fn get_commit(
         message: commit.message,
         pushed_by: username,
         created_at: commit.created_at,
-        environments: published.row.environments.clone(),
-        transforms: published.row.transforms.clone(),
-        endpoints: published.row.endpoints.clone(),
-        project_meta: published.project_meta,
+        project_revision: build_project_revision_detail(&published)
+            .map_err(|e| ApiError::Internal(e.into()))?,
     }))
 }

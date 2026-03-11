@@ -8,6 +8,7 @@ mod commits;
 mod data;
 mod endpoints;
 pub(crate) mod fetch;
+mod inspection;
 mod jobs;
 mod projects;
 mod push;

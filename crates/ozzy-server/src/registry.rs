@@ -82,6 +82,8 @@ pub struct RuntimeEnvironmentDef {
 pub struct PublishedProjectRevision {
     pub row: StoredProjectRevision,
     pub snapshot: Arc<RegistrySnapshot>,
+    pub environment_bindings: HashMap<String, VersionedName>,
+    pub authored_transforms: HashMap<String, TransformDef>,
     pub runtime: BoundRuntimeDefinitions,
     pub endpoints: HashMap<String, ozzy_core::toml_spec::EndpointDef>,
     pub project_meta: Value,
@@ -677,6 +679,8 @@ pub async fn load_published_project_revision_by_commit(
     Ok(PublishedProjectRevision {
         row: project_revision.clone(),
         snapshot,
+        environment_bindings: environments,
+        authored_transforms: transforms,
         runtime,
         endpoints,
         project_meta: project_revision.project_meta.clone(),

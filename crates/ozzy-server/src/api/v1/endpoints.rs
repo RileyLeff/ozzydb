@@ -3,17 +3,18 @@
 //! Endpoint inspection reads from the published v4 project revision so the
 //! server-visible meaning of a pushed commit no longer depends on commit_state.
 
-use std::collections::HashMap;
-
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     routing::get,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::access::enforce_read_access;
 use super::auth::ApiError;
+use super::inspection::{
+    EndpointDetail, EndpointSummary, build_endpoint_detail, build_endpoint_summary,
+};
 use crate::AppState;
 use crate::auth::middleware::MaybeAuthUser;
 use crate::db::models::Commit;
@@ -45,63 +46,8 @@ fn default_dag_format() -> String {
     "json".to_string()
 }
 
-/// Endpoint summary in list responses.
-#[derive(Debug, Serialize)]
-struct EndpointSummary {
-    name: String,
-    description: Option<String>,
-    params: Vec<ParamSummary>,
-    node_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct ParamSummary {
-    name: String,
-    #[serde(rename = "type")]
-    type_: String,
-    description: Option<String>,
-    default: Option<serde_json::Value>,
-}
-
-/// Detailed endpoint response.
-#[derive(Debug, Serialize)]
-struct EndpointDetail {
-    name: String,
-    description: Option<String>,
-    commit_sha: String,
-    params: Vec<ParamDetail>,
-    nodes: HashMap<String, NodeDetail>,
-    edges: Vec<EdgeDetail>,
-}
-
-#[derive(Debug, Serialize)]
-struct ParamDetail {
-    name: String,
-    #[serde(rename = "type")]
-    type_: String,
-    description: Option<String>,
-    default: Option<serde_json::Value>,
-    min: Option<f64>,
-    max: Option<f64>,
-    #[serde(rename = "enum")]
-    enum_values: Option<Vec<serde_json::Value>>,
-    binds: String,
-}
-
-#[derive(Debug, Serialize)]
-struct NodeDetail {
-    transform: String,
-    params: HashMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Serialize)]
-struct EdgeDetail {
-    from: String,
-    to: String,
-}
-
 /// DAG response (multiple format support).
-#[derive(Debug, Serialize)]
+#[derive(Debug, serde::Serialize)]
 struct DagResponse {
     format: String,
     content: String,
@@ -120,13 +66,9 @@ async fn list_endpoints(
     let mut summaries: Vec<EndpointSummary> = published
         .endpoints
         .iter()
-        .map(|(name, def)| EndpointSummary {
-            name: name.clone(),
-            description: def.description.clone(),
-            params: extract_param_summaries(def),
-            node_count: def.nodes.len(),
-        })
-        .collect();
+        .map(|(name, def)| build_endpoint_summary(published.snapshot.as_ref(), name, def))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| ApiError::Internal(e.into()))?;
 
     summaries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Json(summaries))
@@ -147,14 +89,10 @@ async fn get_endpoint(
         .get(&name)
         .ok_or_else(|| ApiError::not_found(format!("Endpoint '{}' not found", name)))?;
 
-    Ok(Json(EndpointDetail {
-        name,
-        description: def.description.clone(),
-        commit_sha: commit.git_commit_sha,
-        params: extract_param_details(def),
-        nodes: extract_nodes(def),
-        edges: extract_edges(def),
-    }))
+    Ok(Json(
+        build_endpoint_detail(&commit, &published, &name, def)
+            .map_err(|e| ApiError::Internal(e.into()))?,
+    ))
 }
 
 /// Get endpoint DAG in the requested format.
@@ -164,7 +102,7 @@ async fn get_endpoint_dag(
     Query(query): Query<DagQuery>,
     auth: MaybeAuthUser,
 ) -> Result<Json<DagResponse>, ApiError> {
-    let (_, published) =
+    let (commit, published) =
         resolve_published_revision(&state, &owner, &slug, query.ref_name.as_deref(), &auth).await?;
 
     let def = published
@@ -173,7 +111,11 @@ async fn get_endpoint_dag(
         .ok_or_else(|| ApiError::not_found(format!("Endpoint '{}' not found", name)))?;
 
     let content = match query.format.as_str() {
-        "json" => serde_json::to_string_pretty(def).map_err(|e| ApiError::Internal(e.into()))?,
+        "json" => serde_json::to_string_pretty(
+            &build_endpoint_detail(&commit, &published, &name, def)
+                .map_err(|e| ApiError::Internal(e.into()))?,
+        )
+        .map_err(|e| ApiError::Internal(e.into()))?,
         "mermaid" => render_mermaid_dag(def, &name),
         _ => {
             return Err(ApiError::BadRequest(format!(
@@ -236,63 +178,6 @@ async fn resolve_published_revision(
             .map_err(|e| ApiError::Internal(e.into()))?;
 
     Ok((commit, published))
-}
-
-/// Extract parameter summaries from an endpoint definition.
-fn extract_param_summaries(def: &ozzy_core::toml_spec::EndpointDef) -> Vec<ParamSummary> {
-    def.params
-        .iter()
-        .map(|(name, param)| ParamSummary {
-            name: name.clone(),
-            type_: param.type_.clone(),
-            description: param.description.clone(),
-            default: param.default.clone(),
-        })
-        .collect()
-}
-
-/// Extract detailed parameter info from an endpoint definition.
-fn extract_param_details(def: &ozzy_core::toml_spec::EndpointDef) -> Vec<ParamDetail> {
-    def.params
-        .iter()
-        .map(|(name, param)| ParamDetail {
-            name: name.clone(),
-            type_: param.type_.clone(),
-            description: param.description.clone(),
-            default: param.default.clone(),
-            min: param.min,
-            max: param.max,
-            enum_values: param.enum_values.clone(),
-            binds: param.binds.clone(),
-        })
-        .collect()
-}
-
-/// Extract nodes from an endpoint definition.
-fn extract_nodes(def: &ozzy_core::toml_spec::EndpointDef) -> HashMap<String, NodeDetail> {
-    def.nodes
-        .iter()
-        .map(|(name, node)| {
-            (
-                name.clone(),
-                NodeDetail {
-                    transform: node.transform.clone(),
-                    params: node.params.clone(),
-                },
-            )
-        })
-        .collect()
-}
-
-/// Extract edges from an endpoint definition.
-fn extract_edges(def: &ozzy_core::toml_spec::EndpointDef) -> Vec<EdgeDetail> {
-    def.edges
-        .iter()
-        .map(|edge| EdgeDetail {
-            from: edge.from.clone(),
-            to: edge.to.clone(),
-        })
-        .collect()
 }
 
 /// Render a Mermaid graph from an endpoint definition.
