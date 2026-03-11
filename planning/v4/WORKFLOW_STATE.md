@@ -607,7 +607,7 @@
 
 
 ## Current Phase: Phase 6 next
-## Current Step: Phase 6.2 next; endpoint/project inspection rewrite is complete
+## Current Step: Phase 6.3 next; direct artifact and registry-object inspection is complete
 
 ### Phase 6.1: Rewrite endpoint inspection APIs
 - Added a shared v4 inspection layer in `crates/ozzy-server/src/api/v1/inspection.rs`.
@@ -635,3 +635,34 @@
   - `cargo check -p ozzy-server --tests`
 - Review artifact:
   - `planning/reviews/v4/28_phase6_1_review.md`
+
+### Phase 6.2: Artifact and registry-object inspection APIs
+- Added direct v4 artifact inspection routes:
+  - `GET /v1/artifacts/{owner}/{slug}`
+  - `GET /v1/artifacts/{owner}/{slug}/{artifact_id}`
+  - `GET /v1/artifacts/{owner}/{slug}/{artifact_id}/conformance`
+- Added direct registry-object inspection routes:
+  - `GET /v1/types/{owner}/{slug}`
+  - `GET /v1/types/{owner}/{slug}/resolve?name=...&version=...`
+  - `GET /v1/environments/{owner}/{slug}`
+  - `GET /v1/environments/{owner}/{slug}/resolve?name=...&version=...`
+  - `GET /v1/transforms/{owner}/{slug}`
+  - `GET /v1/transforms/{owner}/{slug}/resolve?name=...&version=...`
+- Responses now expose first-class v4 objects directly:
+  - artifacts and typed manifests
+  - conformance records and verification attempts
+  - published type versions and canonical type keys
+  - published environment versions
+  - published transform versions with typed ports
+- Added the DB query surface needed for these APIs:
+  - canonical type lookup by row ID
+  - type version lookup by ID plus project-level list queries
+  - project-level list queries for environment and transform versions
+- Added a centralized `From<V4QueryError> for ApiError` conversion so the new handlers fail explicitly without repeating adapter glue.
+- Verification for this checkpoint:
+  - `cargo fmt`
+  - `cargo test -p ozzy-core`
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/29_phase6_2_review.md`

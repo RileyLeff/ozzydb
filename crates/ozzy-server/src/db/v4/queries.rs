@@ -256,6 +256,19 @@ impl Database {
         Ok(row)
     }
 
+    pub async fn get_v4_canonical_type(
+        &self,
+        canonical_type_id: Uuid,
+    ) -> Result<Option<StoredCanonicalType>, V4QueryError> {
+        let row = sqlx::query_as::<_, StoredCanonicalType>(
+            "SELECT * FROM v4_canonical_types WHERE id = $1",
+        )
+        .bind(canonical_type_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row)
+    }
+
     pub async fn get_v4_registry_revision(
         &self,
         registry_revision_id: Uuid,
@@ -333,6 +346,41 @@ impl Database {
         Ok(row)
     }
 
+    pub async fn get_v4_type_version_by_id(
+        &self,
+        type_version_id: Uuid,
+    ) -> Result<Option<StoredTypeVersion>, V4QueryError> {
+        let row = sqlx::query_as::<_, StoredTypeVersion>(
+            r#"
+            SELECT *
+            FROM v4_type_versions
+            WHERE id = $1
+            "#,
+        )
+        .bind(type_version_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_v4_type_versions(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<StoredTypeVersion>, V4QueryError> {
+        let rows = sqlx::query_as::<_, StoredTypeVersion>(
+            r#"
+            SELECT *
+            FROM v4_type_versions
+            WHERE project_id = $1
+            ORDER BY name ASC, version ASC, created_at ASC, id ASC
+            "#,
+        )
+        .bind(project_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
     pub async fn insert_v4_environment_version(
         &self,
         project_id: Uuid,
@@ -389,6 +437,24 @@ impl Database {
         .fetch_optional(self.pool())
         .await?;
         Ok(row)
+    }
+
+    pub async fn list_v4_environment_versions(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<StoredEnvironmentVersion>, V4QueryError> {
+        let rows = sqlx::query_as::<_, StoredEnvironmentVersion>(
+            r#"
+            SELECT *
+            FROM v4_environment_versions
+            WHERE project_id = $1
+            ORDER BY name ASC, version ASC, created_at ASC, id ASC
+            "#,
+        )
+        .bind(project_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -466,6 +532,24 @@ impl Database {
         .fetch_optional(self.pool())
         .await?;
         Ok(row)
+    }
+
+    pub async fn list_v4_transform_versions(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<StoredTransformVersion>, V4QueryError> {
+        let rows = sqlx::query_as::<_, StoredTransformVersion>(
+            r#"
+            SELECT *
+            FROM v4_transform_versions
+            WHERE project_id = $1
+            ORDER BY name ASC, version ASC, created_at ASC, id ASC
+            "#,
+        )
+        .bind(project_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
     }
 
     pub async fn insert_v4_transform_port(

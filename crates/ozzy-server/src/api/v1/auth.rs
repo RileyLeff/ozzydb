@@ -453,6 +453,12 @@ impl From<serde_json::Error> for ApiError {
     }
 }
 
+impl From<crate::db::v4::V4QueryError> for ApiError {
+    fn from(err: crate::db::v4::V4QueryError) -> Self {
+        Self::Internal(err.into())
+    }
+}
+
 impl From<axum::extract::multipart::MultipartError> for ApiError {
     fn from(err: axum::extract::multipart::MultipartError) -> Self {
         Self::BadRequest(format!("Multipart error: {}", err))
