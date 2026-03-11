@@ -606,8 +606,8 @@
   - `planning/reviews/v4/27_phase5_external_review_fixes.md`
 
 
-## Current Phase: Phase 7 complete
-## Current Step: Phase 8.1 next; both clients now target the live v4 API
+## Current Phase: Phase 8 underway
+## Current Step: Phase 8.2 next; deletion sweep is complete and stabilization review is next
 
 ### Phase 6.1: Rewrite endpoint inspection APIs
 - Added a shared v4 inspection layer in `crates/ozzy-server/src/api/v1/inspection.rs`.
@@ -738,3 +738,20 @@
   - `cd clients/python && .venv/bin/pytest -q`
 - Review artifact:
   - `planning/reviews/v4/32_phase7_2_review.md`
+
+
+### Phase 8.1: Delete superseded v3 code
+- Deleted the dead server files for the removed `data` and `collections` API surfaces.
+- Deleted the stale ignored integration/e2e suites that still exercised removed v2/v3 routes and commit-state flows.
+- Removed the old DB/query/model surface for:
+  - `commit_state`
+  - data atoms and metadata
+  - collections and collection versions
+  - endpoint yanks
+- Added `012_drop_legacy_v3_tables.sql` to remove the superseded v3 tables from the schema.
+- Collapsed the public push path to GitHub-only instead of carrying a fake `git_provider` API surface.
+- Verification for this checkpoint:
+  - `cargo fmt`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/33_phase8_1_review.md`

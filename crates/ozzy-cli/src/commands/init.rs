@@ -60,13 +60,12 @@ pub fn run(cwd: &Path) -> Result<()> {
 
     if let Some((provider, repo)) = &git_info {
         toml.push_str("[git]\n");
-        toml.push_str(&format!("provider = \"{}\"\n", provider));
         toml.push_str(&format!("repo = \"{}\"\n", repo));
         toml.push('\n');
 
         if provider != "github" {
             println!(
-                "Warning: provider '{}' detected, but only 'github' is currently supported for push/fetch.",
+                "Warning: provider '{}' detected, but v4 push/fetch only supports GitHub repos.",
                 provider
             );
         }

@@ -374,7 +374,6 @@ async fn test_commits() -> Result<()> {
     let commit = db
         .insert_commit(
             project.id,
-            "github",
             &format!("{}/test-repo", user.username),
             &sha,
             "toml_hash_abc",
@@ -395,67 +394,6 @@ async fn test_commits() -> Result<()> {
     let commits = db.list_commits(project.id, 10).await?;
     assert_eq!(commits.len(), 1);
     assert_eq!(commits[0].id, commit.id);
-
-    Ok(())
-}
-
-// ========================================================================
-// Commit State Operations
-// ========================================================================
-
-#[tokio::test]
-async fn test_commit_state() -> Result<()> {
-    let Some(db) = get_test_db().await else {
-        return Ok(());
-    };
-
-    let user = db
-        .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
-            &unique_name("user"),
-            None,
-            None,
-        )
-        .await?;
-    let project = db
-        .create_project(user.id, &unique_name("proj"), None, "private")
-        .await?;
-    let sha = format!("{:040x}", rand::random::<u128>());
-    let commit = db
-        .insert_commit(
-            project.id,
-            "github",
-            "user/repo",
-            &sha,
-            "toml_hash",
-            user.id,
-            None,
-        )
-        .await?;
-
-    let environments =
-        serde_json::json!({"default": {"base": "ozzydb/python:3.12", "lockfile": "uv.lock"}});
-    let transforms = serde_json::json!({"qc": {"source": "transforms/qc.py:quality_control"}});
-    let endpoints = serde_json::json!({"analysis": {"description": "Main analysis"}});
-    let project_meta = serde_json::json!({"name": "test", "owner": "user"});
-
-    let state = db
-        .insert_commit_state(
-            commit.id,
-            "[project]\nname = \"test\"",
-            &environments,
-            &transforms,
-            &endpoints,
-            &project_meta,
-        )
-        .await?;
-
-    assert_eq!(state.commit_id, commit.id);
-    assert_eq!(state.environments, environments);
-
-    // Get commit state
-    let found = db.get_commit_state(commit.id).await?.unwrap();
-    assert_eq!(found.transforms, transforms);
 
     Ok(())
 }
@@ -483,15 +421,7 @@ async fn test_refs() -> Result<()> {
         .await?;
     let sha = format!("{:040x}", rand::random::<u128>());
     let commit = db
-        .insert_commit(
-            project.id,
-            "github",
-            "user/repo",
-            &sha,
-            "hash",
-            user.id,
-            None,
-        )
+        .insert_commit(project.id, "user/repo", &sha, "hash", user.id, None)
         .await?;
 
     // Create a branch ref
@@ -512,15 +442,7 @@ async fn test_refs() -> Result<()> {
     // Upsert advances the ref (new commit)
     let sha2 = format!("{:040x}", rand::random::<u128>());
     let commit2 = db
-        .insert_commit(
-            project.id,
-            "github",
-            "user/repo",
-            &sha2,
-            "hash2",
-            user.id,
-            None,
-        )
+        .insert_commit(project.id, "user/repo", &sha2, "hash2", user.id, None)
         .await?;
     let r2 = db
         .upsert_ref(project.id, "main", "branch", commit2.id)
@@ -531,65 +453,6 @@ async fn test_refs() -> Result<()> {
     let deleted = db.delete_ref(project.id, "main").await?;
     assert!(deleted);
     assert!(db.resolve_ref(project.id, "main").await?.is_none());
-
-    Ok(())
-}
-
-// ========================================================================
-// Data Atom Operations
-// ========================================================================
-
-#[tokio::test]
-async fn test_data_atoms() -> Result<()> {
-    let Some(db) = get_test_db().await else {
-        return Ok(());
-    };
-
-    let user = db
-        .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
-            &unique_name("user"),
-            None,
-            None,
-        )
-        .await?;
-    let project = db
-        .create_project(user.id, &unique_name("proj"), None, "private")
-        .await?;
-
-    let name = unique_name("data");
-    let hash = format!("{:064x}", rand::random::<u128>());
-
-    let atom = db
-        .insert_data_atom(
-            project.id,
-            &name,
-            &hash,
-            "application/vnd.apache.parquet",
-            1024,
-            &format!("data/{}", hash),
-            user.id,
-        )
-        .await?;
-
-    assert_eq!(atom.name, name);
-    assert_eq!(atom.hash, hash);
-    assert!(!atom.yanked);
-
-    // Get by name
-    let found = db.get_data_atom(project.id, &name).await?.unwrap();
-    assert_eq!(found.id, atom.id);
-
-    // List atoms
-    let atoms = db.list_data_atoms(project.id).await?;
-    assert!(atoms.iter().any(|a| a.id == atom.id));
-
-    // Yank
-    let yanked = db.yank_data_atom(project.id, &name, "Bad data").await?;
-    assert!(yanked);
-    let found = db.get_data_atom(project.id, &name).await?.unwrap();
-    assert!(found.yanked);
-    assert_eq!(found.yank_reason, Some("Bad data".to_string()));
 
     Ok(())
 }
@@ -631,76 +494,6 @@ async fn test_content_refs() -> Result<()> {
     // Get content ref
     let found = db.get_content_ref(&hash).await?.unwrap();
     assert_eq!(found.ref_count, 2);
-
-    Ok(())
-}
-
-// ========================================================================
-// Data Metadata Operations
-// ========================================================================
-
-#[tokio::test]
-async fn test_metadata_log() -> Result<()> {
-    let Some(db) = get_test_db().await else {
-        return Ok(());
-    };
-
-    let user = db
-        .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
-            &unique_name("user"),
-            None,
-            None,
-        )
-        .await?;
-    let project = db
-        .create_project(user.id, &unique_name("proj"), None, "private")
-        .await?;
-    let hash = format!("{:064x}", rand::random::<u128>());
-    let atom = db
-        .insert_data_atom(
-            project.id,
-            &unique_name("data"),
-            &hash,
-            "parquet",
-            100,
-            &format!("data/{}", hash),
-            user.id,
-        )
-        .await?;
-
-    // Append metadata entries
-    db.append_metadata(
-        atom.id,
-        "description",
-        &serde_json::json!("First description"),
-        user.id,
-    )
-    .await?;
-
-    // Brief delay to ensure different timestamps
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-    db.append_metadata(
-        atom.id,
-        "description",
-        &serde_json::json!("Updated description"),
-        user.id,
-    )
-    .await?;
-
-    // Latest should be the second one
-    let latest = db
-        .get_latest_metadata(atom.id, "description")
-        .await?
-        .unwrap();
-    assert_eq!(latest.value, serde_json::json!("Updated description"));
-
-    // History should have both, newest first
-    let history = db.get_metadata_history(atom.id, "description").await?;
-    assert_eq!(history.len(), 2);
-    assert_eq!(history[0].value, serde_json::json!("Updated description"));
-    assert_eq!(history[1].value, serde_json::json!("First description"));
 
     Ok(())
 }
@@ -776,159 +569,6 @@ async fn test_update_and_delete_project() -> Result<()> {
     let deleted = db.delete_project(project.id).await?;
     assert!(deleted);
     assert!(db.get_project_by_id(project.id).await?.is_none());
-
-    Ok(())
-}
-
-// ========================================================================
-// Collection Operations
-// ========================================================================
-
-#[tokio::test]
-async fn test_collections() -> Result<()> {
-    let Some(db) = get_test_db().await else {
-        return Ok(());
-    };
-
-    let user = db
-        .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
-            &unique_name("user"),
-            None,
-            None,
-        )
-        .await?;
-    let project = db
-        .create_project(user.id, &unique_name("proj"), None, "private")
-        .await?;
-
-    let name = unique_name("coll");
-    let coll = db.create_collection(project.id, &name, user.id).await?;
-    assert_eq!(coll.name, name);
-    assert!(!coll.yanked);
-
-    // Get
-    let found = db.get_collection(project.id, &name).await?.unwrap();
-    assert_eq!(found.id, coll.id);
-
-    // List
-    let colls = db.list_collections(project.id).await?;
-    assert!(colls.iter().any(|c| c.id == coll.id));
-
-    // Create version with members (atomically in transaction)
-    let (ver, members) = db
-        .create_collection_version_with_members(
-            coll.id,
-            "version_hash_1",
-            user.id,
-            &[
-                ("data".into(), "my_data".into(), "hash_aaa".into(), 0),
-                ("collection".into(), "sub_coll".into(), "hash_bbb".into(), 1),
-            ],
-        )
-        .await?;
-    assert_eq!(ver.version_number, 1);
-    assert_eq!(ver.hash, "version_hash_1");
-    assert_eq!(members.len(), 2);
-    assert_eq!(members[0].member_type, "data");
-    assert_eq!(members[1].member_type, "collection");
-
-    // Get members
-    let fetched_members = db.get_collection_members(ver.id).await?;
-    assert_eq!(fetched_members.len(), 2);
-    assert_eq!(fetched_members[0].ordinal, 0);
-    assert_eq!(fetched_members[1].ordinal, 1);
-
-    // Second version
-    let (ver2, _) = db
-        .create_collection_version_with_members(coll.id, "version_hash_2", user.id, &[])
-        .await?;
-    assert_eq!(ver2.version_number, 2);
-
-    // Latest version
-    let latest = db.get_latest_collection_version(coll.id).await?.unwrap();
-    assert_eq!(latest.version_number, 2);
-
-    // List versions
-    let versions = db.list_collection_versions(coll.id).await?;
-    assert_eq!(versions.len(), 2);
-    assert_eq!(versions[0].version_number, 2); // DESC order
-
-    // Yank
-    let yanked = db.yank_collection(project.id, &name, "Bad data").await?;
-    assert!(yanked);
-    let found = db.get_collection(project.id, &name).await?.unwrap();
-    assert!(found.yanked);
-    assert_eq!(found.yank_reason, Some("Bad data".to_string()));
-
-    Ok(())
-}
-
-// ========================================================================
-// Endpoint Yank Operations
-// ========================================================================
-
-#[tokio::test]
-async fn test_endpoint_yanks() -> Result<()> {
-    let Some(db) = get_test_db().await else {
-        return Ok(());
-    };
-
-    let user = db
-        .upsert_user_from_github(
-            (rand::random::<i64>() & i64::MAX),
-            &unique_name("user"),
-            None,
-            None,
-        )
-        .await?;
-    let project = db
-        .create_project(user.id, &unique_name("proj"), None, "private")
-        .await?;
-    let sha = format!("{:040x}", rand::random::<u128>());
-    let commit = db
-        .insert_commit(
-            project.id,
-            "github",
-            "user/repo",
-            &sha,
-            "hash",
-            user.id,
-            None,
-        )
-        .await?;
-
-    // Not yanked initially
-    assert!(
-        !db.is_endpoint_yanked(project.id, "analysis", commit.id)
-            .await?
-    );
-
-    // Yank
-    let yank = db
-        .insert_endpoint_yank(project.id, "analysis", commit.id, "Broken output", user.id)
-        .await?;
-    assert_eq!(yank.endpoint_name, "analysis");
-
-    // Now yanked
-    assert!(
-        db.is_endpoint_yanked(project.id, "analysis", commit.id)
-            .await?
-    );
-
-    // List
-    let yanks = db.list_endpoint_yanks(project.id).await?;
-    assert_eq!(yanks.len(), 1);
-
-    // Remove yank
-    let removed = db
-        .remove_endpoint_yank(project.id, "analysis", commit.id)
-        .await?;
-    assert!(removed);
-    assert!(
-        !db.is_endpoint_yanked(project.id, "analysis", commit.id)
-            .await?
-    );
 
     Ok(())
 }
@@ -1038,37 +678,22 @@ async fn test_source_cache() -> Result<()> {
 
     let sha = format!("{:040x}", rand::random::<u128>());
     let entry = db
-        .insert_source_cache(
-            "github",
-            "user/repo",
-            &sha,
-            &format!("source/{}", sha),
-            5000,
-        )
+        .insert_source_cache("user/repo", &sha, &format!("source/{}", sha), 5000)
         .await?;
     assert_eq!(entry.git_commit_sha, sha);
     assert_eq!(entry.byte_size, 5000);
 
     // Get
-    let found = db
-        .get_source_cache("github", "user/repo", &sha)
-        .await?
-        .unwrap();
+    let found = db.get_source_cache("user/repo", &sha).await?.unwrap();
     assert_eq!(found.r2_key, format!("source/{}", sha));
 
     // Touch updates last_accessed
-    let touched = db.touch_source_cache("github", "user/repo", &sha).await?;
+    let touched = db.touch_source_cache("user/repo", &sha).await?;
     assert!(touched);
 
     // Upsert same key → updates last_accessed (no duplicate)
     let entry2 = db
-        .insert_source_cache(
-            "github",
-            "user/repo",
-            &sha,
-            &format!("source/{}", sha),
-            5000,
-        )
+        .insert_source_cache("user/repo", &sha, &format!("source/{}", sha), 5000)
         .await?;
     assert_eq!(entry2.id, entry.id);
 
@@ -1098,15 +723,7 @@ async fn test_materialized_cache() -> Result<()> {
         .await?;
     let sha = format!("{:040x}", rand::random::<u128>());
     let commit = db
-        .insert_commit(
-            project.id,
-            "github",
-            "user/repo",
-            &sha,
-            "hash",
-            user.id,
-            None,
-        )
+        .insert_commit(project.id, "user/repo", &sha, "hash", user.id, None)
         .await?;
 
     let env = db
@@ -1274,15 +891,7 @@ async fn test_create_and_get_job() -> Result<()> {
         .await?;
     let sha = format!("{:040x}", rand::random::<u128>());
     let commit = db
-        .insert_commit(
-            project.id,
-            "github",
-            "user/repo",
-            &sha,
-            "hash",
-            user.id,
-            None,
-        )
+        .insert_commit(project.id, "user/repo", &sha, "hash", user.id, None)
         .await?;
 
     let params = serde_json::json!({"threshold": 0.5});
@@ -1342,15 +951,7 @@ async fn test_find_active_job_dedup() -> Result<()> {
         .await?;
     let sha = format!("{:040x}", rand::random::<u128>());
     let commit = db
-        .insert_commit(
-            project.id,
-            "github",
-            "user/repo",
-            &sha,
-            "hash",
-            user.id,
-            None,
-        )
+        .insert_commit(project.id, "user/repo", &sha, "hash", user.id, None)
         .await?;
 
     let params_hash = format!("{:064x}", rand::random::<u128>());
@@ -1412,15 +1013,7 @@ async fn test_update_job_status_timestamps() -> Result<()> {
         .await?;
     let sha = format!("{:040x}", rand::random::<u128>());
     let commit = db
-        .insert_commit(
-            project.id,
-            "github",
-            "user/repo",
-            &sha,
-            "hash",
-            user.id,
-            None,
-        )
+        .insert_commit(project.id, "user/repo", &sha, "hash", user.id, None)
         .await?;
 
     let job = db
@@ -1472,15 +1065,7 @@ async fn test_update_node_status() -> Result<()> {
         .await?;
     let sha = format!("{:040x}", rand::random::<u128>());
     let commit = db
-        .insert_commit(
-            project.id,
-            "github",
-            "user/repo",
-            &sha,
-            "hash",
-            user.id,
-            None,
-        )
+        .insert_commit(project.id, "user/repo", &sha, "hash", user.id, None)
         .await?;
 
     let job = db
@@ -1532,15 +1117,7 @@ async fn test_set_job_output_and_error() -> Result<()> {
         .await?;
     let sha = format!("{:040x}", rand::random::<u128>());
     let commit = db
-        .insert_commit(
-            project.id,
-            "github",
-            "user/repo",
-            &sha,
-            "hash",
-            user.id,
-            None,
-        )
+        .insert_commit(project.id, "user/repo", &sha, "hash", user.id, None)
         .await?;
 
     // Test set_job_output
@@ -1616,15 +1193,7 @@ async fn test_list_jobs() -> Result<()> {
         .await?;
     let sha = format!("{:040x}", rand::random::<u128>());
     let commit = db
-        .insert_commit(
-            project.id,
-            "github",
-            "user/repo",
-            &sha,
-            "hash",
-            user.id,
-            None,
-        )
+        .insert_commit(project.id, "user/repo", &sha, "hash", user.id, None)
         .await?;
 
     // Create two jobs
@@ -1670,15 +1239,7 @@ async fn test_cleanup_expired_jobs() -> Result<()> {
         .await?;
     let sha = format!("{:040x}", rand::random::<u128>());
     let commit = db
-        .insert_commit(
-            project.id,
-            "github",
-            "user/repo",
-            &sha,
-            "hash",
-            user.id,
-            None,
-        )
+        .insert_commit(project.id, "user/repo", &sha, "hash", user.id, None)
         .await?;
 
     // Create a job (default 24h expiry — won't be cleaned up)

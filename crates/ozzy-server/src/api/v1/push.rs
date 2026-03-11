@@ -29,8 +29,6 @@ pub fn router() -> Router<AppState> {
 struct PushRequest {
     /// Project identifier: "owner/slug"
     project: String,
-    /// Git provider name (e.g., "github")
-    git_provider: String,
     /// Git repository (e.g., "rileyleff/sapflux-analysis")
     git_repo: String,
     /// Full git commit SHA
@@ -103,13 +101,6 @@ async fn push(
     }
     // Normalize to lowercase to avoid case-mismatch in storage keys
     let git_commit_sha = req.git_commit_sha.to_ascii_lowercase();
-
-    if req.git_provider != "github" {
-        return Err(ApiError::BadRequest(format!(
-            "Unsupported git provider: '{}'. Currently only 'github' is supported.",
-            req.git_provider
-        )));
-    }
 
     // Validate ref name if provided
     if let Some(ref ref_name) = req.ref_name {
@@ -204,7 +195,7 @@ async fn push(
         // Check whether source was actually cached on the original push
         let source_cached = state
             .db
-            .get_source_cache(&req.git_provider, &req.git_repo, &git_commit_sha)
+            .get_source_cache(&req.git_repo, &git_commit_sha)
             .await?
             .is_some();
 
@@ -311,8 +302,7 @@ async fn push(
     // ── Cache source tarball ─────────────────────────────────────
     // Source caching is required if any transforms use source files (not command-based).
     let has_source_transforms = ozzy_toml.transforms.values().any(|t| t.source.is_some());
-    let source_cached =
-        cache_source_tarball(&state, &req.git_provider, &req.git_repo, &git_commit_sha).await;
+    let source_cached = cache_source_tarball(&state, &req.git_repo, &git_commit_sha).await;
     if let Err(ref e) = source_cached {
         if has_source_transforms {
             return Err(ApiError::Internal(anyhow::anyhow!(
@@ -333,7 +323,6 @@ async fn push(
         PublishCommitInput {
             project_id: project.id,
             pushed_by: auth.user.id,
-            git_provider: &req.git_provider,
             git_repo: &req.git_repo,
             git_commit_sha: &git_commit_sha,
             ozzy_toml_hash: &toml_hash,
@@ -414,20 +403,19 @@ async fn push(
 /// This is idempotent — if the tarball is already cached, returns early.
 async fn cache_source_tarball(
     state: &AppState,
-    git_provider: &str,
     git_repo: &str,
     git_commit_sha: &str,
 ) -> Result<(), anyhow::Error> {
     // Check if already cached
     if state
         .db
-        .get_source_cache(git_provider, git_repo, git_commit_sha)
+        .get_source_cache(git_repo, git_commit_sha)
         .await?
         .is_some()
     {
         state
             .db
-            .touch_source_cache(git_provider, git_repo, git_commit_sha)
+            .touch_source_cache(git_repo, git_commit_sha)
             .await?;
         return Ok(());
     }
@@ -447,7 +435,7 @@ async fn cache_source_tarball(
     let r2_key = source_storage.storage_key(git_commit_sha, "tar.gz")?;
     state
         .db
-        .insert_source_cache(git_provider, git_repo, git_commit_sha, &r2_key, byte_size)
+        .insert_source_cache(git_repo, git_commit_sha, &r2_key, byte_size)
         .await?;
 
     Ok(())

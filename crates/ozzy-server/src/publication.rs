@@ -130,7 +130,6 @@ pub enum PublicationError {
 pub struct PublishCommitInput<'a> {
     pub project_id: Uuid,
     pub pushed_by: Uuid,
-    pub git_provider: &'a str,
     pub git_repo: &'a str,
     pub git_commit_sha: &'a str,
     pub ozzy_toml_hash: &'a str,
@@ -183,7 +182,6 @@ pub async fn publish_v4_commit_atomically(
     let commit = insert_commit_tx(
         &mut tx,
         input.project_id,
-        input.git_provider,
         input.git_repo,
         input.git_commit_sha,
         input.ozzy_toml_hash,
@@ -920,7 +918,6 @@ async fn get_commit_by_sha_tx(
 async fn insert_commit_tx(
     tx: &mut Transaction<'_, Postgres>,
     project_id: Uuid,
-    git_provider: &str,
     git_repo: &str,
     git_commit_sha: &str,
     ozzy_toml_hash: &str,
@@ -935,7 +932,7 @@ async fn insert_commit_tx(
         "#,
     )
     .bind(project_id)
-    .bind(git_provider)
+    .bind("github")
     .bind(git_repo)
     .bind(git_commit_sha)
     .bind(ozzy_toml_hash)
@@ -1518,7 +1515,6 @@ transform = "clean"
         let input_1 = PublishCommitInput {
             project_id: project.id,
             pushed_by: user.id,
-            git_provider: "github",
             git_repo: "rileyleff/ozzydb",
             git_commit_sha: &format!("{:040x}", rand::random::<u64>()),
             ozzy_toml_hash: "hash_1",
@@ -1542,7 +1538,6 @@ transform = "clean"
         let input_2 = PublishCommitInput {
             project_id: project.id,
             pushed_by: user.id,
-            git_provider: "github",
             git_repo: "rileyleff/ozzydb",
             git_commit_sha: &format!("{:040x}", rand::random::<u64>()),
             ozzy_toml_hash: "hash_2",

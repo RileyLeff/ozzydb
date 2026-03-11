@@ -11,7 +11,6 @@ use super::shared;
 #[derive(Debug, Serialize)]
 struct PushRequest {
     project: String,
-    git_provider: String,
     git_repo: String,
     git_commit_sha: String,
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
@@ -52,7 +51,6 @@ pub async fn run(ref_name: Option<&str>, message: Option<&str>) -> Result<()> {
 
     let req = PushRequest {
         project: project_path.clone(),
-        git_provider: project.git_provider,
         git_repo: project.git_repo,
         git_commit_sha: git_sha.clone(),
         ref_name,
@@ -106,7 +104,6 @@ mod tests {
     fn test_push_request_serialization() {
         let req = PushRequest {
             project: "alice/myproject".to_string(),
-            git_provider: "github".to_string(),
             git_repo: "alice/myproject".to_string(),
             git_commit_sha: "a".repeat(40),
             ref_name: Some("main".to_string()),
@@ -122,7 +119,6 @@ mod tests {
     fn test_push_request_skips_none() {
         let req = PushRequest {
             project: "alice/myproject".to_string(),
-            git_provider: "github".to_string(),
             git_repo: "alice/myproject".to_string(),
             git_commit_sha: "a".repeat(40),
             ref_name: None,

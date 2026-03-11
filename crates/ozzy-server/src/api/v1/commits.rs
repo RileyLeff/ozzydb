@@ -43,7 +43,6 @@ fn default_limit() -> i64 {
 struct CommitSummary {
     id: String,
     git_commit_sha: String,
-    git_provider: String,
     git_repo: String,
     message: Option<String>,
     pushed_by: String,
@@ -54,7 +53,6 @@ struct CommitSummary {
 struct CommitDetail {
     id: String,
     git_commit_sha: String,
-    git_provider: String,
     git_repo: String,
     ozzy_toml_hash: String,
     message: Option<String>,
@@ -95,7 +93,6 @@ async fn list_commits(
         summaries.push(CommitSummary {
             id: c.id.to_string(),
             git_commit_sha: c.git_commit_sha,
-            git_provider: c.git_provider,
             git_repo: c.git_repo,
             message: c.message,
             pushed_by: username,
@@ -140,7 +137,6 @@ async fn get_commit(
     Ok(Json(CommitDetail {
         id: commit.id.to_string(),
         git_commit_sha: commit.git_commit_sha,
-        git_provider: commit.git_provider,
         git_repo: commit.git_repo,
         ozzy_toml_hash: commit.ozzy_toml_hash,
         message: commit.message,

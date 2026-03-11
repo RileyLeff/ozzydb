@@ -1453,7 +1453,6 @@ mod tests {
         let commit = db
             .insert_commit(
                 project.id,
-                "github",
                 "rileyleff/ozzydb",
                 &format!("{:040x}", rand::random::<u64>()),
                 "test_ozzy_toml_hash",
@@ -1815,7 +1814,6 @@ mod tests {
         let commit = db
             .insert_commit(
                 project.id,
-                "github",
                 "rileyleff/ozzydb",
                 &format!("{:040x}", rand::random::<u64>()),
                 "test_ozzy_toml_hash",

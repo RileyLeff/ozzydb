@@ -40,7 +40,6 @@ pub fn http_client() -> Result<reqwest::Client> {
 }
 
 /// Parse a project reference from ozzy.toml in the current directory.
-/// Returns (owner, slug, git_provider, git_repo).
 pub fn load_project_from_toml() -> Result<ProjectRef> {
     let toml_str =
         std::fs::read_to_string("ozzy.toml").context("No ozzy.toml found in current directory")?;
@@ -66,15 +65,19 @@ pub fn load_project_from_toml() -> Result<ProjectRef> {
         .and_then(|g| g.as_table())
         .ok_or_else(|| anyhow::anyhow!("Missing [git] in ozzy.toml"))?;
 
-    let provider = git
-        .get("provider")
-        .and_then(|p| p.as_str())
-        .unwrap_or("github");
-
     let repo = git
         .get("repo")
         .and_then(|r| r.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing git.repo in ozzy.toml"))?;
+
+    if let Some(provider) = git.get("provider").and_then(|p| p.as_str())
+        && provider != "github"
+    {
+        bail!(
+            "Unsupported git.provider '{}': v4 currently supports only GitHub repos",
+            provider
+        );
+    }
 
     validate_name(owner, "project owner")?;
     validate_name(name, "project name")?;
@@ -82,7 +85,6 @@ pub fn load_project_from_toml() -> Result<ProjectRef> {
     Ok(ProjectRef {
         owner: owner.to_string(),
         slug: name.to_string(),
-        git_provider: provider.to_string(),
         git_repo: repo.to_string(),
     })
 }
@@ -92,7 +94,6 @@ pub fn load_project_from_toml() -> Result<ProjectRef> {
 pub struct ProjectRef {
     pub owner: String,
     pub slug: String,
-    pub git_provider: String,
     pub git_repo: String,
 }
 
@@ -198,7 +199,6 @@ mod tests {
         let pr = ProjectRef {
             owner: "alice".to_string(),
             slug: "myproject".to_string(),
-            git_provider: "github".to_string(),
             git_repo: "alice/myproject".to_string(),
         };
         assert_eq!(pr.project_path(), "alice/myproject");

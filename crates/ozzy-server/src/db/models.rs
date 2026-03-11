@@ -87,17 +87,6 @@ pub struct Commit {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct CommitState {
-    pub commit_id: Uuid,
-    pub ozzy_toml_raw: String,
-    pub environments: serde_json::Value,
-    pub transforms: serde_json::Value,
-    pub endpoints: serde_json::Value,
-    pub project_meta: serde_json::Value,
-    pub parsed_at: DateTime<Utc>,
-}
-
 // ============================================================
 // Refs
 // ============================================================
@@ -113,26 +102,6 @@ pub struct Ref {
     pub updated_at: DateTime<Utc>,
 }
 
-// ============================================================
-// Data atoms
-// ============================================================
-
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct DataAtom {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub name: String,
-    pub hash: String,
-    pub content_type: String,
-    pub byte_size: i64,
-    pub r2_key: String,
-    pub uploaded_by: Uuid,
-    pub yanked: bool,
-    pub yank_reason: Option<String>,
-    pub yanked_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-}
-
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct ContentRef {
     pub hash: String,
@@ -141,71 +110,6 @@ pub struct ContentRef {
     pub byte_size: i64,
     pub ref_count: i32,
     pub created_at: DateTime<Utc>,
-}
-
-// ============================================================
-// Data metadata
-// ============================================================
-
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct DataMetadataEntry {
-    pub id: Uuid,
-    pub data_atom_id: Uuid,
-    pub field: String,
-    pub value: serde_json::Value,
-    pub set_by: Uuid,
-    pub created_at: DateTime<Utc>,
-}
-
-// ============================================================
-// Collections
-// ============================================================
-
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct Collection {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub name: String,
-    pub created_by: Uuid,
-    pub yanked: bool,
-    pub yank_reason: Option<String>,
-    pub yanked_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct CollectionVersion {
-    pub id: Uuid,
-    pub collection_id: Uuid,
-    pub version_number: i32,
-    pub hash: String,
-    pub created_by: Uuid,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct CollectionMember {
-    pub id: Uuid,
-    pub collection_version_id: Uuid,
-    pub member_type: String,
-    pub member_ref: String,
-    pub member_hash: String,
-    pub ordinal: i32,
-}
-
-// ============================================================
-// Endpoint yanks
-// ============================================================
-
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct EndpointYank {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub endpoint_name: String,
-    pub commit_id: Uuid,
-    pub yank_reason: String,
-    pub yanked_by: Uuid,
-    pub yanked_at: DateTime<Utc>,
 }
 
 // ============================================================
