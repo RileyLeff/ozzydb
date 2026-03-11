@@ -1,7 +1,7 @@
 # v4 Workflow State
 
-## Current Phase: Phase 8 underway
-## Current Step: Phase 8.3 next; stabilization review is complete
+## Current Phase: Phase 8 complete
+## Current Step: v4 implementation baseline complete
 
 ## Completed Steps
 
@@ -771,3 +771,17 @@
   - `cargo check -p ozzy-server --tests`
 - Review artifact:
   - `planning/reviews/v4/34_phase8_2_review.md`
+
+
+### Phase 8.3: Update docs from the new ontology
+- Rewrote `README.md` around the live v4 model instead of the removed v3 data/collection and schema-only surface.
+- Rewrote `docs/getting_started.md` so the examples use typed artifacts, typed ports, endpoint inputs, and fetch-time artifact bindings.
+- Added `planning/v4/soul.md` as the active v4 principle document.
+- Updated v4 planning references to point at `planning/v4/soul.md`.
+- Review artifact:
+  - `planning/reviews/v4/35_phase8_3_docs_review.md`
+
+## Status
+- Phase 8 is complete.
+- The planned v4 server/API/CLI/Python-client rewrite is complete.
+- Remaining work is post-plan stabilization, additional end-to-end testing, and any deliberate follow-on features beyond the v4 implementation plan.

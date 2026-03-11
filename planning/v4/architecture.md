@@ -1,6 +1,6 @@
 # v4 Architecture
 
-See also: `../v3/soul.md` (current project principles), `../v3/implementation_plan.md` (last implementation plan), `../v3/thoughts_on_types.md` and related v3 type notes.
+See also: `soul.md` (current project principles), `../v3/implementation_plan.md` (last implementation plan), `../v3/thoughts_on_types.md` and related v3 type notes.
 
 ---
 

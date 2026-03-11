@@ -1,6 +1,6 @@
 # v4 Implementation Plan
 
-See `architecture.md` for the v4 object model and `../v3/soul.md` for the current project principles.
+See `architecture.md` for the v4 object model and `soul.md` for the current project principles.
 
 ---
 

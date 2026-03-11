@@ -1,12 +1,18 @@
 # Getting Started with OzzyDB
 
-This guide walks you through creating your first OzzyDB project: uploading data, writing a transform, and fetching results.
+This guide walks through the v4 flow:
+
+1. initialize a project
+2. upload input artifacts
+3. define typed transforms and typed endpoint inputs
+4. publish the current git commit
+5. fetch a result by binding concrete artifact IDs
 
 ## Prerequisites
 
 - **Python 3.10+** with `uv` or `pip`
 - **Git** (your transforms live in a git repo)
-- A **GitHub account** (for authentication)
+- A **GitHub account** (for authentication and push/fetch against hosted OzzyDB)
 
 ## 1. Install the CLI and Python client
 
@@ -17,7 +23,8 @@ uv add ozzydb
 pip install ozzydb
 ```
 
-The CLI (`ozzy`) is a standalone Rust binary. Download it from the [releases page](https://github.com/RileyLeff/ozzydb/releases), or build from source:
+The CLI (`ozzy`) is a standalone Rust binary. Download it from the releases
+page, or build from source:
 
 ```bash
 cargo install --path crates/ozzy-cli
@@ -29,9 +36,9 @@ cargo install --path crates/ozzy-cli
 ozzy auth login
 ```
 
-This starts a GitHub device flow. You'll get a code to enter at [github.com/login/device](https://github.com/login/device). Once authorized, your credentials are saved to `~/.config/ozzy/credentials.json`.
-
-You can also sign in at [ozzydb.com/login](https://ozzydb.com/login).
+This starts a GitHub device flow. You'll get a code to enter at
+[github.com/login/device](https://github.com/login/device). Once authorized,
+your credentials are saved to `~/.config/ozzy/credentials.json`.
 
 ## 3. Initialize a project
 
@@ -43,7 +50,8 @@ git init
 ozzy init
 ```
 
-This creates an `ozzy.toml` file. OzzyDB auto-detects your git remote and language. The file will look something like:
+This creates an `ozzy.toml` file. OzzyDB auto-detects your git remote and
+runtime. The file will look something like:
 
 ```toml
 [project]
@@ -51,81 +59,61 @@ name = "sensor-qc"
 owner = "your-username"
 
 [git]
-provider = "github"
 repo = "your-username/sensor-qc"
 
 [remote]
 url = "https://api.ozzydb.com"
+
+[environments.default]
+base = "ozzydb/python:3.12"
+lockfile = "uv.lock"
+
+# [types]
+# RawCsv = 'csv(delimiter=",", header=true) & table<{ value: float64 }>'
 ```
 
-## 4. Upload some data
+## 4. Upload an artifact
 
-Upload a data file to OzzyDB. Data atoms are the raw inputs to your pipeline.
+Upload a file as a first-class artifact:
 
 ```bash
-# Upload a CSV file
-ozzy data upload readings.csv --name raw_readings --description "Raw sensor readings from field station"
+ozzy artifact upload readings.csv
 ```
 
-You can upload any file format: CSV, Parquet, Arrow, images, PDFs, whatever your transforms need.
+OzzyDB prints the artifact UUID. Keep it; you will bind it to an endpoint input
+when you fetch.
+
+Inspect what is now stored in the project:
 
 ```bash
-# List your data
-ozzy data ls
-
-# View details
-ozzy data show raw_readings
+ozzy artifact ls
+ozzy artifact show <artifact-uuid>
 ```
 
 ## 5. Write a transform
 
-A transform is just a Python function. Create one:
+Create a transform scaffold:
 
 ```bash
 ozzy transform scaffold clean --lang python
 ```
 
-This creates `transforms/clean.py` with a template. Edit it:
+Then edit `transforms/clean.py`:
 
 ```python
-# transforms/clean.py
-import csv
-import json
-import os
-
-
 def quality_control(inputs, params):
-    """Remove rows with missing or out-of-range values."""
-
-    # Read input (OzzyDB passes file paths via the inputs dict)
-    with open(inputs["raw_readings"]) as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-
-    # Get params (with defaults)
-    min_val = params.get("min_value", 0)
-    max_val = params.get("max_value", 100)
-
-    # Filter
-    cleaned = [
-        row for row in rows
-        if min_val <= float(row["value"]) <= max_val
-    ]
-
-    # Write output (OzzyDB expects output at the path in OZZY_OUTPUT_PATH)
-    output_path = os.environ["OZZY_OUTPUT_PATH"]
-    with open(output_path, "w", newline="") as f:
-        if cleaned:
-            writer = csv.DictWriter(f, fieldnames=cleaned[0].keys())
-            writer.writeheader()
-            writer.writerows(cleaned)
+    """Return a value matching the declared output port type."""
+    raw = inputs["raw"]
+    min_val = params.get("min_value", 0.0)
+    return raw.filter(raw["value"] >= min_val)
 ```
 
-The function signature is always `(inputs, params)`. Inputs is a dict mapping input names to file paths. Params is a dict of parameter values.
+The function signature is still `(inputs, params)`, but in v4 the important
+thing is that those ports are declared and typed in `ozzy.toml`.
 
-## 6. Define the pipeline in ozzy.toml
+## 6. Define the pipeline in `ozzy.toml`
 
-Add the environment, transform, and endpoint to your `ozzy.toml`:
+Add typed aliases, typed transform ports, and typed endpoint inputs:
 
 ```toml
 [project]
@@ -133,65 +121,61 @@ name = "sensor-qc"
 owner = "your-username"
 
 [git]
-provider = "github"
 repo = "your-username/sensor-qc"
 
 [remote]
 url = "https://api.ozzydb.com"
 
-# Environment: use a pre-built Python image (no extra deps needed for stdlib)
 [environments.default]
-image = "python:3.12-slim"
+base = "ozzydb/python:3.12"
+lockfile = "uv.lock"
 
-# Transform: point to the function
+[types]
+RawRow = '{ id: int64, value: float64, timestamp: datetime }'
+RawReadings = 'csv(delimiter=",", header=true) & table<RawRow>'
+CleanReadings = 'csv(delimiter=",", header=true) & table<{
+  id: int64,
+  value: float64 & min(0),
+  timestamp: datetime
+}>'
+
 [transforms.clean]
 source = "transforms/clean.py:quality_control"
 environment = "default"
-output = "csv"
 
-# Declare named inputs (name = expected format)
-[transforms.clean.inputs]
-raw_readings = "csv"
+[transforms.clean.inputs.raw]
+type = "RawReadings"
 
-# Declare parameters with types and defaults
+[transforms.clean.outputs.result]
+type = "CleanReadings"
+
 [transforms.clean.params.min_value]
 type = "float"
-default = 0
+default = 0.0
 
-[transforms.clean.params.max_value]
-type = "float"
-default = 100
-
-# Endpoint: wire data to transforms
 [endpoints.cleaned]
 description = "Cleaned sensor readings"
 
-# Expose parameters to consumers (binds to transform params)
+[endpoints.cleaned.inputs.raw]
+type = "RawReadings"
+
 [endpoints.cleaned.params.min_value]
 type = "float"
-default = 0
+default = 0.0
 binds = "qc.min_value"
 description = "Minimum valid reading"
 
-[endpoints.cleaned.params.max_value]
-type = "float"
-default = 100
-binds = "qc.max_value"
-description = "Maximum valid reading"
-
-# Nodes: each runs a transform
 [endpoints.cleaned.nodes]
 qc = { transform = "clean" }
 
-# Edges: wire data sources to node inputs
 [[endpoints.cleaned.edges]]
-from = "data:raw_readings"
-to = "qc.raw_readings"
+from = "input:raw"
+to = "qc.raw"
 ```
 
 ## 7. Push to the registry
 
-Commit your code, push to GitHub, then register with OzzyDB:
+Commit your code, push to GitHub, then publish to OzzyDB:
 
 ```bash
 git add .
@@ -201,18 +185,18 @@ git push origin main
 ozzy push -m "initial pipeline"
 ```
 
-`ozzy push` tells OzzyDB "at this git commit, here's what my pipeline looks like." OzzyDB reads your `ozzy.toml` from the git repo, validates it, and registers the commit.
+`ozzy push` tells OzzyDB: “at this git commit, here is my typed project graph.”
+OzzyDB reads `ozzy.toml`, validates it, resolves types/transforms/environments,
+and publishes a new project revision.
 
 ## 8. Fetch results
 
-Now anyone can fetch your endpoint:
+Fetch by binding concrete artifact IDs to the endpoint's typed inputs:
 
 ```bash
-# Via CLI
-ozzy fetch your-username/sensor-qc/cleaned
-
-# With custom parameters
-ozzy fetch your-username/sensor-qc/cleaned -p min_value=10 -p max_value=90
+ozzy fetch your-username/sensor-qc/cleaned \
+  --input raw=<artifact-uuid> \
+  --param min_value=10
 ```
 
 Or from Python:
@@ -220,44 +204,25 @@ Or from Python:
 ```python
 import ozzydb
 
-# Returns a Polars DataFrame
-df = ozzydb.fetch("your-username/sensor-qc/cleaned")
-print(df)
-
-# With parameters
-df = ozzydb.fetch("your-username/sensor-qc/cleaned", params={"min_value": 10})
+df = ozzydb.fetch(
+    "your-username/sensor-qc/cleaned",
+    inputs={"raw": "<artifact-uuid>"},
+    min_value=10,
+)
 ```
 
-The first fetch runs the pipeline and caches the result. Subsequent fetches with the same inputs and parameters return the cached result instantly.
+The first fetch runs the pipeline and caches the result. Subsequent fetches with
+the same typed input artifact bindings, transform version, environment version,
+source hash, params, and secrets provenance reuse the cached output.
 
-## 9. Inspect on the web
+## 9. Inspect what was published
 
-Visit [ozzydb.com/your-username/sensor-qc](https://ozzydb.com) to see your project: endpoints, transforms, data, commit history, and the DAG visualization.
-
----
-
-## Key concepts
-
-**Data atoms** are raw, immutable inputs. Upload once, reference by name. Content-addressed (same bytes = same hash = stored once).
-
-**Transforms** are functions that take data + parameters and produce output. Written in Python (R support coming). They run in sandboxed Docker containers.
-
-**Endpoints** are DAGs of transforms wired to data. They're the "API" of your project. Fetch an endpoint to get a result.
-
-**Collections** group related data atoms with versioning. Like a mutable pointer to an immutable set of data.
-
-**The materialized hash** is the cache key: `blake3(inputs + transform + params + platform)`. Same inputs + same code + same parameters = same result = cache hit.
-
-## CLI reference
-
+```bash
+ozzy endpoint ls
+ozzy endpoint show cleaned
+ozzy artifact show <artifact-uuid>
+ozzy artifact conformance <artifact-uuid> --type your-username/RawReadings@1
 ```
-ozzy init                          Initialize a project
-ozzy data upload/ls/show/yank      Manage data atoms
-ozzy collection create/add/ls      Manage collections
-ozzy transform scaffold            Scaffold a new transform
-ozzy push                          Register a commit with the registry
-ozzy fetch <owner/project/ep>      Fetch a remote endpoint
-ozzy auth login/logout             Authentication
-ozzy cache ls/size/clear           Local cache management
-ozzy secret set/ls/rm              Project secrets
-```
+
+The Python client also exposes endpoint inspection, artifact download, bundle
+creation, collection creation, and conformance inspection.
