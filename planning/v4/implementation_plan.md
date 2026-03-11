@@ -379,6 +379,16 @@ Re-evaluate whether v3-style endpoint/data yanks survive into v4, and if so at w
 
 Do not automatically preserve them just because they exist.
 
+Decision:
+
+- v4 does **not** preserve yanks as a first-class primitive.
+- bad or unusable artifacts are represented through explicit conformance state
+  (`declared`, `verified`, `rejected`), not soft-delete-style public yanks.
+- the public v4 contract should expose artifact creation, manifest creation, and
+  conformance declaration/verification instead of the old `data`/`collections`
+  yank surface.
+- legacy endpoint yank checks should be removed from the live fetch path.
+
 ---
 
 ## Phase 7: CLI And Python Client Rewrite

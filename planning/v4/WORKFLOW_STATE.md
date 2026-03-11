@@ -606,8 +606,8 @@
   - `planning/reviews/v4/27_phase5_external_review_fixes.md`
 
 
-## Current Phase: Phase 6 next
-## Current Step: Phase 6.3 next; direct artifact and registry-object inspection is complete
+## Current Phase: Phase 7 next
+## Current Step: Phase 7.1 next; the v4 public API contract is now in place
 
 ### Phase 6.1: Rewrite endpoint inspection APIs
 - Added a shared v4 inspection layer in `crates/ozzy-server/src/api/v1/inspection.rs`.
@@ -666,3 +666,22 @@
   - `cargo check -p ozzy-server --tests`
 - Review artifact:
   - `planning/reviews/v4/29_phase6_2_review.md`
+
+### Phase 6 contract cleanup: artifact ingress and yank decision
+- Added live v4 artifact write endpoints:
+  - `POST /v1/artifacts/{owner}/{slug}/upload`
+  - `POST /v1/artifacts/{owner}/{slug}/manifest`
+  - `POST /v1/artifacts/{owner}/{slug}/{artifact_id}/conformance`
+  - `GET /v1/artifacts/{owner}/{slug}/{artifact_id}/download`
+- Removed the old public `data` and `collections` routes from the v1 API router.
+- Removed endpoint-yank checks from the live fetch path.
+- Resolved the v4 yank decision:
+  - yanks do not survive as a first-class v4 primitive
+  - artifact usability is expressed through conformance state instead
+- Verification for this checkpoint:
+  - `cargo fmt`
+  - `cargo test -p ozzy-core`
+  - `cargo test -p ozzy-types`
+  - `cargo check -p ozzy-server --tests`
+- Review artifact:
+  - `planning/reviews/v4/30_phase6_contract_cleanup_review.md`

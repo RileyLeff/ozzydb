@@ -109,19 +109,7 @@ async fn fetch_endpoint(
         .get(&endpoint_name)
         .ok_or_else(|| ApiError::not_found(format!("Endpoint '{}' not found", endpoint_name)))?;
 
-    // ── 3. Check yank status ────────────────────────────────────
-    if state
-        .db
-        .is_endpoint_yanked(project.id, &endpoint_name, commit.id)
-        .await?
-    {
-        return Err(ApiError::Gone(format!(
-            "Endpoint '{}' has been yanked at this commit",
-            endpoint_name
-        )));
-    }
-
-    // ── 4. Validate consumer params ─────────────────────────────
+    // ── 3. Validate consumer params ─────────────────────────────
     let request_params = request.params.into_iter().collect::<HashMap<_, _>>();
     let resolved_params = validate_and_resolve_params(endpoint_def, &request_params)?;
     let resolved_inputs = validate_and_resolve_endpoint_inputs(
@@ -143,7 +131,7 @@ async fn fetch_endpoint(
         serde_json::to_string(&input_bindings).map_err(|e| ApiError::Internal(e.into()))?;
     let input_bindings_hash = ozzy_core::hash::blake3_hash(canonical_input_bindings.as_bytes());
 
-    // ── 5. Check dedup (return existing active job) ─────────────
+    // ── 4. Check dedup (return existing active job) ─────────────
     if let Some(existing) = state
         .db
         .find_active_job(
@@ -170,7 +158,7 @@ async fn fetch_endpoint(
             .into_response());
     }
 
-    // ── 6. Build execution order + cache-hit fast path ──────────
+    // ── 5. Build execution order + cache-hit fast path ──────────
     let exec_order = build_execution_order(endpoint_def)?;
 
     let (all_cached, node_outputs) = check_all_node_caches(
@@ -254,7 +242,7 @@ async fn fetch_endpoint(
             .into_response());
     }
 
-    // ── 7. Rate limit check (only for non-cached execution) ─────
+    // ── 6. Rate limit check (only for non-cached execution) ─────
     // NOTE: This is an advisory/soft limit — concurrent requests can race past
     // the check before job creation (TOCTOU). This is standard for rate limiters
     // and acceptable since the limits are for resource protection, not billing.

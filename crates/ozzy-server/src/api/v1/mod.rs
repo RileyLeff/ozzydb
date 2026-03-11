@@ -4,9 +4,7 @@ mod access;
 mod admin;
 mod artifacts;
 pub mod auth;
-mod collections;
 mod commits;
-mod data;
 mod endpoints;
 pub(crate) mod fetch;
 mod inspection;
@@ -26,8 +24,6 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .nest("/auth", auth::router())
         .nest("/artifacts", artifacts::router())
-        .nest("/data", data::router())
-        .nest("/collections", collections::router())
         .nest("/secrets", secrets::router())
         .nest("/push", push::router())
         .nest("/projects", projects::router())
