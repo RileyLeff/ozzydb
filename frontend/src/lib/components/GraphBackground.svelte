@@ -1,6 +1,16 @@
-<script>
-	let canvas = $state(null);
-	let animId = $state(null);
+<script lang="ts">
+	type Node = {
+		x: number;
+		y: number;
+		vx: number;
+		vy: number;
+		r: number;
+		g: number;
+		b: number;
+		radius: number;
+	};
+
+	let canvas = $state<HTMLCanvasElement | null>(null);
 
 	const NODE_COUNT = 70;
 	const MAX_DIST = 160;
@@ -10,12 +20,12 @@
 	const PINK = { r: 232, g: 101, b: 122 };
 	const GREEN = { r: 163, g: 184, b: 108 };
 
-	function randomBetween(a, b) {
+	function randomBetween(a: number, b: number) {
 		return a + Math.random() * (b - a);
 	}
 
-	function createNodes(w, h) {
-		const nodes = [];
+	function createNodes(w: number, h: number) {
+		const nodes: Node[] = [];
 		for (let i = 0; i < NODE_COUNT; i++) {
 			const isPink = Math.random() < 0.6;
 			const color = isPink ? PINK : GREEN;
@@ -35,20 +45,26 @@
 
 	$effect(() => {
 		if (!canvas) return;
+		const canvasEl = canvas;
 
-		const ctx = canvas.getContext('2d');
-		let w, h;
-		let nodes;
+		const ctxMaybe = canvasEl.getContext('2d');
+		if (!ctxMaybe) return;
+		const ctx: CanvasRenderingContext2D = ctxMaybe;
+		let w = 0;
+		let h = 0;
+		let nodes: Node[] = [];
+		let animId: number | null = null;
 
 		function resize() {
-			const rect = canvas.parentElement.getBoundingClientRect();
+			const rect = canvasEl.parentElement?.getBoundingClientRect();
+			if (!rect) return;
 			const dpr = window.devicePixelRatio || 1;
 			w = rect.width;
 			h = rect.height;
-			canvas.width = w * dpr;
-			canvas.height = h * dpr;
-			canvas.style.width = w + 'px';
-			canvas.style.height = h + 'px';
+			canvasEl.width = w * dpr;
+			canvasEl.height = h * dpr;
+			canvasEl.style.width = w + 'px';
+			canvasEl.style.height = h + 'px';
 			ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		}
 
@@ -115,7 +131,7 @@
 		window.addEventListener('resize', onResize);
 
 		return () => {
-			if (animId) cancelAnimationFrame(animId);
+			if (animId !== null) cancelAnimationFrame(animId);
 			window.removeEventListener('resize', onResize);
 		};
 	});

@@ -1,8 +1,12 @@
-<script>
-	let { code, language = 'python', title } = $props();
+<script lang="ts">
+	let {
+		code,
+		language = 'python',
+		title,
+	}: { code: string; language?: string; title?: string } = $props();
 
 	let copied = $state(false);
-	let timeout_id = $state(null);
+	let timeout_id = $state<ReturnType<typeof setTimeout> | null>(null);
 
 	function copy_to_clipboard() {
 		navigator.clipboard.writeText(code);

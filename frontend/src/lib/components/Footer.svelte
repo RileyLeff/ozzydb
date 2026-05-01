@@ -1,9 +1,15 @@
 <footer>
 	<div class="footer-inner">
 		<nav class="links">
-			<a href="/docs">Docs</a>
+			<a
+				href="https://github.com/rileyleff/ozzydb/blob/main/docs/getting_started.md"
+				target="_blank"
+				rel="noopener noreferrer">Guide</a
+			>
 			<a href="https://github.com/rileyleff/ozzydb" target="_blank" rel="noopener noreferrer">GitHub</a>
-			<a href="/cli">CLI</a>
+			<a href="https://github.com/rileyleff/ozzydb#readme" target="_blank" rel="noopener noreferrer">
+				Readme
+			</a>
 		</nav>
 		<p class="copyright">&copy; {new Date().getFullYear()} ozzydb</p>
 	</div>
