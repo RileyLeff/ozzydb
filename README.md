@@ -78,9 +78,9 @@ from context, naming conventions, metadata, or prose.
 OzzyDB stores the recipe directly.
 
 This is a more natural compression scheme for scientific data. Kolmogorov would
-object to the formalism, since OzzyDB is not literally finding shortest programs,
-but I think he would recognize the impulse: version the faithful description of
-the change first, then materialize the changed bytes when they are worth storing.
+probably have complaints about my implementation, but I think he would like the
+direction: version the shortest faithful description of the change, not just the
+changed bytes.
 
 That has a practical consequence. You can keep many logical versions of a
 dataset without eagerly storing every materialized result. OzzyDB can cache the
@@ -109,7 +109,8 @@ with trust-based metadata and reporting standards layered on top.
 
 Researchers need infrastructure that can preserve more structure than a generic
 file repository while still letting scientists bring their own tools. OzzyDB
-tries to sit in that middle layer:
+tries to sit in that middle layer. At risk of pulling an
+[xkcd 927](https://xkcd.com/927/), the pieces it cares about are:
 
 - Git owns source code.
 - OzzyDB owns artifacts, transforms, environments, and provenance.
@@ -122,7 +123,67 @@ should be able to point at the versioned operation that turns one scientific
 object into another: the code, environment, input contract, output contract, and
 evidence that it ran.
 
-## How OzzyDB Works
+## What I've Learned So Far + Status
+
+The v4 server, API, CLI, and Python client rewrite is implemented. The active
+design baseline lives in:
+
+- `planning/v4/architecture.md`
+- `planning/v4/implementation_plan.md`
+- `planning/v4/WORKFLOW_STATE.md`
+- `planning/v4/soul.md`
+
+Older v3 planning docs are background only unless a v4 document points back to
+them.
+
+### What I Learned Building It
+
+I built OzzyDB because I wanted scientific data to carry its history more
+faithfully.
+
+Trying to use it for my own research made the next missing piece obvious:
+provenance is necessary, and it still leaves a hard semantic problem. If
+arbitrary scientific tools are allowed, the system also needs to understand what
+information is preserved, destroyed, assumed, or made more expensive to recover
+as data moves across formats, models, and representations.
+
+A CSV, an Arrow table, a pandas DataFrame, an R tibble, a Parquet file, and a
+domain-specific model object may contain overlapping scientific meaning. Moving
+between them changes what can be recovered. The path can be lossless, lossy,
+one-way, approximately reversible, cheap, expensive, or valid only under
+assumptions.
+
+OzzyDB currently records typed artifacts and typed transforms. The deeper system
+needs a richer graph of scientific meaning: what a transform preserves, what it
+forgets, what assumptions make it valid, and how a workflow should choose among
+competing paths.
+
+That is why I now think OzzyDB is one half of the tool I actually need.
+
+### Myco And The Longer Arc
+
+In parallel, I have been building [Myco](https://github.com/RileyLeff/myco), a
+language and compiler for declarative scientific models.
+
+OzzyDB is about proof by observation: artifacts, transforms, evidence, and
+provenance. Myco is about proof by construction: executable scientific
+structure, constraints, invertibility, overdetermination, lossiness, and
+workflow-specific compilation.
+
+I expect these projects to converge eventually, but I am intentionally avoiding
+that merger for now.
+
+Myco needs more time to develop its acausal, invertible core before every hard
+external operation becomes an opaque escape hatch. OzzyDB needs more time as a
+practical data and provenance layer. The shared future is probably a system
+where OzzyDB stores and verifies the evidence, while Myco supplies a richer type
+and process language for describing what scientific transformations mean.
+
+The destination is a substrate where scientific data can move without shedding
+its history at every step. For now, OzzyDB is the data layer: a working attempt
+to keep the recipes, artifacts, environments, and evidence attached.
+
+## How OzzyDB Works Today
 
 OzzyDB is built around six objects:
 
@@ -194,8 +255,9 @@ to = "qc.raw"
 Then:
 
 ```bash
-ozzy artifact upload readings.csv
 ozzy push -m "publish sensor cleaning pipeline"
+ozzy artifact upload readings.csv
+ozzy artifact conformance 11111111-1111-1111-1111-111111111111 --type RawReading@1
 ozzy fetch acme/sensor-qc/cleaned \
   --input raw=11111111-1111-1111-1111-111111111111
 ```
@@ -255,53 +317,6 @@ just test-e2e
 just test-all
 ```
 
-## What I Learned Building It
-
-I built OzzyDB because I wanted scientific data to carry its history more
-faithfully.
-
-Trying to use it for my own research made the next missing piece obvious:
-provenance is necessary, and it still leaves a hard semantic problem. If
-arbitrary scientific tools are allowed, the system also needs to understand what
-information is preserved, destroyed, assumed, or made more expensive to recover
-as data moves across formats, models, and representations.
-
-A CSV, an Arrow table, a pandas DataFrame, an R tibble, a Parquet file, and a
-domain-specific model object may contain overlapping scientific meaning. Moving
-between them changes what can be recovered. The path can be lossless, lossy,
-one-way, approximately reversible, cheap, expensive, or valid only under
-assumptions.
-
-OzzyDB currently records typed artifacts and typed transforms. The deeper system
-needs a richer graph of scientific meaning: what a transform preserves, what it
-forgets, what assumptions make it valid, and how a workflow should choose among
-competing paths.
-
-That is why I now think OzzyDB is one half of the tool I actually need.
-
-## Myco And The Longer Arc
-
-In parallel, I have been building [Myco](https://github.com/RileyLeff/myco), a
-language and compiler for declarative scientific models.
-
-OzzyDB is about proof by observation: artifacts, transforms, evidence, and
-provenance. Myco is about proof by construction: executable scientific
-structure, constraints, invertibility, overdetermination, lossiness, and
-workflow-specific compilation.
-
-I expect these projects to converge eventually, but I am intentionally avoiding
-that merger for now.
-
-Myco needs more time to develop its acausal, invertible core before every hard
-external operation becomes an opaque escape hatch. OzzyDB needs more time as a
-practical data and provenance layer. The shared future is probably a system
-where OzzyDB stores and verifies the evidence, while Myco supplies a richer type
-and process language for describing what scientific transformations mean.
-
-The destination is a substrate where scientific data can move without shedding
-its history at every step. For now, OzzyDB is the data layer: a working attempt
-to keep the recipes, artifacts, environments, and evidence attached.
-
 ## Architecture
 
 ```text
@@ -314,19 +329,6 @@ clients/
   python/          Python client
 frontend/          deferred relative to the v4 API/server work
 ```
-
-## Current Status
-
-The v4 server, API, CLI, and Python client rewrite is implemented. The active
-design baseline lives in:
-
-- `planning/v4/architecture.md`
-- `planning/v4/implementation_plan.md`
-- `planning/v4/WORKFLOW_STATE.md`
-- `planning/v4/soul.md`
-
-Older v3 planning docs are background only unless a v4 document points back to
-them.
 
 ## License
 
